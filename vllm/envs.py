@@ -281,6 +281,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_PPU_PROCESS_GROUP_TIMEOUT_M: int = 10
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
     VLLM_PPU_DISABLE_MOE_WNA16_CUDA: bool = False
@@ -764,6 +765,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Timeout in minutes for vLLM's torch.distributed.process_group
+    # PPU NOTE: If server timeout fail due to long dg warm-up time, recommend to set it to 20.
+    "VLLM_PPU_PROCESS_GROUP_TIMEOUT_M": lambda: int(
+        os.environ.get("VLLM_PPU_PROCESS_GROUP_TIMEOUT_M")
+        or os.environ.get("VLLM_SAIL_PROCESS_GROUP_TIMEOUT_M")
+        or os.environ.get("VLLM_PROCESS_GROUP_TIMEOUT_M")
+        or "10"
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
