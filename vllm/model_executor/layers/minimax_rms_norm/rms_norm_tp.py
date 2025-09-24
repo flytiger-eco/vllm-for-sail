@@ -23,7 +23,11 @@ logger = init_logger(__name__)
 # Larger batches fall back to the eager allreduce + RMSNorm path.
 MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
-_MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
+# Disable fused allreduce+RMSNorm kernel because cuda.bindings 13.x
+# cudaMalloc returns cudaErrorInvalidValue even with a valid CUDA context,
+# causing LamportWorkspace initialization to fail. Fall back to the pure
+# PyTorch allreduce + RMSNorm path which is functionally equivalent.
+_MINIMAX_FUSED_AR_RMS_QK = None
 
 
 def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
