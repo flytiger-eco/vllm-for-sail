@@ -24,6 +24,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 
 import contextlib
+import datetime
 import gc
 import pickle
 import weakref
@@ -334,15 +335,20 @@ class GroupCoordinator:
 
         self_device_group = None
         self_cpu_group = None
-
+        if envs.is_set("VLLM_SAIL_PROCESS_GROUP_TIMEOUT_M"):
+            timeout = datetime.timedelta(minutes=envs.VLLM_SAIL_PROCESS_GROUP_TIMEOUT_M)
+        else:
+            timeout = None  # default
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
+                ranks, timeout=timeout, backend=torch_distributed_backend
             )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks, timeout=timeout, backend="gloo"
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1421,6 +1427,8 @@ def init_distributed_environment(
             )
             backend = "gloo"
         # this backend is used for WORLD
+        if envs.is_set("VLLM_SAIL_PROCESS_GROUP_TIMEOUT_M"):
+            timeout = datetime.timedelta(minutes=envs.VLLM_SAIL_PROCESS_GROUP_TIMEOUT_M)
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
