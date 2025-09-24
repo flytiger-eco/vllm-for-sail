@@ -659,15 +659,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
-            _ = torch.empty(
-                (
-                    self.chunked_prefill_workspace_size,
-                    self.num_heads,
-                    self.qk_nope_head_dim + self.v_head_dim,
-                ),
-                device=k_c_normed.device,
-                dtype=k_c_normed.dtype,
-            )
+            # PPU FIXME: WA for deepseek dp + ep OOM on PPU, need investigate later.
+            if not current_platform.is_ppu():
+                _ = torch.empty(
+                    (
+                        self.chunked_prefill_workspace_size,
+                        self.num_heads,
+                        self.qk_nope_head_dim + self.v_head_dim,
+                    ),
+                    device=k_c_normed.device,
+                    dtype=k_c_normed.dtype,
+                )
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -2154,7 +2156,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+                # PPU FIXME: WA for assert fail when run dpsk-r1 int8 with acext
+                if _kv_b_proj_w_dtype != torch.int8:
+                    kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
