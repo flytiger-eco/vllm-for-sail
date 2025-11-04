@@ -742,6 +742,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
     )
     config = config.copy()
+    config["SPLIT_K"] = 1
     config.update(
         get_moe_wna16_block_config(
             config=config,
@@ -1096,7 +1097,11 @@ def zero_experts_compute_triton(
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 def get_config_file_name(
-    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+    E: int,
+    N: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+    use_moe_wna16_cuda: bool = False,
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     # Set device_name to H200 if a device from the H200 family is detected
@@ -1106,7 +1111,8 @@ def get_config_file_name(
     block_shape_selector = (
         "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
     ).replace(" ", "")
-    return f"E={E},N={N},device_name={device_name}{dtype_selector}{block_shape_selector}.json"  # noqa: E501
+    use_cuda_selector = "" if not use_moe_wna16_cuda else ",use_cuda=True"
+    return f"E={E},N={N},device_name={device_name}{dtype_selector}{block_shape_selector}{use_cuda_selector}.json"  # noqa: E501
 
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
@@ -1117,6 +1123,7 @@ def get_moe_configs(
     dtype: str | None,
     block_n: int | None = None,
     block_k: int | None = None,
+    use_moe_wna16_cuda: bool = False,
 ) -> dict[int, Any] | None:
     """
     Return optimized configurations for the fused MoE kernel.
@@ -1134,7 +1141,7 @@ def get_moe_configs(
     # First look up if an optimized configuration is available in the configs
     # directory
     block_shape = [block_n, block_k] if block_n and block_k else None
-    json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    json_file_name = get_config_file_name(E, N, dtype, block_shape, use_moe_wna16_cuda)
 
     config_file_paths = []
 
@@ -1275,12 +1282,22 @@ def get_moe_wna16_block_config(
             num_n_blocks = num_n_blocks // 2
             num_blocks = num_blocks // 2
 
-        if size_n <= 1024 and num_blocks >= 1024:
-            # The kernel performance got much better with BLOCK_SIZE_N=1024
-            # when num_blocks is large, event when N is small.
-            # Not sure why, maybe it force the CUDA SM process only one block
-            # at the same time.
-            block_size_n = 1024
+        if current_platform.is_ppu():
+            # size_k must divisible by BLOCK_SIZE_K
+            # BLOCK_SIZE_K must divisible by group_size
+            if size_k % block_size_k or block_size_k % group_size:
+                block_size_k = group_size
+
+            # BLOCK_SIZE_K // group_size must be one of [1, 2, 4, 8]
+            if block_size_k // group_size > 8:
+                block_size_k = group_size * 8
+        else:
+            if size_n <= 1024 and num_blocks >= 1024:
+                # The kernel performance got much better with BLOCK_SIZE_N=1024
+                # when num_blocks is large, event when N is small.
+                # Not sure why, maybe it force the CUDA SM process only one block
+                # at the same time.
+                block_size_n = 1024
 
         # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
@@ -1291,12 +1308,22 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
-    return (
-        current_platform.is_cuda()
-        and bit == 4
-        and group_size in [32, 64, 128]
-        and num_valid_tokens / num_experts <= 6
-    )
+    if envs.VLLM_PPU_DISABLE_MOE_WNA16_CUDA:
+        return False
+    if envs.VLLM_PPU_FORCE_MOE_WNA16_CUDA:
+        return True
+    if current_platform.is_ppu():
+        if bit == 4:
+            return group_size in [32, 64, 128] and num_valid_tokens / num_experts <= 32
+        else:
+            return group_size in [32, 64, 128] and num_valid_tokens / num_experts <= 3
+    else:
+        return (
+            current_platform.is_cuda()
+            and bit == 4
+            and group_size in [32, 64, 128]
+            and num_valid_tokens / num_experts <= 6
+        )
 
 
 def get_default_config(
@@ -1419,7 +1446,20 @@ def try_get_optimal_moe_config(
             N = N * 2
         block_n = block_shape[0] if block_shape else 0
         block_k = block_shape[1] if block_shape else 0
-        configs = get_moe_configs(E, N, dtype, block_n, block_k)
+
+        if (
+            current_platform.is_ppu()
+            and dtype in ["int4_w4a16", "int8_w8a16"]
+            and block_shape is not None
+            and should_moe_wna16_use_cuda(
+                M * top_k, block_shape[1], E, 4 if dtype == "int4_w4a16" else 8
+            )
+        ):
+            configs = get_moe_configs(
+                E, N, dtype, block_n, block_k, use_moe_wna16_cuda=True
+            )
+        else:
+            configs = get_moe_configs(E, N, dtype, block_n, block_k)
 
         if configs:
             # If an optimal configuration map has been found, look up the
