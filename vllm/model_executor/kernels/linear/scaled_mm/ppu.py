@@ -176,8 +176,8 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # check acext
         if (
             (acext_int8_gemm_kernel is not None)
-            and (not envs.VLLM_PPU_DENSE_BACKEND
-                 or envs.VLLM_PPU_DENSE_BACKEND == "acext")
+            and (not envs.VLLM_SAIL_DENSE_BACKEND
+                 or envs.VLLM_SAIL_DENSE_BACKEND == "acext")
             and current_platform.is_device_capability((8, 0))
         ):
             self.use_acext_int8_gemm = True
@@ -185,8 +185,8 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # check deepgemm
         if (
             is_deep_gemm_supported()
-            and (not envs.VLLM_PPU_DENSE_BACKEND
-                 or envs.VLLM_PPU_DENSE_BACKEND == "deep_gemm")
+            and (not envs.VLLM_SAIL_DENSE_BACKEND
+                 or envs.VLLM_SAIL_DENSE_BACKEND == "deep_gemm")
         ):
             self.use_deepgemm_int8_gemm = True
 

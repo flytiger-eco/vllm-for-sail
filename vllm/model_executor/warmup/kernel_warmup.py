@@ -47,10 +47,10 @@ def kernel_warmup(worker: "Worker"):
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
         and is_deep_gemm_supported()
         and
-        ((not envs.VLLM_PPU_MOE_BACKEND or
-         envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
-         or (not envs.VLLM_PPU_DENSE_BACKEND or
-         envs.VLLM_PPU_DENSE_BACKEND == "deepgemm")
+        ((not envs.VLLM_SAIL_MOE_BACKEND or
+         envs.VLLM_SAIL_MOE_BACKEND == "deepgemm")
+         or (not envs.VLLM_SAIL_DENSE_BACKEND or
+         envs.VLLM_SAIL_DENSE_BACKEND == "deepgemm")
         )
     )
     if do_ppu_deep_gemm_warmup:

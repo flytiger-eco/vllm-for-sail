@@ -204,7 +204,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
-    if envs.VLLM_PPU_DENSE_BACKEND and envs.VLLM_PPU_DENSE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_DENSE_BACKEND and envs.VLLM_SAIL_DENSE_BACKEND != "deepgemm":
         return False
 
     # FIXME: this logic is brittle and incorrect - since we
@@ -233,7 +233,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
         return False
 
     if not isinstance(module, FusedMoE):
@@ -431,7 +431,7 @@ def _int8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
-    if envs.VLLM_PPU_DENSE_BACKEND and envs.VLLM_PPU_DENSE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_DENSE_BACKEND and envs.VLLM_SAIL_DENSE_BACKEND != "deepgemm":
         return False
 
     if not (
@@ -450,7 +450,7 @@ def _int8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm_int8(module: torch.nn.Module) -> bool:
-    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
         return False
 
     if not isinstance(module, FusedMoE):
@@ -583,7 +583,7 @@ def deepgemm_grouped_int8_gemm_nt_contiguous_warmup(
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm_bf16(module: torch.nn.Module) -> bool:
-    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
         return False
 
     if not isinstance(module, FusedMoE):
@@ -684,7 +684,7 @@ GROUPED_FP4_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm_fp4(module: torch.nn.Module) -> bool:
-    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
         return False
 
     if not isinstance(module, FusedMoE):
@@ -709,7 +709,7 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm_fp4_masked(
     module: torch.nn.Module,
 ) -> bool:
     """Return True when the module will use the masked fp4 GEMM (EP path)."""
-    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
         return False
 
     if not isinstance(module, FusedMoE):
