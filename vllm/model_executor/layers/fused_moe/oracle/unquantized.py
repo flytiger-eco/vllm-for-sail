@@ -321,14 +321,14 @@ def select_unquantized_moe_backend(
     # PPU FIXME: may need to call acext API to check availability.
     Acext_moe_enabled = (
         is_acext_supported()
-        and (not envs.VLLM_PPU_MOE_BACKEND
-             or envs.VLLM_PPU_MOE_BACKEND == "acext")
+        and (not envs.VLLM_SAIL_MOE_BACKEND
+             or envs.VLLM_SAIL_MOE_BACKEND == "acext")
         and activation_format == mk.FusedMoEActivationFormat.Standard
     )
     PPU_DeepGemm_moe_enabled = (
         is_deep_gemm_supported()
-        and (not envs.VLLM_PPU_MOE_BACKEND
-            or envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
+        and (not envs.VLLM_SAIL_MOE_BACKEND
+            or envs.VLLM_SAIL_MOE_BACKEND == "deepgemm")
         and not moe_config.has_bias
     )
     if not PPU_DeepGemm_moe_enabled or moe_config.has_bias:

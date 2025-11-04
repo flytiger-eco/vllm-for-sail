@@ -398,8 +398,8 @@ def select_fp8_moe_backend(
             )
 
     # Handle explicit DeepGEMM FP8 configuration.
-    if envs.is_set("VLLM_PPU_MOE_BACKEND"):
-        if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.is_set("VLLM_SAIL_MOE_BACKEND"):
+        if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.PPU_DEEPGEMM)
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_PPU_DEEPGEMM)
         else:

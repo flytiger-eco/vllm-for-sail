@@ -592,7 +592,7 @@ def ep_gather(
         logger.warning_once(
             f"hidden_size ({hidden_size}) is not divisible by BLOCK_D ({BLOCK_D}), "
             f"falling back to BLOCK_D={BLOCK_D // 2} which may result in degraded "
-            f"MoE kernel accuracy or performance. Consider setting VLLM_PPU_MOE_BACKEND "
+            f"MoE kernel accuracy or performance. Consider setting VLLM_SAIL_MOE_BACKEND "
             f"to use the Triton / Acext MoE backend for this model instead.",
         )
         BLOCK_D = BLOCK_D // 2

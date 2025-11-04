@@ -712,8 +712,8 @@ def should_use_deepgemm_for_fp8_linear(
     weight_shape: tuple[int, int],
     supports_deep_gemm: bool | None = None,
 ):
-    if (envs.VLLM_PPU_DENSE_BACKEND
-        and envs.VLLM_PPU_DENSE_BACKEND != "deepgemm"):
+    if (envs.VLLM_SAIL_DENSE_BACKEND
+        and envs.VLLM_SAIL_DENSE_BACKEND != "deepgemm"):
         return False
 
     if supports_deep_gemm is None:

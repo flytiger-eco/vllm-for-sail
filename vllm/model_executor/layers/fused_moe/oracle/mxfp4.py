@@ -368,8 +368,8 @@ def select_gpt_oss_mxfp4_moe_backend(
     AVAILABLE_BACKENDS = _get_priority_backends_for_gpt_oss()
 
     # Handle explicit PPU DeepGEMM MXFP4 configuration.
-    if envs.is_set("VLLM_PPU_MOE_BACKEND"):
-        if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+    if envs.is_set("VLLM_SAIL_MOE_BACKEND"):
+        if envs.VLLM_SAIL_MOE_BACKEND and envs.VLLM_SAIL_MOE_BACKEND != "deepgemm":
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4)
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4)
         else:
