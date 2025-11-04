@@ -283,6 +283,8 @@ if TYPE_CHECKING:
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
+    VLLM_PPU_DISABLE_MOE_WNA16_CUDA: bool = False
+    VLLM_PPU_FORCE_MOE_WNA16_CUDA: bool = False
 
 
 def get_default_cache_root():
@@ -2010,6 +2012,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "acext",
             "triton",
         ],
+    ),
+    # Disable MoE wna16 cuda kernel on PPU
+    "VLLM_PPU_DISABLE_MOE_WNA16_CUDA": lambda: (
+        os.getenv("VLLM_PPU_DISABLE_MOE_WNA16_CUDA", "False").strip().lower()
+        in ("true", "1")
+    ),
+    # Always use MoE wna16 cuda kernel on PPU
+    "VLLM_PPU_FORCE_MOE_WNA16_CUDA": lambda: (
+        os.getenv("VLLM_PPU_FORCE_MOE_WNA16_CUDA", "False").strip().lower()
+        in ("true", "1")
     ),
 }
 
