@@ -33,6 +33,7 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
         for num_stages in [2, 3, 4, 5]
     ],
     key=["BT"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def solve_tril_16x16_kernel(
@@ -108,6 +109,7 @@ def solve_tril_16x16_kernel(
         for num_stages in [2, 3, 4, 5]
     ],
     key=["H", "BT", "IS_VARLEN"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_32x32_inverse_kernel(
@@ -233,6 +235,7 @@ def merge_16x16_to_32x32_inverse_kernel(
         for num_stages in [2, 3, 4, 5]
     ],
     key=["H", "BT", "IS_VARLEN"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_64x64_inverse_kernel(
