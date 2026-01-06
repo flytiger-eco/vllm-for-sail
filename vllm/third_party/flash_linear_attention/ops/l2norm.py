@@ -23,6 +23,7 @@ USE_DEFAULT_FLA_NORM = int(os.getenv("USE_DEFAULT_FLA_NORM", "0"))
         triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16, 32]
     ],
     key=["D"],
+    cache_results=True,
 )
 @triton.jit
 def l2norm_fwd_kernel1(
@@ -54,6 +55,7 @@ def l2norm_fwd_kernel1(
         for BT in BT_LIST
     ],
     key=["D"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["NB"])
 def l2norm_fwd_kernel(

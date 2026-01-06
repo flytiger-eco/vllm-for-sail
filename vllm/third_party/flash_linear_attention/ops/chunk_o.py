@@ -37,6 +37,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V", "BT"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
