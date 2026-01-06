@@ -24,6 +24,7 @@ from .index import prepare_chunk_indices
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(

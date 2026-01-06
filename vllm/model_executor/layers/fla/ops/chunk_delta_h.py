@@ -38,6 +38,7 @@ NUM_WARPS = [2, 4, 8, 16]
     ],
     key=["H", "K", "V", "BT"],
     use_cuda_graph=use_cuda_graph,
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
