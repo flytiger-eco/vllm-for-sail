@@ -22,6 +22,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
     key=["B", "H", "BT", "IS_VARLEN", "REVERSE"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_scalar_kernel(
@@ -79,6 +80,7 @@ def chunk_local_cumsum_scalar_kernel(
         for num_warps in [2, 4, 8]
     ],
     key=["B", "H", "S", "BT", "IS_VARLEN", "REVERSE"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_vector_kernel(

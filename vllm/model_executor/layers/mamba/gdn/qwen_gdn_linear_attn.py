@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fla.ops import (
     fused_post_conv_prep,
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
+    fused_recurrent_gated_delta_rule_decode,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
@@ -1398,6 +1399,45 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_decodes > 0
         )
         num_decode_tokens = attn_metadata.num_decode_tokens
+        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
+            mixed_qkv_non_spec
+        )
+
+        use_fused_decode_path = (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 15
+            and query_non_spec is not None
+            and key_non_spec is not None
+            and value_non_spec is not None
+            and non_spec_query_start_loc is not None
+            and non_spec_state_indices_tensor is not None
+            and envs.VLLM_PPU_FUSED_GDN_DECODE
+            and current_platform.is_ppu()
+        )
+
+        if use_fused_decode_path:
+            (
+                core_attn_out_non_spec,
+                _,
+            ) = fused_recurrent_gated_delta_rule_decode(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                A_log=self.A_log,
+                a=a,
+                b=b,
+                dt_bias=self.dt_bias,
+                scale=None,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                ssm_state_indices=non_spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
+                use_qk_l2norm_in_kernel=True,
+            )
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            return
 
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
