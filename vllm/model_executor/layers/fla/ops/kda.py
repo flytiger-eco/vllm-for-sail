@@ -516,6 +516,7 @@ class FusedRMSNormGated(CustomOp):
         for num_stages in [2, 3, 4]
     ],
     key=["BC"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
@@ -622,6 +623,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
     key=["BK", "BT"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
@@ -812,6 +814,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def recompute_w_u_fwd_kernel(
@@ -1014,6 +1017,7 @@ def recompute_w_u_fwd(
         for num_stages in [2, 3, 4]
     ],
     key=["BT"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_gla_fwd_kernel_o(
@@ -1536,6 +1540,7 @@ def chunk_kda_with_fused_gate(
         for ns in [2, 3]
     ],
     key=["H", "D"],
+    cache_results=True,
 )
 @triton.jit
 def kda_gate_fwd_kernel(
