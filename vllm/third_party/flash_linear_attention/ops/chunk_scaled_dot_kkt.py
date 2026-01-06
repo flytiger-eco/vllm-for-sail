@@ -42,6 +42,7 @@ if current_platform.is_rocm():
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "BT", "IS_VARLEN"],
+    cache_results=True,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
