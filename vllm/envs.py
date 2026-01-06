@@ -297,6 +297,7 @@ if TYPE_CHECKING:
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
+    VLLM_PPU_FUSED_GDN_DECODE: bool = True
 
 
 def get_default_cache_root():
@@ -2049,6 +2050,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "acext",
             "triton",
         ],
+    ),
+    # Use fused GDN kernel like SGL
+    "VLLM_PPU_FUSED_GDN_DECODE": lambda: (
+        os.getenv("VLLM_PPU_FUSED_GDN_DECODE", "True").strip().lower() in ("true", "1")
     ),
 }
 
