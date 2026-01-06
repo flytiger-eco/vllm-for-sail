@@ -267,6 +267,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_ENABLE_MOE_MARLIN: bool = False
+    VLLM_SAIL_FUSED_GDN_DECODE: bool = True
 
 
 def get_default_cache_root():
@@ -1808,6 +1809,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_ENABLE_MOE_MARLIN": lambda: (
         os.getenv("VLLM_SAIL_ENABLE_MOE_MARLIN", "").strip().lower() in ("true", "1")
         or os.getenv("VLLM_PPU_ENABLE_MOE_MARLIN", "").strip().lower() in ("true", "1")
+    ),
+    # Use fused GDN kernel like SGL
+    "VLLM_SAIL_FUSED_GDN_DECODE": lambda: (
+        os.getenv("VLLM_SAIL_FUSED_GDN_DECODE",
+                  os.getenv("VLLM_PPU_FUSED_GDN_DECODE", "true")
+        ).strip().lower() in ("true", "1")
     ),
 }
 
