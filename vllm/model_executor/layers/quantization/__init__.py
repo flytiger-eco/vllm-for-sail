@@ -32,6 +32,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
+    "mixed_precision_w4",
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
     "cpu_awq",
@@ -138,6 +139,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
+    from .mixed_precision_w4 import MixedPrecisionW4Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
 
@@ -164,6 +166,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mixed_precision_w4": MixedPrecisionW4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
         "cpu_awq": CPUAWQConfig,
