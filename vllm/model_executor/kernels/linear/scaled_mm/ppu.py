@@ -15,6 +15,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    per_token_group_quant_int8,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -286,9 +289,19 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
-        x_q, x_s, x_zp = ops.scaled_int8_quant(
-            x.contiguous(), i_s, i_zp, symmetric=symmetric
-        )
+        if symmetric and (i_s is None) and envs.VLLM_SAIL_USE_TRITON_INT8_QUANT:
+            x_q, x_s = per_token_group_quant_int8(
+                x.contiguous(),
+                x.shape[-1],
+                dtype=torch.int8,
+                use_triton=True,
+                use_rounding=True,
+            )
+            x_zp = None
+        else:
+            x_q, x_s, x_zp = ops.scaled_int8_quant(
+                x.contiguous(), i_s, i_zp, symmetric=symmetric
+            )
 
         if x_zp is not None:
             # Currently, static is always per-tensor and dynamic is per-token
