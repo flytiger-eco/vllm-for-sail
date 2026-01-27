@@ -137,6 +137,7 @@ def _per_token_group_quant_int8(
     int8_max,
     # Meta-parameters
     BLOCK: tl.constexpr,
+    use_rounding: tl.constexpr = False,
 ):
     """A Triton-accelerated function to perform per-token-group
     quantization on a tensor.
@@ -156,7 +157,11 @@ def _per_token_group_quant_int8(
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     y_s = _absmax / int8_max
-    y_q = tl.clamp(y / y_s, int8_min, int8_max).to(y_q_ptr.dtype.element_ty)
+    if use_rounding:
+        clamp_val = tl.clamp(y / y_s, int8_min, int8_max)
+        y_q = tl.extra.cuda.libdevice.round(clamp_val).to(y_q_ptr.dtype.element_ty)
+    else:
+        y_q = tl.clamp(y / y_s, int8_min, int8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
     tl.store(y_s_ptr, y_s)
@@ -167,6 +172,8 @@ def per_token_group_quant_int8(
     group_size: int,
     eps: float = 1e-10,
     dtype: torch.dtype = torch.int8,
+    use_triton: bool = False,
+    use_rounding: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
 
@@ -199,8 +206,8 @@ def per_token_group_quant_int8(
         device=x.device,
         dtype=torch.float32,
     )
-    # Prefer native stable kernel on CUDA/ROCm when available.
-    if current_platform.is_cuda_alike():
+    # Prefer native stable kernel on CUDA/ROCm/PPU when available.
+    if (not use_triton) and (current_platform.is_cuda_alike() or current_platform.is_ppu()):
         torch.ops._C.per_token_group_quant_int8(
             x, x_q, x_s, group_size, eps, float(int8_min), float(int8_max)
         )
@@ -211,7 +218,8 @@ def per_token_group_quant_int8(
 
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
-    num_warps = min(max(BLOCK // 256, 1), 8)
+    # num_warps = min(max(BLOCK // 256, 1), 8)
+    num_warps = 2
     num_stages = 1
     _per_token_group_quant_int8[(M,)](
         x,
@@ -225,6 +233,7 @@ def per_token_group_quant_int8(
         BLOCK=BLOCK,
         num_warps=num_warps,
         num_stages=num_stages,
+        use_rounding=use_rounding,
     )
 
     return x_q, x_s
