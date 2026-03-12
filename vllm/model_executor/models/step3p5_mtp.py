@@ -278,7 +278,17 @@ class Step3p5MTP(nn.Module):
         optional_params = {
             name
             for name, param in params_dict.items()
-            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale"))
+            if name.endswith(
+                (
+                    ".k_scale",
+                    ".v_scale",
+                    ".q_scale",
+                    ".prob_scale",
+                    ".k_zero_point",
+                    ".v_zero_point",
+                    ".q_zero_point",
+                )
+            )
             and getattr(param, "numel", lambda: 0)() == 1
             and getattr(param, "requires_grad", False) is False
         }

@@ -138,13 +138,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
-        quant_config = vllm_config.quant_config
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -362,12 +362,16 @@ class Qwen3MoeAttention(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -398,7 +402,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
             self.mlp = Qwen3MoeSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                quant_config=quant_config,
             )
         else:
             self.mlp = Qwen3MoeMLP(
@@ -462,9 +468,29 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
+        quant_cfg = getattr(self.config, "quantization_config", None)
+        mix_layer: list[int] = []
+        if quant_cfg is not None:
+            # quantization_config may be a dict-like or an object
+            if hasattr(quant_cfg, "get"):
+                try:
+                    mix_layer = quant_cfg.get("mix_layer") or []
+                except Exception:
+                    mix_layer = []
+            else:
+                mix_layer = getattr(quant_cfg, "mix_layer", []) or []
+
+        def create_layer(prefix: str):
+            layer_idx = extract_layer_index(prefix)
+            per_layer_qcfg = None if layer_idx in mix_layer else quant_config
+            # FIXME: deep copy vllm config cause OOM usually, here add quant_config params to WA
+            return Qwen3MoeDecoderLayer(
+                vllm_config=vllm_config, quant_config=per_layer_qcfg, prefix=prefix
+            )
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer_type(vllm_config=vllm_config, prefix=prefix),
+            create_layer,
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
