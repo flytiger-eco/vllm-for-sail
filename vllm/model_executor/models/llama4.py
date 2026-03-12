@@ -71,6 +71,7 @@ logger = init_logger(__name__)
 
 class Llama4MoE(nn.Module):
     @staticmethod
+    @torch.compile
     def custom_routing_function(
         hidden_states: torch.Tensor,
         gating_output: torch.Tensor,
