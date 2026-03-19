@@ -362,6 +362,10 @@ def check_moe_marlin_supports_layer(
     straddling the padded boundary stays unsupported. hidden_size is the MoE
     I/O extent and is never padded. Act-order keeps the strict shape.
     """
+    if current_platform.is_ppu() and not envs.VLLM_PPU_ENABLE_MOE_MARLIN:
+        return False
+
+
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
