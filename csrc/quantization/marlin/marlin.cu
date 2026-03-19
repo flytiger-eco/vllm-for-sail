@@ -25,6 +25,7 @@
 
 #include "kernel.h"
 #include "core/registration.h"
+#include <cstdlib>
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
@@ -487,6 +488,24 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
         ", stages = ", stages, ", max_shared_mem_new = ", max_shared_mem_new);
 
+    if (std::getenv("SAIL_MARLIN_GEMM_PRINT_CONFIG"))
+      std::cout << "thread config:"
+                << " m_block_size_8 = " << m_block_size_8
+                << ", thread_m_blocks = " << thread_m_blocks
+                << ", thread_k = " << thread_tfg.thread_k
+                << ", thread_n = " << thread_tfg.thread_n
+                << ", num_threads = " << thread_tfg.num_threads
+                << ", blocks_per_sm = " << exec_cfg.blocks_per_sm
+                << " for MKN = [" << prob_m << ", " << prob_k << ", " << prob_n
+                << "] and num_bits = " << num_bits
+                << ", prob_m_split = " << prob_m_split
+                << ", group_size = " << group_size
+                << ", has_act_order = " << has_act_order
+                << ", is_k_full = " << is_k_full << ", has_zp = " << has_zp
+                << ", is_zp_float = " << is_zp_float
+                << ", max_shared_mem_new = " << max_shared_mem_new
+                << ", sms = " << sms << std::endl;
+
     auto kernel = get_marlin_kernel(
         a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
         thread_k_blocks, m_block_size_8, has_act_order, has_zp, group_blocks,
@@ -662,7 +681,15 @@ torch::Tensor marlin_gemm(
   int thread_n = -1;
   // sms: number of SMs to use for the kernel
   int sms = -1;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, a.get_device());
+  std::string deviceName(deviceProp.name);
+  if (deviceName.find("ZW810E") != std::string::npos) {
+    sms = 20;
+  } else {
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
+                           a.get_device());
+  }
 
   // Alloc buffers
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
