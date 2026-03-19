@@ -285,6 +285,7 @@ if TYPE_CHECKING:
     VLLM_PPU_FUSED_GDN_DECODE: bool = True
     VLLM_PPU_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_PPU_FORCE_MOE_WNA16_CUDA: bool = False
+    VLLM_PPU_ENABLE_MOE_MARLIN: bool = False
 
 
 def get_default_cache_root():
@@ -1973,6 +1974,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Always use MoE wna16 cuda kernel on PPU
     "VLLM_PPU_FORCE_MOE_WNA16_CUDA": lambda: (
         os.getenv("VLLM_PPU_FORCE_MOE_WNA16_CUDA", "False").strip().lower()
+        in ("true", "1")
+    ),
+    # Enable MoE Marlin
+    "VLLM_PPU_ENABLE_MOE_MARLIN": lambda: (
+        os.getenv("VLLM_PPU_ENABLE_MOE_MARLIN", "False").strip().lower()
         in ("true", "1")
     ),
 }

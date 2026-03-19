@@ -331,6 +331,9 @@ def check_marlin_supports_layer(
 
 
 def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+    if current_platform.is_ppu() and not envs.VLLM_PPU_ENABLE_MOE_MARLIN:
+        return False
+
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
