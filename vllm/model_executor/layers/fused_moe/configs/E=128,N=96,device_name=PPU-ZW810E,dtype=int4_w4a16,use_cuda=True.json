@@ -1,0 +1,249 @@
+{
+    "1": {
+        "BLOCK_SIZE_M": 1,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "BLOCK_SIZE_M": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 1
+        }
+    },
+    "2": {
+        "BLOCK_SIZE_M": 1,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "BLOCK_SIZE_M": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 1
+        }
+    },
+    "4": {
+        "BLOCK_SIZE_M": 1,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 1
+        }
+    },
+    "8": {
+        "BLOCK_SIZE_M": 1,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 1
+        }
+    },
+    "16": {
+        "BLOCK_SIZE_M": 2,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 2
+        }
+    },
+    "24": {
+        "BLOCK_SIZE_M": 2,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 2
+        }
+    },
+    "32": {
+        "BLOCK_SIZE_M": 4,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "BLOCK_SIZE_M": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 4
+        }
+    },
+    "48": {
+        "BLOCK_SIZE_M": 4,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 4
+        }
+    },
+    "64": {
+        "BLOCK_SIZE_M": 4,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 4
+        }
+    },
+    "96": {
+        "BLOCK_SIZE_M": 4,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 4
+        }
+    },
+    "128": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "256": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "512": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "1024": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "1536": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "2048": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "3072": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "4096": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    },
+    "8192": {
+        "BLOCK_SIZE_M": 8,
+        "UP": {
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 256,
+            "BLOCK_SIZE_M": 8
+        },
+        "DOWN": {
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 8
+        }
+    }
+}
