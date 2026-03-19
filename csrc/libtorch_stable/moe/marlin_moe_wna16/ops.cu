@@ -31,6 +31,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/Exception.h>
+#include <cstdlib>
 
 #include "libtorch_stable/torch_utils.h"
 
@@ -317,6 +318,9 @@ exec_config_t determine_exec_config(
 
     if (kernel == MarlinDefault) continue;
 
+    if (std::getenv("PPU_SDK")) {
+      return {1, th_config};
+    }
     cudaFuncAttributes attr;
     cudaFuncGetAttributes(&attr, kernel);
     int reg_size = max(attr.numRegs, 1) * th_config.num_threads * 4;
@@ -506,6 +510,23 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       ", is_k_full = ", is_k_full, ", has_zp = ", has_zp,
       ", is_zp_float = ", is_zp_float, ", max_shared_mem = ", max_shared_mem);
 
+  if (std::getenv("SAIL_MARLIN_MOE_PRINT_CONFIG"))
+    std::cout << "thread config:"
+              << " m_block_size_8 = " << m_block_size_8
+              << ", thread_m_blocks = " << thread_m_blocks
+              << ", thread_k = " << thread_tfg.thread_k
+              << ", thread_n = " << thread_tfg.thread_n
+              << ", num_threads = " << thread_tfg.num_threads
+              << ", blocks_per_sm = " << exec_cfg.blocks_per_sm
+              << " for MKN = [" << prob_m << ", " << prob_k << ", " << prob_n
+              << "] and num_bits = " << num_bits
+              << ", group_size = " << group_size
+              << ", has_act_order = " << has_act_order
+              << ", is_k_full = " << is_k_full << ", has_zp = " << has_zp
+              << ", is_zp_float = " << is_zp_float
+              << ", max_shared_mem = " << max_shared_mem << ", sms = " << sms
+              << std::endl;
+
   int sh_cache_size =
       get_kernel_cache_size(thread_tfg, m_block_size_8, thread_m_blocks, prob_m,
                             prob_n, prob_k, num_bits, group_size, has_act_order,
@@ -685,7 +706,15 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
 
   // sms: number of SMs to use for the kernel
   int sms = -1;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, a.get_device());
+  std::string deviceName(deviceProp.name);
+  if (deviceName.find("ZW810E") != std::string::npos) {
+    sms = 20;
+  } else {
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,
+                           a.get_device());
+  }
 
   // Alloc buffers
   torch::stable::accelerator::DeviceGuard device_guard(a.get_device_index());
