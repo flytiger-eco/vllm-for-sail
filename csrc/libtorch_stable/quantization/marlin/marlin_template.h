@@ -193,7 +193,9 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
   __syncthreads();
   if (threadIdx.x == 0) {
     if (reset) {
-      lock[0] = 0;
+      // PPU NOTE: use __stcg to ensure ld.global.acquire.gpu.b32
+      // can read new value
+      __stcg(&lock[0], 0);
       return;
     }
     int val = 1;
@@ -240,7 +242,7 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
                                    // with a separate quantization scale
           const bool is_zp_float   // is zero point of float16 type?
           >
-__global__ void Marlin(
+__global__ __launch_bounds__(threads) void Marlin(
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,   // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C0,        // fp16 output buffer of shape mxn
@@ -472,7 +474,11 @@ __global__ void Marlin(
       // the negative value, and then atomicAdd 1 to it.
       // After all SMs are processed, the lock value would back to 0 again.
       __syncthreads();
-      if (threadIdx.x == 0) locks[locks_off] = 1 - slice_count;
+      if (threadIdx.x == 0) {
+        // PPU NOTE: use __stcg to ensure ld.global.acquire.gpu.b32
+        // can read new value
+        __stcg(&locks[locks_off], 1 - slice_count);
+      }
     }
 
     if (slice_col == n_tiles) {
