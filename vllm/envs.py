@@ -281,6 +281,8 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_PPU_MOE_BACKEND: str | None = None
+    VLLM_PPU_DENSE_BACKEND: str | None = None
 
 
 def get_default_cache_root():
@@ -1979,6 +1981,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # PPU MoE Group Gemm backend
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm group GEMM backend
+    # - "acext": use acext group GEMM backend
+    # - "triton": use triton group GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_PPU_MOE_BACKEND": env_with_choices(
+        "VLLM_PPU_MOE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+    ),
+    # PPU Dense Gemm backend for quantization
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm dense GEMM backend
+    # - "acext": use acext dense GEMM backend
+    # - "triton": use triton dense GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_PPU_DENSE_BACKEND": env_with_choices(
+        "VLLM_PPU_DENSE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+    ),
 }
 
 

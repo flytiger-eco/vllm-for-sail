@@ -66,7 +66,11 @@ elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin"))
     )
     VLLM_TARGET_DEVICE = "empty"
 elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
-    if torch.version.hip is not None:
+    # Check PPU before CUDA since PPU devices also appear as CUDA
+    if os.environ.get("PPU_SDK") is not None and torch.version.cuda is not None:
+        VLLM_TARGET_DEVICE = "ppu"
+        logger.info("Auto-detected PPU")
+    elif torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
     elif torch.version.xpu is not None:
@@ -186,7 +190,7 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and CUDA_HOME is not None:
+        if (_is_cuda() or _is_ppu()) and CUDA_HOME is not None:
             try:
                 nvcc_version = get_nvcc_cuda_version()
                 if nvcc_version >= Version("11.2"):
@@ -288,6 +292,15 @@ class cmake_build_ext(build_ext):
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
+        if _is_ppu():
+            PPU_HOME = os.environ.get("PPU_SDK", None)
+            if not PPU_HOME:
+                raise RuntimeError("PPU runtime environment need setup PPU_SDK.")
+            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            cmake_args += [f"-DPPU_SDK={PPU_HOME}"]
+            cmake_args += [f"-DUSE_PPU=1"]
+            cmake_args += [f"-DUSE_SAIL=1"]
+
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
@@ -380,7 +393,7 @@ class cmake_build_ext(build_ext):
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
-        if _is_cuda() or _is_hip():
+        if _is_cuda() or _is_hip() or _is_ppu():
             # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib
             # to current directory so that they can be included in the editable
             # build
@@ -887,8 +900,12 @@ def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
 
+def _is_ppu() -> bool:
+    return VLLM_TARGET_DEVICE == "ppu"
+
+
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip()
+    return _is_cuda() or _is_hip() or _is_ppu()
 
 
 def get_rocm_version():
@@ -954,7 +971,7 @@ def get_vllm_version() -> str:
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
-    elif _is_cuda():
+    elif _is_cuda() or _is_ppu():
         if USE_PRECOMPILED_EXTENSIONS and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
             version += f"{sep}precompiled"
         else:
@@ -1021,6 +1038,8 @@ def get_requirements() -> list[str]:
                 req = req.replace("humming-kernels[cu13]", "humming-kernels[cu12]")
             modified_requirements.append(req)
         requirements = modified_requirements
+    elif _is_ppu():
+        requirements = _read_requirements("ppu.txt")
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_tpu():
@@ -1036,7 +1055,7 @@ def get_requirements() -> list[str]:
 
 ext_modules = []
 
-if _is_cuda() or _is_hip():
+if _is_cuda() or _is_hip() or _is_ppu():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
     # Optional since this doesn't get built (produce an .so file). This is just
@@ -1089,7 +1108,7 @@ if _is_cpu():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-    if _is_cuda() or _is_hip():
+    if _is_cuda() or _is_hip() or _is_ppu():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {

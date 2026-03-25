@@ -45,7 +45,7 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda():
+if current_platform.is_cuda() and not current_platform.is_ppu():
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (

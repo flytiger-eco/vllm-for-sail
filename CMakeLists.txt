@@ -50,7 +50,15 @@ if(NOT DEFINED ROCM_PATH)
 else()
   set(ROCM_PATH ${ROCM_PATH} CACHE PATH "ROCm installation prefix" FORCE)
 endif()
-#
+
+# PPU installation prefix. Default to /usr/local/PPU_SDK but allow override via
+# -DPPU_SDK=/your/ppu/path when invoking cmake.
+if (NOT DEFINED PPU_SDK)
+  set(PPU_SDK "/usr/local/PPU_SDK" CACHE PATH "PPU installation prefix")
+else()
+  set(PPU_SDK ${PPU_SDK} CACHE PATH "PPU installation prefix" FORCE)
+endif()
+
 # Supported/expected torch versions for CUDA/ROCm.
 #
 # Currently, having an incorrect pytorch version results in a warning
@@ -131,7 +139,8 @@ define_extension_target(
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "ppu")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     else()
@@ -1291,11 +1300,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 # For CUDA we also build and ship some external projects.
-if (VLLM_GPU_LANG STREQUAL "CUDA")
+if (VLLM_GPU_LANG STREQUAL "CUDA" AND VLLM_TARGET_DEVICE STREQUAL "gpu")
     include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
-
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
