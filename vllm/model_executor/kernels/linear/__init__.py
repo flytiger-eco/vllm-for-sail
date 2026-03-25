@@ -318,6 +318,10 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
         TritonInt8ScaledMMLinearKernel,
         HummingInt8ScaledMMLinearKernel,
     ],
+    PlatformEnum.PPU: [
+        CutlassInt8ScaledMMLinearKernel,
+        TritonInt8ScaledMMLinearKernel,
+    ],
     PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
 }
 
@@ -330,6 +334,12 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         HummingFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.PPU: [
+        FlashInferFP8ScaledMMLinearKernel,
+        CutlassFP8ScaledMMLinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
@@ -363,6 +373,10 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         TritonFp8BlockScaledMMKernel,
         HummingFP8ScaledMMLinearKernel,
     ],
+    PlatformEnum.PPU: [
+        MarlinFP8ScaledMMLinearKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
     PlatformEnum.ROCM: [
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
@@ -390,6 +404,9 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
     PlatformEnum.XPU: [
         XPUW8A16FP8LinearKernel,
     ],
+    PlatformEnum.PPU: [
+        # To be added
+    ],
 }
 
 # in priority/performance order (when available)
@@ -403,6 +420,14 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         ExllamaLinearKernel,
         TritonW4A16LinearKernel,
         HummingLinearKernel,
+    ],
+    PlatformEnum.PPU: [
+        CutlassW4A8LinearKernel,
+        MacheteLinearKernel,
+        AllSparkLinearKernel,
+        MarlinLinearKernel,
+        ConchLinearKernel,
+        ExllamaLinearKernel,
     ],
     PlatformEnum.ROCM: [
         RDNA3W4A16LinearKernel,
@@ -431,6 +456,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,
     ],
+    PlatformEnum.PPU: [
+        # To be added
+    ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
@@ -457,6 +485,9 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FbgemmNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+    ],
+    PlatformEnum.PPU: [
+        # To be added
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
