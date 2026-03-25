@@ -128,6 +128,47 @@ def rocm_platform_plugin() -> str | None:
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
+def ppu_platform_plugin() -> str | None:
+    is_ppu = False
+    logger.debug("Checking if PPU platform is available.")
+    # PPU FIXME:
+    # here we re-use cuda path, this is temporary;
+    # Add PPU-specific device detection
+
+    try:
+        from vllm.utils.import_utils import import_pynvml
+
+        pynvml = import_pynvml()
+        pynvml.nvmlInit()
+        try:
+            # NOTE: Edge case: vllm cpu build on a GPU machine.
+            # Third-party pynvml can be imported in cpu build,
+            # we need to check if vllm is built with cpu too.
+            # Otherwise, vllm will always activate cuda plugin
+            # on a GPU machine, even if in a cpu build.
+            is_ppu = (
+                pynvml.nvmlDeviceGetCount() > 0
+                and not vllm_version_matches_substr("cpu")
+            )
+            if pynvml.nvmlDeviceGetCount() <= 0:
+                logger.debug("PPU platform is not available because no PPU is found.")
+            if vllm_version_matches_substr("cpu"):
+                logger.debug(
+                    "PPU platform is not available because vLLM is built with CPU."
+                )
+            if is_ppu:
+                logger.debug("Confirmed PPU platform is available.")
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as e:
+        logger.debug("Exception happens when checking PPU platform: %s", str(e))
+        if "nvml" not in e.__class__.__name__.lower():
+            # If the error is not related to NVML, re-raise it.
+            raise e
+
+    return "vllm.platforms.ppu.PPUPlatform" if is_ppu else None
+
+
 def xpu_platform_plugin() -> str | None:
     is_xpu = False
     logger.debug("Checking if XPU platform is available.")
@@ -201,6 +242,7 @@ def cpu_platform_plugin() -> str | None:
 
 builtin_platform_plugins = {
     "tpu": tpu_platform_plugin,
+    "ppu": ppu_platform_plugin,
     "cuda": cuda_platform_plugin,
     "rocm": rocm_platform_plugin,
     "xpu": xpu_platform_plugin,
@@ -219,6 +261,9 @@ def resolve_current_platform_cls_qualname() -> str:
             platform_cls_qualname = func()
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
+            # PPU FIXME: we end loop early before ppu has better detector
+            if len(activated_plugins) > 0 and name == "ppu":
+                break
         except Exception:
             pass
 
