@@ -280,6 +280,8 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_PPU_MOE_BACKEND: str | None = None
+    VLLM_PPU_DENSE_BACKEND: str | None = None
 
 
 def get_default_cache_root():
@@ -1926,6 +1928,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+    # PPU MoE Group Gemm backend
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm group GEMM backend
+    # - "acext": use acext group GEMM backend
+    # - "triton": use triton group GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_PPU_MOE_BACKEND": env_with_choices(
+        "VLLM_PPU_MOE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+    ),
+    # PPU Dense Gemm backend for quantization
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm dense GEMM backend
+    # - "acext": use acext dense GEMM backend
+    # - "triton": use triton dense GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_PPU_DENSE_BACKEND": env_with_choices(
+        "VLLM_PPU_DENSE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+    ),
 }
 
 
