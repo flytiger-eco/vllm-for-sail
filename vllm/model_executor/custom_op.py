@@ -171,6 +171,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_ppu(self, *args, **kwargs):
+        # By default, we assume that ppu ops are compatible with the
+        # CUDA implementation.
+        return self.forward_cuda(*args, **kwargs)
+
     def dispatch_forward(self, compile_native: bool):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
@@ -203,6 +208,8 @@ class CustomOp(nn.Module):
             return self.forward_xpu
         elif current_platform.is_out_of_tree():
             return self.forward_oot
+        elif current_platform.is_ppu():
+            return self.forward_ppu
         else:
             return self.forward_cuda
 
