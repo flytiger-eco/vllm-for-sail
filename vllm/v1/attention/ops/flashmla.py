@@ -29,8 +29,24 @@ if current_platform.is_cuda():
 else:
     _flashmla_extension_C_AVAILABLE = False
 
+if current_platform.is_ppu():
+    try:
+        import flash_mla # noqa: F401
+
+        _ppu_flashmla_AVAILABLE = True
+    except ImportError:
+        _ppu_flashmla_AVAILABLE = False
+
 
 def _is_flashmla_available() -> tuple[bool, str | None]:
+    if current_platform.is_ppu():
+        if _ppu_flashmla_AVAILABLE:
+            return True, None
+        else:
+            return (
+                False,
+                "ppu flashmla is not available, please install flashmla. ",
+            )
     if not _flashmla_C_AVAILABLE:
         return (
             False,
@@ -55,6 +71,8 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
+    if current_platform.is_ppu():
+        return True, None
     if not current_platform.is_device_capability_family(90):
         return False, "FlashMLA Dense is only supported on Hopper devices."
     return True, None
@@ -67,6 +85,8 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
+    if current_platform.is_ppu():
+        return True, None
     if not (
         current_platform.is_device_capability_family(90)
         or current_platform.is_device_capability_family(100)
@@ -84,15 +104,23 @@ def _raise_flashmla_unavailable(*_args, **_kwargs):
 
 
 if _is_flashmla_available()[0]:
-    from vllm.third_party.flashmla.flash_mla_interface import (  # noqa: F401
-        FlashMLASchedMeta,
-        flash_attn_varlen_func,
-        flash_attn_varlen_kvpacked_func,
-        flash_attn_varlen_qkvpacked_func,
-        flash_mla_sparse_fwd,
-        flash_mla_with_kvcache,
-        get_mla_metadata,
-    )
+    if current_platform.is_ppu():
+        from flash_mla import (  # noqa: F401
+            FlashMLASchedMeta,
+            flash_mla_sparse_fwd,
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
+    elif current_platform.is_cuda():
+        from vllm.third_party.flashmla.flash_mla_interface import (  # noqa: F401
+            FlashMLASchedMeta,
+            flash_attn_varlen_func,
+            flash_attn_varlen_kvpacked_func,
+            flash_attn_varlen_qkvpacked_func,
+            flash_mla_sparse_fwd,
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
 else:
 
     class FlashMLASchedMeta:  # type: ignore[no-redef]
@@ -111,6 +139,9 @@ def get_mla_metadata_dense_fp8(
     num_q_tokens_per_head_k: int,
     num_heads_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if current_platform.is_ppu():
+        # PPU Note: PPU flash mla limit
+        _raise_flashmla_unavailable()
     if not _is_flashmla_available()[0]:
         _raise_flashmla_unavailable()
     return torch.ops._flashmla_extension_C.get_mla_decoding_metadata_dense_fp8(
@@ -133,6 +164,9 @@ def flash_mla_with_kvcache_fp8(
     descale_q: torch.Tensor | None = None,
     descale_k: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if current_platform.is_ppu():
+        # PPU Note: PPU flash mla limit
+        _raise_flashmla_unavailable()
     if not _is_flashmla_available()[0]:
         _raise_flashmla_unavailable()
     if softmax_scale is None:

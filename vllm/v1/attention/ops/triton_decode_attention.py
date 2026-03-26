@@ -38,6 +38,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+is_ppu_ = current_platform.is_ppu()
+is_btv_1_1 = is_ppu_ and current_platform.is_device_capability((8,0))
 
 logger = logging.getLogger(__name__)
 
@@ -487,12 +489,19 @@ def _decode_grouped_att_m_fwd(
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
 
+    # [TODO] work around shmem limit on MI3xx
+    if is_hip_ and Lk >= 576:
+        BLOCK = 16
+
+    if is_btv_1_1 and Lk >= 576:
+        BLOCK = 16
+
     # Align tile dimensions with latent rank for MLA to avoid shape mismatch.
     if is_mla:
-        if not is_hip_ and Lk == 576:
+        if Lk == 576:
             BLOCK_DMODEL = 512
             BLOCK_DPE = 64
-        elif not is_hip_ and Lk == 288:
+        elif Lk == 288:
             BLOCK_DMODEL = 256
             BLOCK_DPE = 32
         else:
