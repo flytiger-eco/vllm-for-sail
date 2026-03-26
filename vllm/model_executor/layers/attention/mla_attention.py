@@ -1514,7 +1514,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.aot_schedule = current_platform.is_cuda()
+        self.aot_schedule = current_platform.is_cuda() or current_platform.is_ppu()
 
         self.kv_cache_spec = kv_cache_spec
         self.q_data_type = self.determine_prefill_query_data_type(
