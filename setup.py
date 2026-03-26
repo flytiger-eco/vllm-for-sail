@@ -369,6 +369,26 @@ class cmake_build_ext(build_ext):
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
+    def copy_ppu_flash_attn_overrides(self, build_lib: str) -> None:
+        ppu_fa_dir = ROOT_DIR / "vllm" / "vllm_flash_attn" / "ppu"
+        if not ppu_fa_dir.is_dir():
+            return
+        if "PPU_SDK" not in os.environ:
+            return
+
+        build_fa_dir = Path(build_lib) / "vllm" / "vllm_flash_attn"
+        build_fa_dir.mkdir(parents=True, exist_ok=True)
+
+        for src in sorted(ppu_fa_dir.rglob("*.py")):
+            rel = src.relative_to(ppu_fa_dir)
+            if any(part == "__pycache__" or part.startswith(".") for part in rel.parts):
+                continue
+
+            dst = build_fa_dir / rel
+            print(f"PPU override (build_lib): {src} -> {dst}")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
@@ -376,6 +396,8 @@ class cmake_build_ext(build_ext):
         # bundle tcmalloc into CPU wheels for best OOB perf
         if should_bundle_tcmalloc():
             bundle_tcmalloc(self.build_lib)
+
+        self.copy_ppu_flash_attn_overrides(self.build_lib)
 
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build

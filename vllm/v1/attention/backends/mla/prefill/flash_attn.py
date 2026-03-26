@@ -82,6 +82,10 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 and device_capability[0] == 9
             )
             or self.vllm_flash_attn_version == 4
+            or (
+                self.vllm_flash_attn_version == 3
+                and current_platform.is_ppu()
+            )
         )
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
