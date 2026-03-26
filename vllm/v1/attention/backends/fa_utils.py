@@ -18,13 +18,22 @@ logger = init_logger(__name__)
 # consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
 _ROCM_FLASH_ATTN_AVAILABLE = False
 
-if current_platform.is_cuda():
+if current_platform.is_cuda() and not current_platform.is_ppu():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
         compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
+
+if current_platform.is_ppu():
+    from vllm._custom_ops import reshape_and_cache_flash
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+        get_scheduler_metadata,
+    )
+    # PPU does not use FA4 compile-only API.
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
 elif current_platform.is_xpu():
     from vllm import _custom_ops as ops
@@ -157,6 +166,9 @@ def get_flash_attn_version(
         elif device_capability.major == 10 and is_fa_version_supported(4):
             # Blackwell (SM100+, restrict to SM100 for now): prefer FA4
             fa_version = 4
+        elif current_platform.is_ppu() and is_fa_version_supported(3):
+            # PPU NOTE: prefer FA3
+            fa_version = 3
         else:
             # Fallback to FA2
             fa_version = 2
@@ -324,6 +336,9 @@ def is_flash_attn_varlen_func_available() -> bool:
     """
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available
+        return True
+
+    if current_platform.is_ppu():
         return True
 
     if current_platform.is_rocm():
