@@ -2098,7 +2098,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             qk_rope_head_dim=layer.qk_rope_head_dim,
             v_head_dim=layer.v_head_dim,
         )
-        self.aot_schedule = current_platform.is_cuda()
+        self.aot_schedule = current_platform.is_cuda() or current_platform.is_ppu()
 
         self.kv_cache_spec = kv_cache_spec
         self.q_data_type = self.determine_prefill_query_data_type(
