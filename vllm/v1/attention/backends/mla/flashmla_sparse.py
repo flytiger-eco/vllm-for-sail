@@ -125,6 +125,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        if current_platform.is_ppu():
+            return capability.major in [8, 9, 10]
         return capability.major in [9, 10]
 
     @staticmethod
@@ -299,6 +301,9 @@ class FlashMLASparseMetadataBuilder(
         else:
             # SM90 uses h_q/64 divisor
             max_num_sm_parts = sm_count // max(1, h_q // 64)
+        if current_platform.is_ppu():
+            # PPU uses full SM count
+            max_num_sm_parts = sm_count
         self.tile_scheduler_metadata_buffer = torch.empty(
             # TileSchedulerMetaDataSize = 8
             # see: FlashMLA/csrc/params.h

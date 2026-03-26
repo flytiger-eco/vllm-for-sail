@@ -5,9 +5,10 @@ platform. Since PPU hardware is CUDA-compatible, this platform inherits
 from CudaPlatformBase and reuses all CUDA attention backends, 
 distributed communication, compilation, and kernel infrastructure.
 """
+from __future__ import annotations
 
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -19,13 +20,26 @@ from .interface import DeviceCapability, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
+else:
+    VllmConfig = None
 
 logger = init_logger(__name__)
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
+
+
+def _get_attn_backend_class(backend: AttentionBackendEnum) -> type[AttentionBackend]:
+    return backend.get_class()
+
+
+class _BackendCandidate(NamedTuple):
+    backend_class: type[AttentionBackend]
+    backend: AttentionBackendEnum
+    priority: int
 
 
 @cache
@@ -65,11 +79,11 @@ class PPUPlatform(NvmlCudaPlatform):
     def get_valid_backends(
         cls,
         device_capability: DeviceCapability,
-        attn_selector_config: "AttentionSelectorConfig",
+        attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
     ) -> tuple[
-        list[tuple["AttentionBackendEnum", int]],
-        dict["AttentionBackendEnum", tuple[int, list[str]]],
+        list[_BackendCandidate],
+        dict[AttentionBackendEnum, tuple[int, list[str]]],
     ]:
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
@@ -81,7 +95,7 @@ class PPUPlatform(NvmlCudaPlatform):
         )
         for priority, backend in enumerate(backend_priorities):
             try:
-                backend_class = backend.get_class()
+                backend_class = _get_attn_backend_class(backend)
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -91,7 +105,9 @@ class PPUPlatform(NvmlCudaPlatform):
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
-                valid_backends_priorities.append((backend, priority))
+                valid_backends_priorities.append(
+                    _BackendCandidate(backend_class, backend, priority)
+                )
 
         return valid_backends_priorities, invalid_reasons
 
