@@ -40,6 +40,7 @@ from vllm.v1.attention.ops.flashmla import (
     is_flashmla_dense_supported,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -72,6 +73,8 @@ class FlashMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        if current_platform.is_ppu():
+            return capability.major in [8]
         return capability.major in [9, 10]
 
     @classmethod
@@ -133,7 +136,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             vllm_config.cache_config.cache_dtype
         )
 
-        num_sms = num_compute_units(self.device.index)
+        # PPU FIXME:
+        # temporarily use hard-coded ppu magic number,
+        # this is align with ppu mla algo
+        num_sms = 320 if current_platform.is_ppu() else num_compute_units(self.device.index)
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.cg_buf_tile_scheduler_metadata = torch.zeros(
