@@ -38,6 +38,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+is_ppu_ = current_platform.is_ppu()
+is_btv_1_1 = is_ppu_ and current_platform.is_device_capability((8,0))
 
 logger = logging.getLogger(__name__)
 
@@ -465,6 +467,9 @@ def _decode_grouped_att_m_fwd(
 
     # [TODO] work around shmem limit on MI3xx
     if is_hip_ and Lk >= 576:
+        BLOCK = 16
+
+    if is_btv_1_1 and Lk >= 576:
         BLOCK = 16
 
     if Lk == 576:
