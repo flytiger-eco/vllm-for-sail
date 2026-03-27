@@ -277,7 +277,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             or not current_platform.is_device_capability_family(100)
         ) and next_n not in self.natively_supported_next_n_fp4
 
-        sm_count = num_compute_units(self.device.index)
+        if current_platform.is_ppu():
+            from vllm.utils.ppu_deep_gemm import get_num_sms
+            sm_count = get_num_sms()
+        else:
+            sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
 
         self.offsets_buffer = torch.arange(
