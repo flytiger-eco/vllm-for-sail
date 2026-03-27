@@ -120,6 +120,9 @@ class PPUPlatform(NvmlCudaPlatform):
         # PPU NOTE: set 0 to get better performance for fa3 on PPU 
         attention_config.flash_attn_max_num_splits_for_cuda_graph = 0
 
+        # Default dispatch to ppu's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
+
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         return False
