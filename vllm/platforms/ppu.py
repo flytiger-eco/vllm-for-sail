@@ -112,6 +112,9 @@ class PPUPlatform(NvmlCudaPlatform):
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        from vllm._ppu_ops import ppu_ops
+
+        compilation_config = vllm_config.compilation_config
         attention_config = vllm_config.attention_config
 
         # PPU NOTE: set 0 to get better performance for fa3 on PPU 

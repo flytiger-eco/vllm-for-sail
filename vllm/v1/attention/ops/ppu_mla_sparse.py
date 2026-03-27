@@ -1,41 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Custom Sparse Attention Indexer layers."""
+import functools
+import importlib
 
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    fp8_fp4_mqa_logits,
-    fp8_fp4_paged_mqa_logits,
-    has_deep_gemm,
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
 )
+from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.worker.workspace import current_workspace_manager
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
-from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.worker.workspace import current_workspace_manager
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
 
 if current_platform.is_ppu():
-    from vllm._ppu_ops import ppu_ops
     from vllm.utils.ppu_deep_gemm import (
+        fp8_mqa_logits,
+        fp8_paged_mqa_logits,
+        int8_mqa_logits,
+        int8_paged_mqa_logits,
         is_deep_gemm_supported,
     )
 
 logger = init_logger(__name__)
+
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
@@ -46,7 +45,7 @@ MXFP4_BLOCK_SIZE = 32
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
-    fp8_dtype: torch.dtype,
+    q_dtype: torch.dtype,
     use_fp4_cache: bool,
 ) -> tuple[tuple[tuple[int, int], torch.dtype], tuple[tuple[int, int], torch.dtype]]:
     """Return ((values_shape, values_dtype), (scales_shape, scales_dtype)) for
@@ -59,7 +58,7 @@ def _gather_workspace_shapes(
             ((total_seq_lens, head_dim // MXFP4_BLOCK_SIZE), torch.uint8),
         )
     return (
-        ((total_seq_lens, head_dim), fp8_dtype),
+        ((total_seq_lens, head_dim), q_dtype),
         ((total_seq_lens, 4), torch.uint8),
     )
 
@@ -84,8 +83,7 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-@eager_break_during_capture
-def sparse_attn_indexer(
+def ppu_sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
@@ -106,14 +104,16 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    q_dtype = q_quant.dtype
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            total_seq_lens, head_dim, q_dtype, use_fp4_cache
         )
+
         current_workspace_manager().get_simultaneous(
             values_spec,
             scales_spec,
@@ -127,7 +127,7 @@ def sparse_attn_indexer(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
-        return sparse_attn_indexer_fake(
+        return ppu_sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
             kv_cache,
@@ -189,7 +189,7 @@ def sparse_attn_indexer(
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            total_seq_lens, head_dim, q_dtype, use_fp4_cache
         )
         k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
             values_spec,
@@ -224,33 +224,48 @@ def sparse_attn_indexer(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            if current_platform.is_xpu():
-                if q_scale_slice is not None:
-                    raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                logits = torch.ops.vllm.xpu_fp8_mqa_logits(
-                    q_slice_cast,
-                    k_quant_cast,
-                    k_scale_cast,
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
+
+            if is_deep_gemm_supported():
+                if use_fp4_cache:
+                    raise RuntimeError("do not support fp4 indexer now")
+                    # logits = fp8_fp4_mqa_logits(
+                    #     (q_slice_cast, q_scale_slice),
+                    #     (k_quant_cast, k_scale_cast),
+                    #     weights[chunk.token_start : chunk.token_end],
+                    #     chunk.cu_seqlen_ks,
+                    #     chunk.cu_seqlen_ke,
+                    #     clean_logits=False,
+                    # )
+                if q_dtype == torch.int8:
+                    logits = int8_mqa_logits(
+                        q_slice_cast,
+                        (k_quant_cast, k_scale_cast),
+                        weights[chunk.token_start : chunk.token_end],
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        clean_logits=False,
+                    )
+                elif q_dtype == torch.float8_e4m3fn:
+                    logits = fp8_mqa_logits(
+                        q_slice_cast,
+                        (k_quant_cast, k_scale_cast),
+                        weights[chunk.token_start : chunk.token_end],
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        clean_logits=False,
+                    )
+                else:
+                    raise RuntimeError("PPU mqa_logtis only support int8 on btv1.0 and fp8 on >= btv1.5")
             else:
-                logits = fp8_fp4_mqa_logits(
-                    (q_slice_cast, q_scale_slice),
-                    (k_quant_cast, k_scale_cast),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    clean_logits=False,
-                )
+                raise RuntimeError("indexer need PPU deep gemm installed")
+
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            ops.top_k_per_row_prefill(
+            torch.ops._C.top_k_per_row_prefill(
                 logits,
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
@@ -311,36 +326,43 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        if current_platform.is_xpu():
-            if padded_q_scale is not None:
-                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
-            seq_lens_xpu = (
-                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
-                padded_q_quant_cast,
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens_xpu,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len,
-            )
+
+        if is_deep_gemm_supported():
+            if use_fp4_cache:
+                raise RuntimeError("ppu do not support fp4 indexer now")
+            if q_dtype == torch.int8:
+                # logits = torch.ones([batch_size * next_n, max_model_len],
+                #                      device=q_quant.device,
+                #                      dtype=torch.float32)
+                logits = int8_paged_mqa_logits(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                )
+            elif q_dtype == torch.float8_e4m3fn:
+                logits = fp8_paged_mqa_logits(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                )
+            else:
+                raise RuntimeError("PPU mqa_logtis only support int8 on btv1.0 and fp8 on >= btv1.5")
         else:
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-            )
+            raise RuntimeError("indexer need ppu deep gemm installed")
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        if topk_tokens in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -354,7 +376,7 @@ def sparse_attn_indexer(
                 attn_metadata_narrowed.max_seq_len,
             )
         else:
-            ops.top_k_per_row_decode(
+            torch.ops._C.top_k_per_row_decode(
                 logits,
                 next_n,
                 seq_lens,
@@ -372,14 +394,14 @@ def sparse_attn_indexer(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )
-            topk_indices_buffer[: topk_indices.shape[0], : topk_indices.shape[-1]] = (
+            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
                 topk_indices
             )
 
     return topk_indices_buffer
 
 
-def sparse_attn_indexer_fake(
+def ppu_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
@@ -400,183 +422,3 @@ def sparse_attn_indexer_fake(
     return topk_indices_buffer
 
 
-direct_register_custom_op(
-    op_name="sparse_attn_indexer",
-    op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
-    fake_impl=sparse_attn_indexer_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
-@CustomOp.register("sparse_attn_indexer")
-class SparseAttnIndexer(CustomOp):
-    """Sparse Attention Indexer Custom Op Layer. This layer is extracted as a
-    separate custom op since it involves heavy custom kernels like `mqa_logits`,
-    `paged_mqa_logits` and `top_k_per_row`, etc. Those kernels maybe requires
-    specific memory layout or implementation for different hardware backends to
-    achieve optimal performance.
-
-    For now, the default native path will use CUDA backend path. Other platform
-    may requires add the corresponding Custom Op name `sparse_attn_indexer` to
-    `custom_ops` in `CompilationConfig` to enable the platform specific path.
-    """
-
-    def __init__(
-        self,
-        k_cache,
-        quant_block_size: int,
-        scale_fmt: str,
-        topk_tokens: int,
-        head_dim: int,
-        max_model_len: int,
-        max_total_seq_len: int,
-        topk_indices_buffer: torch.Tensor,
-        skip_k_cache_insert: bool = False,
-        use_fp4_cache: bool = False,
-    ):
-        super().__init__()
-        self.k_cache = k_cache
-        self.quant_block_size = quant_block_size
-        self.scale_fmt = scale_fmt
-        self.topk_tokens = topk_tokens
-        self.head_dim = head_dim
-        self.max_model_len = max_model_len
-        self.max_total_seq_len = max_total_seq_len
-        self.topk_indices_buffer = topk_indices_buffer
-        self.skip_k_cache_insert = skip_k_cache_insert
-        self.use_fp4_cache = use_fp4_cache
-        if current_platform.is_ppu() and not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
-                "less efficient PyTorch implementation. "
-                "Please make sure you have the required hardware and software setup "
-                "for DeepGEMM to achieve optimal performance."
-            )
-        elif current_platform.is_cuda() and not has_deep_gemm():
-            raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
-            )
-
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        if current_platform.is_ppu():
-            return self.forward_ppu(hidden_states, q_quant, k, weights)
-        if current_platform.is_cuda() or current_platform.is_xpu():
-            return self.forward_cuda(hidden_states, q_quant, k, weights)
-        elif current_platform.is_rocm():
-            return self.forward_hip(hidden_states, q_quant, k, weights)
-        else:
-            raise NotImplementedError(
-                "SparseAttnIndexer native forward is only implemented for "
-                "CUDA, ROCm and XPU platforms."
-            )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        # FP8 path: single tensor (per-token scale is folded into `weights`).
-        # FP4 path: (values, scales) tuple with scales required by the kernel.
-        if isinstance(q_quant, tuple):
-            q_values, q_scale = q_quant
-        else:
-            q_values, q_scale = q_quant, None
-        return torch.ops.vllm.sparse_attn_indexer(
-            hidden_states,
-            _encode_layer_name(self.k_cache.prefix),
-            self.k_cache.kv_cache,
-            q_values,
-            q_scale,
-            k,
-            weights,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-            self.skip_k_cache_insert,
-            self.use_fp4_cache,
-        )
-
-    def forward_xpu(
-        self,
-        hidden_states: torch.Tensor,
-        q_fp8: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        return self.forward_cuda(hidden_states, q_fp8, k, weights)
-
-    def forward_ppu(
-        self,
-        hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        if isinstance(q_quant, tuple):
-            q_values, q_scale = q_quant
-        else:
-            q_values, q_scale = q_quant, None
-        return torch.ops.vllm.ppu_sparse_attn_indexer(
-            hidden_states,
-            _encode_layer_name(self.k_cache.prefix),
-            self.k_cache.kv_cache,
-            q_values,
-            q_scale,
-            k,
-            weights,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-            self.skip_k_cache_insert,
-            self.use_fp4_cache,
-        )
-
-    def forward_hip(
-        self,
-        hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
-        assert isinstance(q_quant, torch.Tensor), (
-            "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
-        )
-        if rocm_aiter_ops.is_enabled():
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
-                hidden_states,
-                _encode_layer_name(self.k_cache.prefix),
-                self.k_cache.kv_cache,
-                q_quant,
-                k,
-                weights,
-                self.quant_block_size,
-                self.scale_fmt,
-                self.topk_tokens,
-                self.head_dim,
-                self.max_model_len,
-                self.max_total_seq_len,
-                self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
-            )
-        raise RuntimeError(
-            "Sparse attention indexer ROCm path is only supported on AITER. "
-            "Please enable aiter with VLLM_ROCM_USE_AITER=1"
-        )
