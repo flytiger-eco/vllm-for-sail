@@ -113,6 +113,9 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    per_token_group_quant_int8,
+)
 
 logger = init_logger(__name__)
 
@@ -689,6 +692,11 @@ class Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
 
+        if current_platform.is_ppu() and not current_platform.supports_fp8():
+            self.use_ppu_int8_indexer = True
+        else:
+            self.use_ppu_int8_indexer = False
+
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
         #       per self.quant_block_size element
@@ -804,12 +812,16 @@ class Indexer(nn.Module):
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q,
-            self.quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=self.scale_fmt is not None,
-        )
+
+        if self.use_ppu_int8_indexer:
+            q_fp8, q_scale = per_token_group_quant_int8(q, self.quant_block_size)
+        else:
+            q_fp8, q_scale = per_token_group_quant_fp8(
+                q,
+                self.quant_block_size,
+                column_major_scales=False,
+                use_ue8m0=self.scale_fmt is not None,
+            )
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head)
 

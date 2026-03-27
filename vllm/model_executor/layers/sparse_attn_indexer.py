@@ -36,6 +36,12 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
+if current_platform.is_ppu():
+    from vllm._ppu_ops import ppu_ops
+    from vllm.utils.ppu_deep_gemm import (
+        is_deep_gemm_supported,
+    )
+
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -725,7 +731,14 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        if current_platform.is_cuda() and not has_deep_gemm():
+        if current_platform.is_ppu() and not is_deep_gemm_supported():
+            logger.warning_once(
+                "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
+                "less efficient PyTorch implementation. "
+                "Please make sure you have the required hardware and software setup "
+                "for DeepGEMM to achieve optimal performance."
+            )
+        elif current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
                 "the current vLLM environment."
@@ -738,6 +751,8 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
+        if current_platform.is_ppu():
+            return self.forward_ppu(hidden_states, q_quant, k, weights)
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
@@ -791,6 +806,36 @@ class SparseAttnIndexer(CustomOp):
         weights: torch.Tensor,
     ):
         return self.forward_cuda(hidden_states, q_fp8, k, weights)
+
+    def forward_ppu(
+        self,
+        hidden_states: torch.Tensor,
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        weights: torch.Tensor,
+    ):
+        if isinstance(q_quant, tuple):
+            q_values, q_scale = q_quant
+        else:
+            q_values, q_scale = q_quant, None
+        return torch.ops.vllm.ppu_sparse_attn_indexer(
+            hidden_states,
+            _encode_layer_name(self.k_cache.prefix),
+            self.k_cache.kv_cache,
+            q_values,
+            q_scale,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+            self.skip_k_cache_insert,
+            self.use_fp4_cache,
+        )
 
     def forward_hip(
         self,
