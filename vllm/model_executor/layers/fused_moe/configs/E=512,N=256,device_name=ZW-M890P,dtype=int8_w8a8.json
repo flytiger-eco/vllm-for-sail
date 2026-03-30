@@ -1,0 +1,1168 @@
+{
+    "1": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        }
+    },
+    "2": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 1
+        }
+    },
+    "3": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 1
+        }
+    },
+    "4": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 1
+        }
+    },
+    "5": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "6": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "7": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        }
+    },
+    "9": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 1
+        }
+    },
+    "10": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "12": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "14": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        }
+    },
+    "17": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "20": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "23": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "27": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        }
+    },
+    "32": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        }
+    },
+    "38": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "45": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        }
+    },
+    "53": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "62": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "73": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "86": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "102": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "120": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "141": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "167": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 1
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "197": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "232": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "256": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "273": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "323": {
+        "BLOCK_SIZE_M": 16,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 2
+        }
+    },
+    "380": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "449": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "512": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "529": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "624": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "736": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 8,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 2,
+            "num_stages": 3
+        }
+    },
+    "868": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "1024": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "1208": {
+        "BLOCK_SIZE_M": 32,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "1424": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "1680": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "3251": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "3834": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "4096": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "4522": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "8192": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "8751": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "10321": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "12173": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "16934": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "19972": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    },
+    "32768": {
+        "BLOCK_SIZE_M": 64,
+        "USE_VALU": false,
+        "UP": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 16,
+            "num_stages": 4
+        },
+        "DOWN": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 3
+        }
+    }
+}
