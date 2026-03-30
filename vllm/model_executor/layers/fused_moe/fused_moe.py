@@ -56,6 +56,82 @@ logger = init_logger(__name__)
 
 
 @triton.jit
+def _moe_sum_reduce_kernel(
+    input_ptr,
+    output_ptr,
+    M,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    stride_im,
+    stride_it,
+    stride_ik,
+    stride_om,
+    stride_ok,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    num_stages: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rk = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    rm = rm.to(tl.int64)
+    rk = rk.to(tl.int64)
+    mask = (rm[:, None] < M) & (rk[None, :] < K)
+    acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+    for t in tl.range(T, num_stages=num_stages):
+        curr_input_ptr = (
+            input_ptr
+            + rm[:, None] * stride_im
+            + t * stride_it
+            + rk[None, :] * stride_ik
+        )
+        tile = tl.load(curr_input_ptr, mask=mask, other=0.0)
+        acc += tile
+    output_tile_ptr = output_ptr + rm[:, None] * stride_om + rk[None, :] * stride_ok
+
+    tl.store(output_tile_ptr, acc, mask=mask)
+
+
+def moe_sum_reduce_triton(x: torch.Tensor, output: torch.Tensor):
+    M, T, K = x.shape
+    assert x.is_contiguous()
+    assert output.is_contiguous()
+    assert output.shape[0] == M and output.shape[1] == K
+
+    BLOCK_M = 32
+    BLOCK_K = 64
+
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
+    # BLOCK_M: 32, BLOCK_K: 32, num_warps: 8, num_ctas: 1, num_stages: 4, maxnreg: None;
+    _moe_sum_reduce_kernel[grid](
+        x,
+        output,
+        M,
+        T,
+        K,
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        output.stride(0),
+        output.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_K=BLOCK_K,
+        num_warps=8,
+        num_stages=1,
+    )
+
+
+@triton.jit
+def valu_dot(a, b, Tile_M: tl.constexpr, Tile_N: tl.constexpr, Tile_K: tl.constexpr):
+    b = b.trans()
+    a = a.reshape(Tile_M, 1, Tile_K)
+    b = b.reshape(1, Tile_N, Tile_K)
+    c = a * b
+    return tl.sum(c, 2)
+
+
+@triton.jit
 def write_zeros_to_output(
     c_ptr,
     stride_cm,
@@ -363,6 +439,9 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    use_valu: tl.constexpr,
+    even_Ks: tl.constexpr,
+    num_stages: tl.constexpr = 3,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -399,12 +478,16 @@ def fused_moe_kernel(
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    if GROUP_SIZE_M > 1:
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+    else:
+        pid_m = pid // num_pid_n
+        pid_n = pid % num_pid_n
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -456,10 +539,11 @@ def fused_moe_kernel(
         offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
     )
 
-    b_ptrs = (
-        b_ptr
-        + off_experts * stride_be
-        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    b_block_ptr = tl.make_block_ptr(
+        base=b_ptr + off_experts * stride_be,
+        shape=(K, N), strides=(stride_bk, stride_bn),
+        offsets=(0, (pid_n * BLOCK_SIZE_N).to(tl.int32)), block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
+        order=(0, 1),
     )
     if use_int8_w8a16:
         b_scale_ptrs = (
@@ -495,10 +579,13 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
-    # of fp32 values for higher accuracy.
+    # of fp32 or int32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    if use_int8_w8a8:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in tl.range(0, tl.cdiv(K, BLOCK_SIZE_K), num_stages=num_stages):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
         a = tl.load(
@@ -506,7 +593,10 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        if even_Ks:
+            b = tl.aiu_load(b_block_ptr, )
+        else:
+            b = tl.load(b_block_ptr, boundary_check=(0, 1), padding_option="zero")
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -526,11 +616,13 @@ def fused_moe_kernel(
                     accumulator = tl.dot(a, b, acc=accumulator)
                 else:
                     accumulator += tl.dot(a, b)
+        elif use_valu:
+            accumulator += valu_dot(a, b, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
 
     # Dequantization for supported quantization schemes:
     #   - int8_w8a16
@@ -744,6 +836,7 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    use_valu: bool | None = None,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -789,6 +882,8 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    even_Ks = (B.size(2) % BLOCK_SIZE_K == 0) and current_platform.has_device_capability((8, 9))
+
     fused_moe_kernel[grid](
         A,
         B,
@@ -830,6 +925,8 @@ def invoke_fused_moe_triton_kernel(
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        use_valu=use_valu,
+        even_Ks=even_Ks,
         **config,
     )
 
@@ -856,6 +953,7 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    use_valu: bool | None = None
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -934,6 +1032,7 @@ def dispatch_fused_moe_kernel(
             per_channel_quant,
             block_shape,
             B_bias,
+            use_valu,
         )
 
 
@@ -1740,6 +1839,7 @@ def fused_experts_impl(
 
     config_dtype = _get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
         dtype=hidden_states.dtype,
@@ -1829,7 +1929,7 @@ def fused_experts_impl(
         num_tokens_post_padded,
         apply_router_weight_on_input,
         top_k_num,
-        config,
+        config.get("UP", config),
         compute_type=compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
@@ -1838,6 +1938,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        use_valu=config.get("USE_VALU", False)
     )
 
     apply_moe_activation(
@@ -1868,7 +1969,7 @@ def fused_experts_impl(
         num_tokens_post_padded,
         not apply_router_weight_on_input,
         1,
-        config,
+        config.get("DOWN", config),
         compute_type=compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
@@ -1877,12 +1978,19 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        use_valu=config.get("USE_VALU", False)
     )
 
-    ops.moe_sum(
-        intermediate_cache3.view(*intermediate_cache3.size()),
-        out_hidden_states,
-    )
+    if current_platform.is_ppu() and M > 1024:
+        moe_sum_reduce_triton(
+            intermediate_cache3.view(*intermediate_cache3.size()),
+            out_hidden_states,
+        )
+    else:
+        ops.moe_sum(
+            intermediate_cache3.view(*intermediate_cache3.size()),
+            out_hidden_states,
+        )
 
     return out_hidden_states
 
@@ -2084,7 +2192,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             num_tokens_post_padded,
             False,  # mul_routed_weights
             top_k_num,
-            config,
+            config.get("UP", config),
             compute_type=compute_type,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a8=self.quant_config.use_int8_w8a8,
@@ -2093,6 +2201,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w1_bias,
+            use_valu=config.get("USE_VALU", False),
         )
 
         # LoRA w13: applied to intermediate_cache1 before activation, using
@@ -2149,7 +2258,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             num_tokens_post_padded,
             not apply_router_weight_on_input,
             1,
-            config,
+            config.get("DOWN", config),
             compute_type=compute_type,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a8=self.quant_config.use_int8_w8a8,
@@ -2158,6 +2267,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
+            use_valu=config.get("USE_VALU", False),
         )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
@@ -2183,6 +2293,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        if current_platform.is_ppu() and input.shape[0] > 1024:
+            moe_sum_reduce_triton(input, output)
+            return
         ops.moe_sum(input, output)
 
 
