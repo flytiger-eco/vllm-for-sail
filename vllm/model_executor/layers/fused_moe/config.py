@@ -37,6 +37,7 @@ def _get_config_dtype_str(
     dtype: torch.dtype,
     use_fp8_w8a8: bool = False,
     use_fp8_w8a16: bool = False,
+    use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
     ocp_mx_scheme: str | None = None,
@@ -50,6 +51,8 @@ def _get_config_dtype_str(
         return "fp8_w8a8"
     elif use_fp8_w8a16:
         return "fp8_w8a16"
+    elif use_int8_w8a8:
+        return "int8_w8a8"
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif use_int4_w4a16:
