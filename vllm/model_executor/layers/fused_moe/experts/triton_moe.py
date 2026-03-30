@@ -345,7 +345,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 num_tokens_post_padded,
                 False,  # mul_routed_weights
                 top_k_num,
-                config,
+                config.get("UP", config),
                 compute_type=compute_type,
                 use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
                 use_int8_w8a8=self.quant_config.use_int8_w8a8,
@@ -354,6 +354,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
+                use_valu=config.get("USE_VALU", False),
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -463,7 +464,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 num_tokens_post_padded,
                 not apply_router_weight_on_input,
                 1,
-                config,
+                config.get("DOWN", config),
                 compute_type=compute_type,
                 use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
                 use_int8_w8a8=self.quant_config.use_int8_w8a8,
@@ -472,6 +473,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
+                use_valu=config.get("USE_VALU", False),
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -525,6 +527,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        if current_platform.is_ppu() and input.shape[0] > 1024:
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                moe_sum_reduce_triton,
+            )
+            moe_sum_reduce_triton(input, output)
+            return
         ops.moe_sum(input, output)
 
 
