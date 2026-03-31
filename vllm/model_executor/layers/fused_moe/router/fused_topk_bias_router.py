@@ -129,6 +129,7 @@ def vllm_topk_softplus_sqrt(
             routed_scaling_factor,
         )
 
+    topk_indices = topk_indices.to(torch.int32)
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,

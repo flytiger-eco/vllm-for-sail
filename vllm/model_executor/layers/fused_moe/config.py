@@ -633,6 +633,7 @@ def int8_w8a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    gemm1_clamp_limit: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for int8 activations and int8 weights.
@@ -648,6 +649,7 @@ def int8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
