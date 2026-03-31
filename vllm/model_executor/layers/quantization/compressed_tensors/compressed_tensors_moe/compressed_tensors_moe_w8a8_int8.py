@@ -173,6 +173,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        swiglu_limit = getattr(layer, 'swiglu_limit', None)
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
             w1_scale=layer.w13_weight_scale,
@@ -181,6 +182,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             a2_scale=layer.w2_input_scale,
             per_act_token_quant=True,
             layer=layer,
+            swiglu_limit=swiglu_limit,
         )
 
     def apply(

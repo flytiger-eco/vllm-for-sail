@@ -124,6 +124,8 @@ MoEBackend = Literal[
     "triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
+    "ppu_deep_gemm",
+    "ppu_acext",
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
@@ -199,6 +201,8 @@ class KernelConfig:
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
+    - "ppu_deep_gemm": Use PPU DeepGEMM kernels (Support BF16/INT8/FP8 channel and block)
+    - "ppu_acext": Use PPU Acext kernels (Support BF16/INT8)
     """
 
     linear_backend: LinearBackend = "auto"

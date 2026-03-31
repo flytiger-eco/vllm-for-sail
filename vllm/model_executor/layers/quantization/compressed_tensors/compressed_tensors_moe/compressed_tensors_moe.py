@@ -64,6 +64,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         format = scheme_dict.get("format")
 
         if quant_config._is_mxfp4(weight_quant):
+            # PPU uses GptOssMxfp4MoEMethod for MXFP4 MoE layers.
+            if current_platform.is_ppu():
+                from vllm.model_executor.layers.quantization.mxfp4 import (
+                    GptOssMxfp4MoEMethod,
+                )
+
+                return GptOssMxfp4MoEMethod(layer.moe_config)
+
             from .compressed_tensors_moe_w4a4_mxfp4 import (
                 CompressedTensorsW4A4Mxfp4MoEMethod,
             )

@@ -26,6 +26,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+from vllm.utils.ppu_deep_gemm import is_deep_gemm_supported
+from vllm.model_executor.layers.fused_moe.experts.acext import is_acext_supported
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -37,6 +39,9 @@ class UnquantizedMoeBackend(Enum):
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
+    PPU_DEEPGEMM = "PPU_DEEPGEMM"
+    BATCHED_PPU_DEEPGEMM = "BATCHED_PPU_DEEPGEMM"
+    ACEXT = "ACEXT"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
     CPU = "CPU"
@@ -61,6 +66,14 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
     if current_platform.is_rocm():
         _AVAILABLE_BACKENDS = [
             UnquantizedMoeBackend.AITER,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_ppu():
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.PPU_DEEPGEMM,
+            UnquantizedMoeBackend.ACEXT,
+            UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM,
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
@@ -142,6 +155,27 @@ def backend_to_kernel_cls(
 
         return XPUExperts
 
+    elif backend == UnquantizedMoeBackend.PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+            PPUDeepGemmExperts,
+        )
+
+        return [PPUDeepGemmExperts]
+
+    elif backend == UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+            PPUBatchedDeepGemmExperts,
+        )
+
+        return [PPUBatchedDeepGemmExperts]
+
+    elif backend == UnquantizedMoeBackend.ACEXT:
+        from vllm.model_executor.layers.fused_moe.experts.acext import (
+            AcextExperts,
+        )
+
+        return [AcextExperts]
+
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
@@ -153,6 +187,8 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
+        "ppu_deep_gemm": UnquantizedMoeBackend.PPU_DEEPGEMM,
+        "ppu_acext": UnquantizedMoeBackend.ACEXT,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -241,6 +277,11 @@ def select_unquantized_moe_backend(
             and requested_backend == UnquantizedMoeBackend.TRITON
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == UnquantizedMoeBackend.PPU_DEEPGEMM
+        ):
+            requested_backend = UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM
 
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
@@ -252,6 +293,26 @@ def select_unquantized_moe_backend(
         else:
             backend = UnquantizedMoeBackend.AITER
             return _return_or_raise(backend, moe_config, activation_format)
+
+    # PPU FIXME: may need to call acext API to check availability.
+    Acext_moe_enabled = (
+        is_acext_supported()
+        and (not envs.VLLM_PPU_MOE_BACKEND
+             or envs.VLLM_PPU_MOE_BACKEND == "acext")
+        and activation_format == mk.FusedMoEActivationFormat.Standard
+    )
+    PPU_DeepGemm_moe_enabled = (
+        is_deep_gemm_supported()
+        and (not envs.VLLM_PPU_MOE_BACKEND
+            or envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
+        and not moe_config.has_bias
+    )
+    if not PPU_DeepGemm_moe_enabled or moe_config.has_bias:
+        AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.PPU_DEEPGEMM)
+        AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM)
+    
+    if not Acext_moe_enabled:
+        AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.ACEXT)
 
     for backend in AVAILABLE_BACKENDS:
         k_cls = backend_to_kernel_cls(backend)
