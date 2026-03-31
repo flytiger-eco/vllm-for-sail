@@ -28,11 +28,18 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
-    get_tma_aligned_size,
-    is_deep_gemm_e8m0_used,
-    transform_sf_into_required_layout,
-)
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import (
+        get_tma_aligned_size,
+        is_deep_gemm_e8m0_used,
+        transform_sf_into_required_layout,
+    )
+else:
+    from vllm.utils.deep_gemm import (
+        get_tma_aligned_size,
+        is_deep_gemm_e8m0_used,
+        transform_sf_into_required_layout,
+    )
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -688,9 +695,9 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     )
 
     # CUDA kernel path only (DeepGEMM + E8M0 is CUDA-specific).
-    assert current_platform.is_cuda(), (
+    assert current_platform.is_cuda() or current_platform.is_ppu(), (
         "per_token_group_quant_fp8_packed_for_deepgemm is only valid on CUDA "
-        "platforms using DeepGEMM."
+        "or PPU platforms using DeepGEMM."
     )
 
     x_contiguous = x.contiguous()

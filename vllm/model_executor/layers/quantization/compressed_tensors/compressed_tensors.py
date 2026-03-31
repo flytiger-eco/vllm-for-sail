@@ -57,6 +57,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
@@ -82,6 +85,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         transform_config: dict[str, Any] | None = None,
         total_num_heads: int | None = None,
         total_num_kv_heads: int | None = None,
+        fp8_channelwise_layers: list[str] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -92,6 +96,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        self.fp8_channelwise_layers = fp8_channelwise_layers
 
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
@@ -236,6 +241,18 @@ class CompressedTensorsConfig(QuantizationConfig):
             kv_cache_scheme=config.get("kv_cache_scheme"),
             total_num_heads=config.get("total_num_heads"),
             total_num_kv_heads=config.get("total_num_kv_heads"),
+            fp8_channelwise_layers=config.get("fp8_channelwise_layers"),
+        )
+
+    def _is_fp8_channelwise_layer(self, layer_name: str) -> bool:
+        """Check if layer uses FP8 channelwise quantization (substring match)."""
+        if not self.fp8_channelwise_layers:
+            return False
+        return is_layer_skipped(
+            prefix=layer_name,
+            ignored_layers=self.fp8_channelwise_layers,
+            fused_mapping=self.packed_modules_mapping,
+            skip_with_substr=True,
         )
 
     @classmethod
@@ -726,6 +743,24 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Use the new get_quant_args method to extract QuantizationArgs
         scheme_dict = self.get_scheme_dict(layer, layer_name)
+
+        # PPU FP8 channelwise override for dense layers
+        if (
+            current_platform.is_ppu()
+            and self.fp8_channelwise_layers
+            and layer_name is not None
+            and self._is_fp8_channelwise_layer(layer_name)
+        ):
+            channelwise_args = QuantizationArgs(
+                strategy=QuantizationStrategy.CHANNEL,
+                type=QuantizationType.FLOAT,
+                num_bits=8,
+                symmetric=True,
+            )
+            return CompressedTensorsW8A8Fp8(
+                weight_quant=channelwise_args,
+                is_static_input_scheme=False,
+            )
 
         weight_quant = None
         input_quant = None
