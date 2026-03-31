@@ -44,6 +44,8 @@ class Fp8MoeBackend(Enum):
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     DEEPGEMM = "DEEPGEMM"
     BATCHED_DEEPGEMM = "BATCHED_DEEPGEMM"
+    PPU_DEEPGEMM = "PPU_DEEPGEMM"
+    BATCHED_PPU_DEEPGEMM = "BATCHED_PPU_DEEPGEMM"
     MARLIN = "MARLIN"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
@@ -77,10 +79,12 @@ def _get_priority_backends(
         Fp8MoeBackend.FLASHINFER_TRTLLM,
         Fp8MoeBackend.FLASHINFER_CUTLASS,
         Fp8MoeBackend.DEEPGEMM,
+        Fp8MoeBackend.PPU_DEEPGEMM,
         Fp8MoeBackend.VLLM_CUTLASS,
         Fp8MoeBackend.TRITON,
         Fp8MoeBackend.MARLIN,
         Fp8MoeBackend.BATCHED_DEEPGEMM,
+        Fp8MoeBackend.BATCHED_PPU_DEEPGEMM,
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
@@ -158,6 +162,20 @@ def backend_to_kernel_cls(
 
         return [BatchedDeepGemmExperts]
 
+    elif backend == Fp8MoeBackend.PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+            PPUDeepGemmExperts,
+        )
+
+        return [PPUDeepGemmExperts]
+
+    elif backend == Fp8MoeBackend.BATCHED_PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+            PPUBatchedDeepGemmExperts,
+        )
+
+        return [PPUBatchedDeepGemmExperts]
+
     elif backend == Fp8MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
@@ -225,6 +243,7 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     mapping = {
         "triton": Fp8MoeBackend.TRITON,
         "deep_gemm": Fp8MoeBackend.DEEPGEMM,
+        "ppu_deep_gemm": Fp8MoeBackend.PPU_DEEPGEMM,
         "cutlass": Fp8MoeBackend.VLLM_CUTLASS,
         "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
@@ -305,6 +324,8 @@ def select_fp8_moe_backend(
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
                 requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
+            elif requested_backend == Fp8MoeBackend.PPU_DEEPGEMM:
+                requested_backend = Fp8MoeBackend.BATCHED_PPU_DEEPGEMM
             elif requested_backend == Fp8MoeBackend.TRITON:
                 requested_backend = Fp8MoeBackend.BATCHED_TRITON
             elif requested_backend == Fp8MoeBackend.VLLM_CUTLASS:
@@ -358,6 +379,21 @@ def select_fp8_moe_backend(
                 backend, config, weight_key, activation_key, activation_format
             )
 
+    # Handle explicit DeepGEMM FP8 configuration.
+    if envs.is_set("VLLM_PPU_MOE_BACKEND"):
+        if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.PPU_DEEPGEMM)
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_PPU_DEEPGEMM)
+        else:
+            backend = (
+                Fp8MoeBackend.PPU_DEEPGEMM
+                if activation_format == mk.FusedMoEActivationFormat.Standard
+                else Fp8MoeBackend.BATCHED_PPU_DEEPGEMM
+            )
+            return _return_or_raise(
+                backend, config, weight_key, activation_key, activation_format
+            )
+        
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
@@ -411,6 +447,15 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale,
             tuple(layer.weight_block_size),
         )
+    elif fp8_backend in [Fp8MoeBackend.PPU_DEEPGEMM, Fp8MoeBackend.BATCHED_PPU_DEEPGEMM]:
+        if block_quant and (layer.weight_block_size is not None):
+            w13, w2, w13_scale, w2_scale = prepare_fp8_moe_layer_for_deepgemm(
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                tuple(layer.weight_block_size),
+            )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.MARLIN:
