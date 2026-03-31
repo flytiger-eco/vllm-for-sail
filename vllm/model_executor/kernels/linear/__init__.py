@@ -136,7 +136,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ppu import (
-    PPUFP8ScaledMMLinearKernel,
+    PPUDeepGemmFp8BlockScaledMMKernel,
+    PPUCutlassFp8BlockScaledMMKernel,
+    PPUCutlassFP8ScaledMMLinearKernel,
     PPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
@@ -175,7 +177,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.PPU: [
-        PPUFP8ScaledMMLinearKernel,
+        PPUCutlassFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -209,6 +211,8 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.PPU: [
+        PPUDeepGemmFp8BlockScaledMMKernel,
+        PPUCutlassFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -785,7 +789,9 @@ __all__ = [
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
-    "PPUFP8ScaledMMLinearKernel",
+    "PPUDeepGemmFp8BlockScaledMMKernel",
+    "PPUCutlassFp8BlockScaledMMKernel",
+    "PPUCutlassFP8ScaledMMLinearKernel",
     "PPUInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
     "ChannelWiseTorchFP8ScaledMMLinearKernel",
