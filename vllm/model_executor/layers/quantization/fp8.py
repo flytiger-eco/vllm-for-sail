@@ -80,9 +80,15 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_supported,
-)
+
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import (
+        is_deep_gemm_supported,
+    )
+else:
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_supported,
+    )
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
