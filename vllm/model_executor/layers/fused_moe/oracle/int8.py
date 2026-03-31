@@ -26,11 +26,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
 )
 
+from vllm.platforms import current_platform
+from vllm.utils.ppu_deep_gemm import is_deep_gemm_supported
+from vllm.model_executor.layers.fused_moe.experts.acext import is_acext_supported
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
+    PPU_DEEPGEMM = "PPU_DEEPGEMM"
+    BATCHED_PPU_DEEPGEMM = "BATCHED_PPU_DEEPGEMM"
+    ACEXT = "ACEXT"
 
 
 def _get_priority_backends(
@@ -39,18 +47,47 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
+    if current_platform.is_ppu():
+        return [
+            Int8MoeBackend.PPU_DEEPGEMM,
+            Int8MoeBackend.ACEXT,
+            Int8MoeBackend.BATCHED_PPU_DEEPGEMM,
+            Int8MoeBackend.TRITON,
+            ]
     return [Int8MoeBackend.TRITON]
 
 
 def backend_to_kernel_cls(
     backend: Int8MoeBackend,
-) -> list[type[mk.FusedMoEExperts]]:
-    if backend == Int8MoeBackend.TRITON:
+) -> type[mk.FusedMoEExperts]:
+    if backend == Int8MoeBackend.PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+            PPUDeepGemmExperts,
+        )
+
+        return PPUDeepGemmExperts
+
+    elif backend == Int8MoeBackend.BATCHED_PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+            PPUBatchedDeepGemmExperts,
+        )
+
+        return PPUBatchedDeepGemmExperts
+
+    elif backend == Int8MoeBackend.ACEXT:
+        from vllm.model_executor.layers.fused_moe.experts.acext import (
+            AcextExperts,
+        )
+
+        return AcextExperts
+
+    elif backend == Int8MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             TritonExperts,
         )
 
-        return [TritonExperts]
+        return TritonExperts
+    
 
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
@@ -59,6 +96,8 @@ def backend_to_kernel_cls(
 def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     """Map user's MoEBackend to Int8MoeBackend."""
     mapping = {
+        "ppu_deep_gemm": Int8MoeBackend.PPU_DEEPGEMM,
+        "ppu_acext": Int8MoeBackend.ACEXT,
         "triton": Int8MoeBackend.TRITON,
     }
     if backend := mapping.get(runner_backend):
@@ -125,23 +164,51 @@ def select_int8_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_int8_backend(runner_backend)
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            if requested_backend == Int8MoeBackend.PPU_DEEPGEMM:
+                requested_backend = Int8MoeBackend.BATCHED_PPU_DEEPGEMM
+            elif requested_backend == Int8MoeBackend.TRITON:
+                raise ValueError(
+                    "vLLM Triton MoE backend is disabled for this configuration."
+                )
+            elif requested_backend == Int8MoeBackend.ACEXT:
+                raise ValueError(
+                    "vLLM ACEXT MoE backend is disabled for this configuration."
+                )
         return _return_or_raise(requested_backend)
+
+    # PPU FIXME: may need to call acext API to check availability.
+    Acext_moe_enabled = (
+        is_acext_supported()
+        and (not envs.VLLM_PPU_MOE_BACKEND or
+             envs.VLLM_PPU_MOE_BACKEND == "acext")
+    )
+
+    PPU_DeepGemm_moe_enabled = (
+        is_deep_gemm_supported()
+        and (not envs.VLLM_PPU_MOE_BACKEND or
+             envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
+    )
+
+
+    if not PPU_DeepGemm_moe_enabled or config.has_bias:
+        AVAILABLE_BACKENDS.remove(Int8MoeBackend.PPU_DEEPGEMM)
+        AVAILABLE_BACKENDS.remove(Int8MoeBackend.BATCHED_PPU_DEEPGEMM)
+    
+    if not Acext_moe_enabled:
+        AVAILABLE_BACKENDS.remove(Int8MoeBackend.ACEXT)
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
+        k_cls = backend_to_kernel_cls(backend)
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, None, None, activation_format
+        )
+        if supported:
+            logger.info_once(_make_log_backend(backend))
+            return backend, k_cls
+
+        logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No Int8 MoE backend supports the deployment configuration."
@@ -158,6 +225,15 @@ def make_int8_moe_quant_config(
     assert (a1_scale is None and a2_scale is None) or (
         a1_scale is not None and a2_scale is not None
     ), "a1_scale and a2_scale must both be provided or both be None"
+
+    if current_platform.is_ppu():
+        return int8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            per_act_token_quant=per_act_token_quant,
+        )
 
     if a1_scale is None or a2_scale is None:
         return int8_w8a16_moe_quant_config(
