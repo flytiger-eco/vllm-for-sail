@@ -14,11 +14,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     prep_scale_for_group_broadcast,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    DeepGemmQuantScaleFMT,
-    is_deep_gemm_e8m0_used,
-    is_deep_gemm_supported,
-)
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import (
+        DeepGemmQuantScaleFMT,
+        is_deep_gemm_e8m0_used,
+        is_deep_gemm_supported,
+        )
+else:
+    from vllm.utils.deep_gemm import (
+        DeepGemmQuantScaleFMT,
+        is_deep_gemm_e8m0_used,
+        is_deep_gemm_supported,
+    )
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
