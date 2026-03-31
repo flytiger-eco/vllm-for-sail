@@ -119,6 +119,11 @@ class QuantKey:
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
 
+kStaticChannelScale = ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL)
+kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 
 kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
 kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
