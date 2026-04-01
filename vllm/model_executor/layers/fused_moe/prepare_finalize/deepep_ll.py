@@ -22,6 +22,7 @@ from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -89,6 +90,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        use_int8_dispatch: bool = False,
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
@@ -98,6 +100,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+        self.use_int8_dispatch = use_int8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -170,6 +173,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if quant_config.block_shape is not None
                 else None
             )
+            if (current_platform.is_ppu()
+                and quant_config.block_shape is None):
+                # DeepEP kernels did the quantization for us.
+                x, x_scales = x
+                return x, x_scales
             if block_k == DEEPEP_QUANT_BLOCK_SIZE:
                 # DeepEP kernels did the quantization for us.
                 x, x_scales = x
@@ -178,6 +186,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # Dequant to get back the tokens in the datatype we dispatched in.
             x_fp8, x_scales = x
             x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
+        
+        if self.use_int8_dispatch and current_platform.is_ppu():
+            assert quant_config.block_shape is None
+            # DeepEP kernels did the quantization for us.
+            x, x_scales = x
+            return x, x_scales
 
         assert isinstance(x, (torch.Tensor, tuple))
         q_dtype = quant_config.quant_dtype
@@ -252,7 +266,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         a2a_idx = dbo_current_ubatch_id()
 
-        if self.use_fp8_dispatch:
+        if self.use_fp8_dispatch and quant_config.block_shape:
             assert hidden_size % 128 == 0, (
                 "DeepEP kernels quantize the inputs in blocks of shape 128"
             )
@@ -329,6 +343,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 ),
                 async_finish=False,
                 return_recv_hook=True,
+                **(dict(use_int8=self.use_int8_dispatch) if current_platform.is_ppu() else dict()),
+                **(
+                    dict(
+                        quant_size=quant_config.block_shape[1]
+                        if quant_config.block_shape
+                        else hidden_size
+                    )
+                    if current_platform.is_ppu()
+                    else dict()
+                ),
             )
         self.handles[a2a_idx] = handle
 
