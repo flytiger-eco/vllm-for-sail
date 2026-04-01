@@ -23,6 +23,7 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+from vllm.platforms import current_platform
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -230,7 +231,20 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         #   DeepEP kernels only support dispatching block scales.
         # * For expert kernels that require unquantized inputs,
         #   defer quantization to FusedMoEExpertsPermuteUnpermute.
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if current_platform.is_ppu():
+            if (not has_scales or not quant_config.is_block_quantized) and not defer_input_quant:
+                # Quantize after dispatch.
+                expert_x_scale = None
+                if expert_x.numel() != 0:
+                    expert_x, expert_x_scale = moe_kernel_quantize_input(
+                        expert_x,
+                        a1_scale,
+                        quant_dtype=quant_config.quant_dtype,
+                        per_act_token_quant=quant_config.per_act_token_quant,
+                        block_shape=quant_config.block_shape,
+                        is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+                    )   
+        elif not quant_config.is_block_quantized and not defer_input_quant:
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
@@ -279,7 +293,22 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # * For all other quantization, dispatch after.
         # * For expert kernels that require unquantized inputs,
         #   defer quantization to FusedMoEExpertsPermuteUnpermute.
-        if quant_config.is_block_quantized and not defer_input_quant:
+        if (current_platform.is_ppu()
+            and (quant_config.use_fp8_w8a8
+            or quant_config.use_int8_w8a8
+            or not quant_config.is_block_quantized
+            ) and not defer_input_quant):
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
+            )
+            if a1q_scale is not None and a1q_scale.numel() == 1:
+                a1q_scale = a1q_scale.view(1, 1)
+            a1_post_scale = None
+        elif quant_config.is_block_quantized and not defer_input_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
