@@ -309,7 +309,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             explicitly_destroy=True,
-            enable_shrink=self.support_fault_tolerance,
+            # FIXME: PPU deep_ep does not support enable_shrink now
+            # enable_shrink=self.support_fault_tolerance,
         )
         return kwargs
 
