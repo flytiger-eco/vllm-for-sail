@@ -17,7 +17,12 @@ from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import is_deep_gemm_supported
+    from vllm.model_executor.warmup.ppu_deep_gemm_warmup import deep_gemm_warmup
+else:
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
@@ -59,7 +64,24 @@ def kernel_warmup(worker: "Worker"):
         and is_deep_gemm_supported()
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
-    if do_deep_gemm_warmup:
+    if do_deep_gemm_warmup and not current_platform.is_ppu():
+        model = worker.get_model()
+        max_tokens = worker.scheduler_config.max_num_batched_tokens
+        deep_gemm_warmup(model, max_tokens)
+
+    # Deep GEMM warmup
+    do_ppu_deep_gemm_warmup = (
+        current_platform.is_ppu()
+        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+        and is_deep_gemm_supported()
+        and
+        ((not envs.VLLM_PPU_MOE_BACKEND or
+         envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
+         or (not envs.VLLM_PPU_DENSE_BACKEND or
+         envs.VLLM_PPU_DENSE_BACKEND == "deepgemm")
+        )
+    )
+    if do_ppu_deep_gemm_warmup:
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
