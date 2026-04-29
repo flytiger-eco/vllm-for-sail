@@ -620,6 +620,10 @@ class Indexer(nn.Module):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
+        self.is_fp4_ckpt = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "modelopt_fp4"
+        )
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -634,16 +638,36 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
-        )
+        if self.is_fp4_ckpt:
+            # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
+            # weights_proj does not get quantized,
+            # so we run both with quant_config=None
+            # wk may be upcasted from the default quant;
+            # experiments show fusion is always faster unless WK proj is in FP4,
+            # which is not the case for all known quants.
+            self.wk_weights_proj = MergedColumnParallelLinear(
+                hidden_size,
+                [self.head_dim, self.n_head],
+                bias=False,
+                quant_config=None,
+                disable_tp=True,
+                prefix=f"{prefix}.wk_weights_proj",
+            )
+        else:
+            self.wk = ReplicatedLinear(
+                hidden_size,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.wk",
+            )
+            self.weights_proj = ReplicatedLinear(
+                hidden_size,
+                self.n_head,
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.weights_proj",
+            )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
@@ -1227,6 +1251,10 @@ class DeepseekV2Model(nn.Module):
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
+        self.is_fp4_ckpt = (
+            quant_config is not None
+            and quant_config.get_name() == "modelopt_fp4"
+        )
         if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
@@ -1356,13 +1384,14 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
-        indexer_fused_mapping = [
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
-        ]
-        stacked_params_mapping.extend(indexer_fused_mapping)
+        if self.is_fp4_ckpt:
+            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+            _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
+            indexer_fused_mapping = [
+                ("wk_weights_proj", "wk", 0),
+                ("wk_weights_proj", "weights_proj", 1),
+            ]
+            stacked_params_mapping.extend(indexer_fused_mapping)
 
         if self.use_mha:
             stacked_params_mapping.extend(mha_params_mapping)
@@ -1399,7 +1428,7 @@ class DeepseekV2Model(nn.Module):
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
-            if _try_load_fp8_indexer_wk(
+            if self.is_fp4_ckpt and _try_load_fp8_indexer_wk(
                 name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
             ):
                 continue
