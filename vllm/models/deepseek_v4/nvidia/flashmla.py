@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.platforms import current_platform
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
@@ -124,6 +125,9 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 f"DeepseekV4 FlashMLA does not support {num_heads} heads "
                 "(FP8 decode kernel requires h_q in {64, 128})."
             )
+        if current_platform.is_ppu():
+            # PPU FlashMLA supports arbitrary head counts; no padding needed.
+            return num_heads
         return 64 if num_heads <= 64 else 128
 
     @classmethod

@@ -335,8 +335,11 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
 
-        if current_platform.is_cuda():
+        if current_platform.is_cuda() and not current_platform.is_ppu():
             # NVIDIA GPUs.
+            # NOTE: ``current_platform.is_cuda()`` returns True on PPU as well
+            # (PPU re-uses the cuda code path internally), so we must explicitly
+            # exclude PPU here — cutedsl is NVIDIA-only.
             if self.head_dim == 512:
                 from .nvidia.ops.sparse_attn_compress_cutedsl import (
                     compress_norm_rope_store_cutedsl,
@@ -350,8 +353,9 @@ class DeepseekCompressor(nn.Module):
                 # Use a triton kernel.
                 compress_norm_rope_store_fn = compress_norm_rope_store_triton
         else:
-            # AMD GPUs.
-            # Always use a triton kernel.
+            # AMD / PPU / XPU. Always use the triton kernel — its dispatcher
+            # routes to the ``_sm80`` variants when the device is SM80, since
+            # ``tl.float8e4nv`` is unsupported there.
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
 
         compress_norm_rope_store_fn(

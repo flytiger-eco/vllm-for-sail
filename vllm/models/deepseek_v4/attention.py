@@ -21,12 +21,13 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
+    fused_inv_rope_float32,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -52,7 +53,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
-from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -155,6 +155,18 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.n_local_heads = num_heads
         self.head_dim = head_dim
         self.scale = scale
+
+        # FlashMLA sparse kernel only supports 64 or 128 heads; pad up to the
+        # next supported size. Must match DeepseekV4MLAAttention.padded_heads.
+        if num_heads <= 64:
+            self.padded_heads = 64
+        elif num_heads <= 128:
+            self.padded_heads = 128
+        else:
+            raise ValueError(
+                f"DeepseekV4 attention does not support {num_heads} heads "
+                "(must be <= 128)."
+            )
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
@@ -301,21 +313,74 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
         o = o_padded[:, : self.n_local_heads, :]
 
-        # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
-            z = rocm_inv_rope_einsum(
-                self.rotary_emb,
+        if self.wo_a.weight.dtype == torch.int8:
+            wo_a = self.wo_a.weight
+            wo_a_scale = self.wo_a.weight_scale
+            # Fused inv RoPE → float32 (skip INT8 roundtrip)
+            o_f = fused_inv_rope_float32(
                 o,
                 positions,
-                self.rope_head_dim,
-                self.n_local_groups,
-                self.o_lora_rank,
-                self.wo_a,
+                self.rotary_emb.cos_sin_cache,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                nope_dim=self.nope_head_dim,
+                rope_dim=self.rope_head_dim,
+            )
+            # Weight dequant (per-channel INT8 → float32) + reshape for einsum
+            wo_a_f = _dequant_channel(wo_a, wo_a_scale).reshape(
+                self.n_local_groups, self.o_lora_rank, -1
+            )
+            z = torch.empty(
+                (num_tokens, self.n_local_groups, self.o_lora_rank),
+                device=o.device,
+                dtype=torch.bfloat16,
+            )
+            torch.ops.vllm.deepseek_v4_unquantized_einsum(
+                o_f, wo_a_f, z, "bhr,hdr->bhd",
             )
             return self.wo_b(z.flatten(1))
 
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+        wo_a_scale_inv = getattr(self.wo_a, "weight_scale_inv", None)
+
+        if wo_a_scale_inv is not None:
+            # Block FP8 path: inverse RoPE + FP8 quant + fp8_einsum
+            wo_a_fp8 = self.wo_a.weight
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                nope_dim=self.nope_head_dim,
+                rope_dim=self.rope_head_dim,
+                tma_aligned_scales=self._tma_aligned_scales,
+            )
+            z = torch.empty(
+                (num_tokens, self.n_local_groups, self.o_lora_rank),
+                device=o.device,
+                dtype=torch.bfloat16,
+            )
+            torch.ops.vllm.deepseek_v4_fp8_einsum(
+                o_fp8,
+                o_scale,
+                wo_a_fp8,
+                wo_a_scale_inv,
+                z,
+                "bhr,hdr->bhd",
+                list(self._einsum_recipe),
+            )
+            return self.wo_b(z.flatten(1))
+
+        # Channelwise FP8 (PPU): wo_a pre-dequanted to FP32 at load time.
+        assert self.wo_a.weight.dtype != torch.float8_e4m3fn, (
+            "wo_a.weight should be pre-dequanted to FP32 on PPU channelwise "
+            "path. Check wo_a_pre_dequant condition in "
+            "DeepseekV4Attention.__init__."
+        )
+        wo_a_view = self.wo_a.weight.reshape(
+            self.n_local_groups, self.o_lora_rank, -1
+        )
+        o_f = fused_inv_rope_float32(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -323,27 +388,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
             rope_dim=self.rope_head_dim,
-            tma_aligned_scales=self._tma_aligned_scales,
         )
-
-        wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
-
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
             device=o.device,
             dtype=torch.bfloat16,
         )
-        torch.ops.vllm.deepseek_v4_fp8_einsum(
-            o_fp8,
-            o_scale,
-            wo_a_fp8,
-            wo_a_scale,
-            z,
-            "bhr,hdr->bhd",
-            list(self._einsum_recipe),
+        torch.ops.vllm.deepseek_v4_unquantized_einsum(
+            o_f, wo_a_view, z, "bhr,hdr->bhd",
         )
-
         return self.wo_b(z.flatten(1))
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
@@ -571,6 +624,31 @@ direct_register_custom_op(
 )
 
 
+def _dequant_channel(
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Dequantize per-channel INT8 quantized weight back to float32.
+
+    For a weight tensor of shape [K, N]:
+      - b:        INT8 quantized values, shape [K, N]
+      - b_scale:  per-output-channel scales, shape [K] or [K, 1]
+
+    Returns:
+      Dequantized float32 tensor of shape [K, N].
+    """
+    if b_scale is None:
+        return b.to(torch.float32)
+
+    b_scale_f = b_scale.to(torch.float32)
+
+    if b_scale_f.dim() == 1:
+        b_scale_f = b_scale_f.unsqueeze(-1)  # [K] -> [K, 1] for broadcasting
+    # b.to(float32) handles the int8 -> float conversion,
+    # then multiply by per-channel scale.
+    return (b.to(torch.float32) * b_scale_f)
+
+
 def deepseek_v4_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -600,6 +678,42 @@ direct_register_custom_op(
     op_func=deepseek_v4_fp8_einsum,
     mutates_args=["out"],
     fake_impl=deepseek_v4_fp8_einsum_fake,
+)
+
+
+def _deepseek_v4_unquantized_einsum_torch(
+    equation: str,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    result = torch.einsum(equation, a, b)
+    out.copy_(result.to(out.dtype))
+
+
+def deepseek_v4_unquantized_einsum(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+) -> None:
+    _deepseek_v4_unquantized_einsum_torch(equation, a, b, out)
+
+
+def deepseek_v4_unquantized_einsum_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="deepseek_v4_unquantized_einsum",
+    op_func=deepseek_v4_unquantized_einsum,
+    mutates_args=["out"],
+    fake_impl=deepseek_v4_unquantized_einsum_fake,
 )
 
 

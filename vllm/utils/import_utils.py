@@ -473,5 +473,25 @@ def has_fbgemm_gpu() -> bool:
 
 
 def has_cutedsl() -> bool:
-    """Whether the optional `cutelass` package is available."""
-    return _has_module("cutlass")
+    """Whether cutedsl-based kernels can actually run on the current platform.
+
+    Requires BOTH:
+
+    1. The ``cutlass`` Python package is importable, AND
+    2. The current platform is genuine NVIDIA CUDA (i.e. ``is_cuda()`` is
+       True AND ``is_ppu()`` is False).
+
+    The package alone is insufficient: PPU images often inherit
+    ``nvidia-cutlass-dsl`` transitively from packages such as ``flashmla``
+    or ``flashinfer-python``, but cutedsl kernels rely on NVIDIA-specific
+    PTX / SM89+ features that PPU hardware cannot execute even when the
+    package imports cleanly. Note that ``current_platform.is_cuda()``
+    returns True on PPU as well (PPU re-uses the CUDA code path), so the
+    ``not is_ppu()`` check is required.
+    """
+    if not _has_module("cutlass"):
+        return False
+    # Lazy import to avoid touching the platform layer during module import.
+    from vllm.platforms import current_platform
+
+    return current_platform.is_cuda() and not current_platform.is_ppu()

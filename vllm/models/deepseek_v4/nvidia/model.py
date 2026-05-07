@@ -116,6 +116,7 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
+
 def make_deepseek_v4_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
@@ -705,9 +706,18 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.max_position_embeddings = config.max_position_embeddings
 
-        # Padded to min 64 heads for FlashMLA, initialized to -inf
-        # (no sink effect). Weight loading fills the first n_local_heads slots.
-        padded_heads = max(self.n_local_heads, 64)
+        # attn_sink shape must match the layer's ``padded_heads``, which is
+        # dictated by the FlashMLA impl class:
+        #   - NVIDIA: 64 or 128 (FP8 decode kernel requires h_q in {64, 128})
+        #   - PPU:    n_local_heads (FlashMLA supports arbitrary head counts)
+        # Initialized to -inf (no sink effect). Weight loading fills the
+        # first ``n_local_heads`` slots from the checkpoint; any trailing
+        # padded slots stay -inf.
+        from .flashmla import DeepseekV4FlashMLASparseImpl
+
+        padded_heads = DeepseekV4FlashMLASparseImpl.get_padded_num_q_heads(
+            self.n_local_heads
+        )
         self.attn_sink = nn.Parameter(
             torch.full((padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
@@ -732,11 +742,50 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
+        # Detect channelwise quant for wo_a and pre-dequant to FP32 before
+        # TP sharding. This is a PPU-only optimization for FP8 channelwise:
+        # PPU lacks an FP8 channelwise einsum kernel, so we eagerly dequant
+        # at load time and run the einsum unquantized.
+        #
+        # INT8 channelwise must NOT take this path: it has its own forward
+        # branch that consumes INT8 weight + weight_scale and dequants on
+        # the fly (see DeepseekV4MLAAttention.forward INT8 path). Treating
+        # INT8 as channelwise here would unquantize wo_a and drop the
+        # weight_scale parameter, causing a KeyError on weight_scale at
+        # load time.
+        wo_a_pre_dequant = False
+        if current_platform.is_ppu() and quant_config is not None:
+            fp8_cw_layers = getattr(
+                quant_config, "fp8_channelwise_layers", None
+            )
+            if fp8_cw_layers and any("wo_a" in p for p in fp8_cw_layers):
+                wo_a_pre_dequant = True
+            elif hasattr(quant_config, "target_scheme_map"):
+                for scheme_dict in quant_config.target_scheme_map.values():
+                    weights_args = scheme_dict.get("weights")
+                    if weights_args is None:
+                        continue
+                    strategy = str(
+                        getattr(weights_args, "strategy", "")
+                    ).lower()
+                    qtype = str(getattr(weights_args, "type", "")).lower()
+                    num_bits = getattr(weights_args, "num_bits", 0)
+                    # FP8 channelwise: type=FLOAT, num_bits=8,
+                    # strategy=CHANNEL. INT8 channelwise (type=INT) must
+                    # not match here.
+                    if (
+                        "channel" in strategy
+                        and "float" in qtype
+                        and num_bits == 8
+                    ):
+                        wo_a_pre_dequant = True
+                        break
         self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None if wo_a_pre_dequant else quant_config,
+            params_dtype=torch.float32 if wo_a_pre_dequant else None,
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
@@ -751,7 +800,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
+        self.scale_fmt = config.quantization_config.get("scale_fmt", None)
 
         self.rope_parameters = config.rope_scaling
 
@@ -1368,22 +1417,70 @@ class DeepseekV4Model(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
 
-def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+@torch.compile(backend=current_platform.simple_compile_backend)
+def hc_head(
+    hidden_states: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_norm_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    hc_mult, hidden_size = hidden_states.shape[-2:]
+    outer_shape = hidden_states.shape[:-2]
+    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+    num_tokens = hs_flat.shape[0]
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+    )
+    torch.ops.vllm.hc_head_fused_kernel(
+        hs_flat,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_norm_eps,
+        hc_eps,
+        hc_mult,
+    )
+    return out.view(*outer_shape, hidden_size)
+
+
+def _make_deepseek_v4_weights_mapper(
+    expert_dtype: str,
+    fp8_channelwise_layers: list[str] | None = None,
+) -> WeightsMapper:
     if expert_dtype == "fp4":
-        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # shared experts use Fp8LinearMethod's block scales, which
-        # register as ``weight_scale_inv``.
-        scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
-    else:
+        if fp8_channelwise_layers:
+            # Mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense):
+            # MXFP4 MoE registers ``weight_scale`` and channelwise dense layers
+            # also register ``weight_scale`` (no ``_inv`` suffix).  Mapping all
+            # ``.scale`` keys uniformly avoids the fused-layer name mismatch
+            # (e.g. ``fused_wqa_wkv`` vs original ``wq_a``/``wkv``) that a
+            # per-layer regex cannot handle.
+            scale_regex: dict[re.Pattern, str] = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
+            # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
+            # shared experts use Fp8LinearMethod's block scales, which
+            # register as ``weight_scale_inv``.
+            scale_regex = {
+                re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
+    elif expert_dtype == "fp8":
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
+        }
+    elif expert_dtype in ("int8", "int4"):
+        scale_regex = {
+            re.compile(r"\.scale$"): ".weight_scale",
         }
     return WeightsMapper(
         orig_to_new_prefix={
