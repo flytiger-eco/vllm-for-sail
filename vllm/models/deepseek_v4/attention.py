@@ -26,6 +26,8 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
     fused_q_kv_rmsnorm,
 )
+from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -219,6 +221,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
+        # wo_a uses the standard quant_config for all quantization schemes
+        # (FP8 blockwise, FP8 channelwise, INT8 channelwise). The _o_proj
+        # method in the platform subclass dispatches at runtime based on
+        # weight dtype and scale attribute:
+        #   - int8 + weight_scale        → INT8 channelwise einsum
+        #   - fp8  + weight_scale        → FP8 channelwise einsum
+        #   - fp8  + weight_scale_inv    → FP8 blockwise einsum
         self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,

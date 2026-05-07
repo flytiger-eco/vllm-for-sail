@@ -546,12 +546,22 @@ def has_fbgemm_gpu() -> bool:
 
 def has_cutedsl() -> bool:
     """Whether the optional `cutelass` package is available."""
-    return _has_module("cutlass")
+    if not _has_module("cutlass"):
+        return False
+    # Lazy import to avoid touching the platform layer during module import.
+    from vllm.platforms import current_platform
+    # NOTE: PPU does not support cutelass yet.
+    return current_platform.is_cuda() and not current_platform.is_ppu()
 
 
 def has_humming() -> bool:
     """Whether the optional `humming` package is available."""
-    return _has_module("humming")
+    if not _has_module("humming"):
+        return False
+    # Lazy import to avoid touching the platform layer during module import.
+    from vllm.platforms import current_platform
+    # NOTE: PPU does not support humming yet.
+    return current_platform.is_cuda() and not current_platform.is_ppu()
 
 
 def check_torchcodec_available():

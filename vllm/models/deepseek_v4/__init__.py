@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4 model — hardware-isolated entry point.
 
-The actual implementation lives under ``nvidia/`` and ``amd/``; this module
-picks the right one for the current platform and re-exports the public
-classes used by the model registry and quantization config lookup.
+The actual implementation lives under ``nvidia/``, ``amd/``, and ``ppu/``;
+this module picks the right one for the current platform and re-exports the
+public classes used by the model registry and quantization config lookup.
 """
 
 from vllm.platforms import current_platform
@@ -24,6 +24,12 @@ elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
+    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
+elif current_platform.is_ppu():
+    from .ppu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .ppu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+
+    # Disable DSpark on PPU temporarily.
     DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]

@@ -197,6 +197,7 @@ _fp8_einsum_impl: Callable[..., Any] | None = None
 _fp8_grouped_nopad_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
 _int8_gemm_nt_impl: Callable[..., Any] | None = None
+_int8_einsum_impl: Callable[..., Any] | None = None
 _int8_grouped_nopad_impl: Callable[..., Any] | None = None
 _int8_grouped_masked_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
@@ -227,7 +228,8 @@ def _lazy_init() -> None:
 
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_masked_impl, _fp8_grouped_nopad_impl
-    global _int8_gemm_nt_impl, _int8_grouped_nopad_impl, _int8_grouped_masked_impl
+    global _int8_gemm_nt_impl, _int8_einsum_impl
+    global _int8_grouped_nopad_impl, _int8_grouped_masked_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
     global _fp4_grouped_nopad_impl, _fp4_grouped_masked_impl
     global _set_compile_mode_impl, _get_compile_mode_impl
@@ -247,6 +249,7 @@ def _lazy_init() -> None:
         or _grouped_masked_impl is not None
         or _fp8_grouped_nopad_impl is not None
         or _int8_gemm_nt_impl is not None
+        or _int8_einsum_impl is not None
         or _int8_grouped_nopad_impl is not None
         or _int8_grouped_masked_impl is not None
         or _bf16_grouped_nopad_impl is not None
@@ -302,6 +305,7 @@ def _lazy_init() -> None:
         _dg, "transform_sf_into_required_layout", None
     )
     _int8_gemm_nt_impl = getattr(_dg, "gemm_int8_int8_bf16_nt", None)
+    _int8_einsum_impl = getattr(_dg, "int8_einsum", None)
     _int8_grouped_nopad_impl = getattr(
         _dg, "m_grouped_gemm_int8_int8_bf16_nt_nopad", None
     )
@@ -387,6 +391,13 @@ def fp8_einsum(*args, **kwargs):
     if _fp8_einsum_impl is None:
         return _missing(*args, **kwargs)
     return _fp8_einsum_impl(*args, **kwargs)
+
+
+def int8_einsum(*args, **kwargs):
+    _lazy_init()
+    if _int8_einsum_impl is None:
+        return _missing(*args, **kwargs)
+    return _int8_einsum_impl(*args, **kwargs)
 
 def m_grouped_int8_gemm_nt_nopad(*args, **kwargs):
     _lazy_init()
