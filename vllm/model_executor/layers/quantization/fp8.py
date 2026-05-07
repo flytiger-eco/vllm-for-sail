@@ -843,6 +843,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
+        swiglu_limit = getattr(layer, 'swiglu_limit', None)
 
         quant_config = make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
@@ -851,6 +852,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            swiglu_limit=swiglu_limit,
         )
 
         # Inject biases into the quant config if the model has them

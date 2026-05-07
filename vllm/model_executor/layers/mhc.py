@@ -62,6 +62,7 @@ def mhc_pre_big_fuse_tilelang(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     hc_mult: int = 4,
+    enable_pdl: bool = False,
 ):
     """Deeply fused kernels, everything other than gemm & sqrsum in mHC pre block."""
     num_tokens = T.dynamic("num_tokens")
@@ -79,7 +80,8 @@ def mhc_pre_big_fuse_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
-        T.pdl_sync()
+        if enable_pdl:
+            T.pdl_sync()
         ##################################################################
         # _pre_norm_fn_fwd_norm
         rms = T.alloc_fragment(1, T.float32)
@@ -175,7 +177,8 @@ def mhc_pre_big_fuse_tilelang(
                         ol[i1_h] += pre * xl[i_hc, i1_h]
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
-        T.pdl_trigger()
+        if enable_pdl:
+            T.pdl_trigger()
 
 
 def mhc_pre(
@@ -235,9 +238,12 @@ def mhc_pre(
     fn_flat = fn
 
     # these number are from deepgemm kernel impl
-    block_k = 64
-    block_m = 64
-    n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
+    if current_platform.is_ppu():
+        n_splits = 1
+    else:
+        block_k = 64
+        block_m = 64
+        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
 
     post_mix = torch.empty(
         num_tokens,
@@ -272,7 +278,10 @@ def mhc_pre(
         device=residual.device,
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    if current_platform.is_ppu():
+        from vllm.utils.ppu_deep_gemm import tf32_hc_prenorm_gemm
+    else:
+        from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
 
     tf32_hc_prenorm_gemm(
         residual_flat.view(num_tokens, hc_mult * hidden_size),
@@ -299,6 +308,7 @@ def mhc_pre(
         sinkhorn_repeat,
         n_splits,
         hc_mult,
+        enable_pdl=False if current_platform.is_ppu() else True,
     )
 
     post_mix = post_mix.view(*outer_shape, hc_mult, 1)
@@ -366,6 +376,7 @@ def mhc_post_tilelang(
     hidden: int,
     n_thr: int = 128,
     h_blk: int = 1024,
+    enable_pdl: bool = False,
 ) -> tilelang.JITKernel:
     # rename for shorter code
     n = T.dynamic("num_tokens")
@@ -388,7 +399,8 @@ def mhc_post_tilelang(
 
         a_local = T.alloc_fragment((hc, hc), T.float32)
         c_local = T.alloc_fragment(hc, T.float32)
-        T.pdl_sync()
+        if enable_pdl:
+            T.pdl_sync()
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
@@ -405,7 +417,8 @@ def mhc_post_tilelang(
             T.copy(x_local, x_shared)
 
             T.copy(x_shared, x[i_n, 0, i0_h * h_blk])
-        T.pdl_trigger()
+        if enable_pdl:
+            T.pdl_trigger()
 
 
 def mhc_post(
@@ -469,6 +482,7 @@ def hc_head_fuse_tilelang(
     hc_mult: int = 4,
     n_thr: int = 128,
     h_blk: int = 1024,
+    enable_pdl: bool = False,
 ):
     """Two-pass fused kernel for hc_head.
 
@@ -490,7 +504,8 @@ def hc_head_fuse_tilelang(
     out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
 
     with T.Kernel(num_tokens, threads=n_thr) as i:
-        T.pdl_sync()
+        if enable_pdl:
+            T.pdl_sync()
 
         # ------------------------------------------------------------------
         # Pass 1 – for each residual channel m_c and h_block:
@@ -547,8 +562,8 @@ def hc_head_fuse_tilelang(
                     ol[i1_h] += pre * xl[i_hc, i1_h]
 
             T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
-
-        T.pdl_trigger()
+        if enable_pdl:
+            T.pdl_trigger()
 
 
 def _hc_head_fused_kernel(
