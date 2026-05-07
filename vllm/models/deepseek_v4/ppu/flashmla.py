@@ -13,9 +13,11 @@ from vllm.models.deepseek_v4.common.ops import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+from vllm.models.deepseek_v4.ppu.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
+    deep_gemm_fp8_channel_o_proj,
+    deep_gemm_int8_o_proj,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -41,6 +43,33 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        if self.wo_a.weight.dtype == torch.int8:
+            return deep_gemm_int8_o_proj(
+                o,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.wo_a,
+                self.wo_b,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                nope_dim=self.nope_head_dim,
+                rope_dim=self.rope_head_dim,
+                o_lora_rank=self.o_lora_rank,
+            )
+        elif self.wo_a.weight.dtype != torch.float8_e4m3fn:
+            # Channelwise FP8 (PPU): wo_a pre-dequanted to FP32 at load time.
+            return deep_gemm_fp8_channel_o_proj(
+                o,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.wo_a,
+                self.wo_b,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                nope_dim=self.nope_head_dim,
+                rope_dim=self.rope_head_dim,
+                o_lora_rank=self.o_lora_rank,
+            )
         return deep_gemm_fp8_o_proj(
             o,
             positions,

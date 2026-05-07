@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
     )
+    from vllm.model_executor.models.utils import WeightsMapper
 
 
 class DeepseekV4FP8Config(Fp8Config):
@@ -44,11 +46,13 @@ class DeepseekV4FP8Config(Fp8Config):
     the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, fp8_channelwise_layers: list[str] | None = None,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
         self._resolved_moe_quant_algo: str | None = None
         self._nvfp4_config: ModelOptNvFp4Config | None = None
+        self.fp8_channelwise_layers: list[str] = fp8_channelwise_layers or []
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
@@ -119,17 +123,74 @@ class DeepseekV4FP8Config(Fp8Config):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
-        if not (
-            isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
-        ):
+        if not isinstance(hf_quant_cfg, dict):
             return None
+        quant_method = hf_quant_cfg.get("quant_method")
         model_type = getattr(hf_config, "model_type", None)
-        if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
-            return "deepseek_v4_fp8"
+        if quant_method in ("fp8", "deepseek_v4_fp8"):
+            if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
+                return "deepseek_v4_fp8"
         return None
 
+    @classmethod
+    def from_config(cls, config: dict) -> DeepseekV4FP8Config:
+        quant_method = config.get("quant_method", "")
+        fp8_channelwise_layers = config.get("fp8_channelwise_layers") or []
+        is_fp8_serialized = "fp8" in quant_method or bool(fp8_channelwise_layers)
+        activation_scheme = config.get("activation_scheme", "dynamic")
+        ignored_layers = config.get("ignored_layers") or config.get(
+            "modules_to_not_convert"
+        )
+        weight_block_size = config.get("weight_block_size")
+        return cls(
+            is_checkpoint_fp8_serialized=is_fp8_serialized,
+            activation_scheme=activation_scheme,
+            ignored_layers=ignored_layers,
+            weight_block_size=weight_block_size,
+            fp8_channelwise_layers=fp8_channelwise_layers,
+        )
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper) -> None:
+        super().apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.fp8_channelwise_layers:
+            self.fp8_channelwise_layers = hf_to_vllm_mapper.apply_list(
+                self.fp8_channelwise_layers
+            )
+
     def get_quant_method(self, layer, prefix):
+        # FP8 channelwise override for dense layers (quant-config-driven)
+        if isinstance(layer, LinearBase) and self.fp8_channelwise_layers:
+            matched = is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.fp8_channelwise_layers,
+                fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
+            )
+            if matched:
+                from compressed_tensors.quantization import (
+                    QuantizationArgs,
+                    QuantizationStrategy,
+                    QuantizationType,
+                )
+
+                from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+                    CompressedTensorsLinearMethod,
+                )
+                from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
+                    CompressedTensorsW8A8Fp8,
+                )
+                channelwise_args = QuantizationArgs(
+                    strategy=QuantizationStrategy.CHANNEL,
+                    type=QuantizationType.FLOAT,
+                    num_bits=8,
+                    symmetric=True,
+                )
+                scheme = CompressedTensorsW8A8Fp8(
+                    weight_quant=channelwise_args,
+                    is_static_input_scheme=False,
+                )
+                layer.scheme = scheme
+                return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
             if is_layer_skipped(
                 prefix=prefix,
@@ -142,7 +203,6 @@ class DeepseekV4FP8Config(Fp8Config):
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
                     )
-
                     return ModelOptNvFp4FusedMoE(
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,

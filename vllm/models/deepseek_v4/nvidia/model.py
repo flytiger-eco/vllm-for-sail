@@ -115,6 +115,7 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
+
 def make_deepseek_v4_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
@@ -1164,22 +1165,70 @@ class DeepseekV4Model(nn.Module):
             layer.ffn.finalize_mega_moe_weights()
 
 
-def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+@torch.compile(backend=current_platform.simple_compile_backend)
+def hc_head(
+    hidden_states: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_norm_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    hc_mult, hidden_size = hidden_states.shape[-2:]
+    outer_shape = hidden_states.shape[:-2]
+    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+    num_tokens = hs_flat.shape[0]
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+    )
+    torch.ops.vllm.hc_head_fused_kernel(
+        hs_flat,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_norm_eps,
+        hc_eps,
+        hc_mult,
+    )
+    return out.view(*outer_shape, hidden_size)
+
+
+def _make_deepseek_v4_weights_mapper(
+    expert_dtype: str,
+    fp8_channelwise_layers: list[str] | None = None,
+) -> WeightsMapper:
     if expert_dtype == "fp4":
-        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # shared experts use Fp8LinearMethod's block scales, which
-        # register as ``weight_scale_inv``.
-        scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
-    else:
+        if fp8_channelwise_layers:
+            # Mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense):
+            # MXFP4 MoE registers ``weight_scale`` and channelwise dense layers
+            # also register ``weight_scale`` (no ``_inv`` suffix).  Mapping all
+            # ``.scale`` keys uniformly avoids the fused-layer name mismatch
+            # (e.g. ``fused_wqa_wkv`` vs original ``wq_a``/``wkv``) that a
+            # per-layer regex cannot handle.
+            scale_regex: dict[re.Pattern, str] = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
+            # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
+            # shared experts use Fp8LinearMethod's block scales, which
+            # register as ``weight_scale_inv``.
+            scale_regex = {
+                re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
+    elif expert_dtype == "fp8":
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
+        }
+    elif expert_dtype in ("int8", "int4"):
+        scale_regex = {
+            re.compile(r"\.scale$"): ".weight_scale",
         }
     return WeightsMapper(
         orig_to_new_prefix={
