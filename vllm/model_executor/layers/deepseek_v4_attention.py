@@ -7,19 +7,24 @@ DeepseekV4 MLA Attention Layer
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm.platforms import current_platform
 import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
-from vllm.utils.deep_gemm import fp8_einsum
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import fp8_einsum
+else:
+    from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,

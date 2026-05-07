@@ -68,6 +68,8 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    # PPU NOTE: Fix dpskv4 dp+ep ll mode failure
+    topk_indices = topk_indices.to(torch.int32)
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,

@@ -22,7 +22,10 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    swiglu_limit_func,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
@@ -52,7 +55,7 @@ from vllm.utils.ppu_deep_gemm import (
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.platforms import current_platform
-from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -131,6 +134,8 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
                 quant_config.block_shape[1]
                 == get_mk_alignment_for_contiguous_layout(is_blockwise=self.block_wise)[1]
             )
+
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -235,7 +240,17 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
-        self.activation(activation, act_out, input)
+
+        # deepseek v4 clamp path
+        if self.gemm1_clamp_limit is not None and activation == MoEActivation.SILU:
+            swiglu_limit_func(
+                act_out,
+                input,
+                self.gemm1_clamp_limit,
+            )
+        else:
+            # Assign act path
+            self.activation(activation, act_out, input)
         if output.dtype == torch.float8_e4m3fn:
             block_k = (
                 self.block_shape[1] if self.block_shape else activation_out_dim
