@@ -10,6 +10,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.platforms import current_platform
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -70,7 +71,10 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+if current_platform.is_ppu():
+    from vllm.models.deepseek_v4.ppu.flashmla import DeepseekV4FlashMLAAttention
+else:
+    from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -1308,41 +1312,61 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
 
 
-def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
-    if expert_dtype == "fp4":
-        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # shared experts use Fp8LinearMethod's block scales, which
-        # register as ``weight_scale_inv``.
-        scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
-    else:
-        # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
-        # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
-        # there.
-        scale_regex = {
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
-    return WeightsMapper(
-        orig_to_new_prefix={
-            "layers.": "model.layers.",
-            "embed.": "model.embed.",
-            "norm.": "model.norm.",
-            "hc_head": "model.hc_head",
-            "mtp.": "model.mtp.",
-        },
-        orig_to_new_regex=scale_regex,
-        orig_to_new_suffix={
-            "head.weight": "lm_head.weight",
-            "embed.weight": "embed_tokens.weight",
-            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
-        },
-        orig_to_new_substr={
-            ".shared_experts.w2": ".shared_experts.down_proj",
-        },
-    )
+def _make_deepseek_v4_weights_mapper(
+        expert_dtype: str,
+        fp8_channelwise_layers: list[str] | None = None,
+    ) -> WeightsMapper:
+        if expert_dtype == "fp4":
+            if fp8_channelwise_layers:
+                # Mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense):
+                # MXFP4 MoE registers ``weight_scale`` and channelwise dense layers
+                # also register ``weight_scale`` (no ``_inv`` suffix).  Mapping all
+                # ``.scale`` keys uniformly avoids the fused-layer name mismatch
+                # (e.g. ``fused_wqa_wkv`` vs original ``wq_a``/``wkv``) that a
+                # per-layer regex cannot handle.
+                scale_regex: dict[re.Pattern, str] = {
+                    re.compile(r"\.scale$"): ".weight_scale",
+                }
+            else:
+                # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
+                # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
+                # shared experts use Fp8LinearMethod's block scales, which
+                # register as ``weight_scale_inv``.
+                scale_regex = {
+                    re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+                    re.compile(r"\.scale$"): ".weight_scale_inv",
+                }
+        elif expert_dtype == "fp8":
+            # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
+            # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
+            # there.
+            scale_regex = {
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
+        elif expert_dtype in ("int8", "int4"):
+            scale_regex = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            raise ValueError(f"Invalid expert_dtype: {expert_dtype}")
+        return WeightsMapper(
+            orig_to_new_prefix={
+                "layers.": "model.layers.",
+                "embed.": "model.embed.",
+                "norm.": "model.norm.",
+                "hc_head": "model.hc_head",
+                "mtp.": "model.mtp.",
+            },
+            orig_to_new_regex=scale_regex,
+            orig_to_new_suffix={
+                "head.weight": "lm_head.weight",
+                "embed.weight": "embed_tokens.weight",
+                ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+            },
+            orig_to_new_substr={
+                ".shared_experts.w2": ".shared_experts.down_proj",
+            },
+        )
 
 
 class DeepseekV4MixtureOfExperts(MixtureOfExperts):
