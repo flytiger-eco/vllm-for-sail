@@ -72,6 +72,27 @@ class MHCPreOp(CustomOp):
             norm_eps,
         )
 
+    def forward_ppu(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        n_splits: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(
+            residual, fn, hc_scale, hc_base, rms_eps,
+            hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
+            sinkhorn_repeat, n_splits, norm_weight, norm_eps,
+        )
+
     def forward_hip(
         self,
         residual: torch.Tensor,
@@ -220,6 +241,15 @@ class MHCPostOp(CustomOp):
             x, residual, post_layer_mix, comb_res_mix
         )
 
+    def forward_ppu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, residual, post_layer_mix, comb_res_mix)
+
     def forward_hip(
         self,
         x: torch.Tensor,
@@ -312,6 +342,19 @@ class HCHeadOp(CustomOp):
             hc_eps,
         )
         return out.view(*outer_shape, hidden_size)
+
+    def forward_ppu(
+        self,
+        hidden_states: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_norm_eps: float,
+        hc_eps: float,
+    ) -> torch.Tensor:
+        return self.forward_cuda(
+            hidden_states, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps,
+        )
 
     def forward_hip(
         self,
@@ -442,6 +485,32 @@ class MHCFusedPostPreOp(CustomOp):
             tile_n,
             norm_weight,
             norm_eps,
+        )
+
+    def forward_ppu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        n_splits: int = 1,
+        tile_n: int = 1,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(
+            x, residual, post_layer_mix, comb_res_mix,
+            fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+            hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
+            n_splits, tile_n, norm_weight, norm_eps,
         )
 
     def forward_hip(

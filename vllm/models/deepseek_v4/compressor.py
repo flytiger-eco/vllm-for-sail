@@ -353,7 +353,10 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        if current_platform.is_cuda() and self.head_dim == 512 and not current_platform.is_ppu():
+            # NOTE: ``current_platform.is_cuda()`` returns True on PPU as well
+            # (PPU re-uses the cuda code path internally), so we must explicitly
+            # exclude PPU here — cutedsl is NVIDIA-only.
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
             )
@@ -369,6 +372,9 @@ class DeepseekCompressor(nn.Module):
             )
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
+            # AMD / PPU / XPU. Always use the triton kernel — its dispatcher
+            # routes to the ``_sm80`` variants when the device is SM80, since
+            # ``tl.float8e4nv`` is unsupported there.
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 
