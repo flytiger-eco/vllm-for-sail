@@ -131,7 +131,12 @@ def mhc_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu():
+        from vllm.utils.ppu_deep_gemm import tf32_hc_prenorm_gemm
+    else:
+        from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
@@ -162,14 +167,17 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    if current_platform.is_ppu():
+        from vllm.utils.ppu_deep_gemm import is_deep_gemm_supported
+    else:
+        from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     if use_deep_gemm:
         # these numbers are from deepgemm kernel impl
         block_k = 64
         block_m = 64
-        n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
+        n_splits = 1 if current_platform.is_ppu() else compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
     else:
         n_splits = 1
 
@@ -512,7 +520,12 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu():
+        from vllm.utils.ppu_deep_gemm import is_deep_gemm_supported
+    else:
+        from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     use_small_fma = num_tokens <= 16
@@ -525,7 +538,7 @@ def mhc_fused_post_pre_tilelang(
             # these number are from deepgemm kernel impl
             block_k = 64
             block_m = 64
-            n_splits = compute_num_split(
+            n_splits = 1 if current_platform.is_ppu() else compute_num_split(
                 block_k, hc_hidden_size, cdiv(num_tokens, block_m)
             )
         else:
@@ -593,7 +606,10 @@ def mhc_fused_post_pre_tilelang(
 
         residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
         if use_deep_gemm:
-            from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+            if current_platform.is_ppu():
+                from vllm.utils.ppu_deep_gemm import tf32_hc_prenorm_gemm
+            else:
+                from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
 
             tf32_hc_prenorm_gemm(
                 residual_cur_2d,
