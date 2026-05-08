@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm.config import get_current_vllm_config
@@ -34,6 +36,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.weight_utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -45,13 +51,20 @@ class Mxfp4Config(QuantizationConfig):
     register themselves as the handler for a specific checkpoint format.
     """
 
-    def __init__(self, ignored_layers: list[str] | None = None):
+    def __init__(self, ignored_layers: list[str] | None = None,
+                 fp8_channelwise_layers: list[str] | None = None):
         super().__init__()
         self.ignored_layers = ignored_layers
+        self.fp8_channelwise_layers: list[str] = fp8_channelwise_layers or []
 
     @classmethod
     def from_config(cls, config):
-        return cls()
+        ignored_layers = config.get("ignore") if isinstance(config, dict) else None
+        fp8_channelwise_layers: list[str] | None = None
+        if current_platform.is_ppu() and isinstance(config, dict):
+            fp8_channelwise_layers = config.get("fp8_channelwise_layers")
+        return cls(ignored_layers=ignored_layers,
+                   fp8_channelwise_layers=fp8_channelwise_layers)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -75,6 +88,41 @@ class Mxfp4Config(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
+            # PPU: FP8 channelwise dense layers
+            if current_platform.is_ppu() and self.fp8_channelwise_layers:
+                matched = is_layer_skipped(
+                    prefix=prefix,
+                    ignored_layers=self.fp8_channelwise_layers,
+                    fused_mapping=self.packed_modules_mapping,
+                    skip_with_substr=True,
+                )
+                if matched:
+                    from compressed_tensors.quantization import (
+                        QuantizationArgs,
+                        QuantizationStrategy,
+                        QuantizationType,
+                    )
+
+                    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+                        CompressedTensorsLinearMethod,
+                    )
+                    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (  # noqa: E501
+                        CompressedTensorsW8A8Fp8,
+                    )
+
+                    channelwise_args = QuantizationArgs(
+                        strategy=QuantizationStrategy.CHANNEL,
+                        type=QuantizationType.FLOAT,
+                        num_bits=8,
+                        symmetric=True,
+                    )
+                    scheme = CompressedTensorsW8A8Fp8(
+                        weight_quant=channelwise_args,
+                        is_static_input_scheme=False,
+                    )
+                    layer.scheme = scheme
+                    return CompressedTensorsLinearMethod(self)
+
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -94,6 +142,13 @@ class Mxfp4Config(QuantizationConfig):
                 "Skipping quantization for this layer.",
             )
         return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper") -> None:
+        super().apply_vllm_mapper(hf_to_vllm_mapper)
+        if current_platform.is_ppu() and self.fp8_channelwise_layers:
+            self.fp8_channelwise_layers = hf_to_vllm_mapper.apply_list(
+                self.fp8_channelwise_layers
+            )
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
         """MXFP4 config always uses MXFP4 quantization."""
@@ -392,6 +447,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w2_scale = layer.w2_weight_scale
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
+        swiglu_limit = getattr(layer, "swiglu_limit", None)
 
         if self.mxfp4_backend in TRITON_BACKENDS:
             assert self.w13_precision_config is not None
@@ -407,7 +463,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             gemm1_alpha=1.702,
             gemm1_beta=1.0,
-            swiglu_limit=7.0,
+            swiglu_limit=swiglu_limit,
             layer=layer,
         )
 

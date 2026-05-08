@@ -201,6 +201,8 @@ _int8_grouped_nopad_impl: Callable[..., Any] | None = None
 _int8_grouped_masked_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
 _bf16_grouped_masked_impl: Callable[..., Any] | None = None
+_fp4_grouped_nopad_impl: Callable[..., Any] | None = None
+_fp4_grouped_masked_impl: Callable[..., Any] | None = None
 
 # mqa logtiss
 _fp8_mqa_logits_impl: Callable[..., Any] | None = None
@@ -225,6 +227,7 @@ def _lazy_init() -> None:
     global _grouped_masked_impl, _fp8_grouped_nopad_impl
     global _int8_gemm_nt_impl, _int8_grouped_nopad_impl, _int8_grouped_masked_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
+    global _fp4_grouped_nopad_impl, _fp4_grouped_masked_impl
     global _set_compile_mode_impl, _get_compile_mode_impl
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
     global _int8_mqa_logits_impl, _int8_paged_mqa_logits_impl
@@ -245,6 +248,8 @@ def _lazy_init() -> None:
         or _int8_grouped_masked_impl is not None
         or _bf16_grouped_nopad_impl is not None
         or _bf16_grouped_masked_impl is not None
+        or _fp4_grouped_nopad_impl is not None
+        or _fp4_grouped_masked_impl is not None
         or _fp8_mqa_logits_impl is not None
         or _fp8_paged_mqa_logits_impl is not None
         or _int8_mqa_logits_impl is not None
@@ -302,6 +307,12 @@ def _lazy_init() -> None:
     _bf16_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_bf16_bf16_bf16_nt_masked", None
     )
+    _fp4_grouped_nopad_impl = getattr(
+        _dg, "m_grouped_gemm_fp4_fp4_bf16_nt_nopad", None
+    )
+    _fp4_grouped_masked_impl = getattr(
+        _dg, "m_grouped_gemm_fp4_fp4_bf16_nt_masked", None
+    )
     _get_compile_mode_impl = getattr(_dg, "get_compile_mode", None)
     _set_compile_mode_impl = getattr(_dg, "set_compile_mode", None)
     DeepGemmQuantScaleFMT.init_oracle_cache()
@@ -319,7 +330,13 @@ def get_mk_alignment_for_contiguous_layout(
     is_mxfp4: bool | None = False,
 ) -> list[int]:
     # ppu bf16 and int8 don't need 128 align
-    block = 128 if is_blockwise else 1
+    # ppu mxfp4 need 16 align
+    if is_mxfp4:
+        block = 16
+    elif is_blockwise:
+        block = 128
+    else:
+        block = 1
     return [1, block]
 
 
@@ -383,6 +400,20 @@ def m_grouped_bf16_gemm_nt_nopad(*args, **kwargs):
     if _bf16_grouped_nopad_impl is None:
         return _missing(*args, **kwargs)
     return _bf16_grouped_nopad_impl(*args, **kwargs)
+
+
+def m_grouped_fp4_gemm_nt_nopad(*args, **kwargs):
+    _lazy_init()
+    if _fp4_grouped_nopad_impl is None:
+        return _missing(*args, **kwargs)
+    return _fp4_grouped_nopad_impl(*args, **kwargs)
+
+
+def fp4_m_grouped_gemm_nt_masked(*args, **kwargs):
+    _lazy_init()
+    if _fp4_grouped_masked_impl is None:
+        return _missing(*args, **kwargs)
+    return _fp4_grouped_masked_impl(*args, **kwargs)
 
 
 def bf16_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -833,6 +864,8 @@ __all__ = [
     "int8_m_grouped_gemm_nt_masked",
     "m_grouped_bf16_gemm_nt_nopad",
     "bf16_m_grouped_gemm_nt_masked",
+    "m_grouped_fp4_gemm_nt_nopad",
+    "fp4_m_grouped_gemm_nt_masked",
     "fp8_mqa_logits",
     "fp8_mqa_logits_torch",
     "fp8_paged_mqa_logits",

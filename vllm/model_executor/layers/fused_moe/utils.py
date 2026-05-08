@@ -33,6 +33,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+if current_platform.is_ppu():
+    from vllm.model_executor.layers.quantization.utils.ppu_mxfp4_utils import downcast_to_mxfp4
 
 
 @triton.jit
@@ -301,6 +303,8 @@ def moe_kernel_quantize_input(
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
+        if current_platform.is_ppu():
+            return downcast_to_mxfp4(A, axis=1)
         if not quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input should not be used for native"
