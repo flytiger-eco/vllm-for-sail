@@ -90,6 +90,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
         use_int8_dispatch: bool = False,
+        use_mxfp4_dispatch: bool = False,
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
@@ -100,6 +101,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_int8_dispatch = use_int8_dispatch
+        self.use_mxfp4_dispatch = use_mxfp4_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -192,6 +194,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             x, x_scales = x
             return x, x_scales
 
+        if self.use_mxfp4_dispatch and current_platform.is_ppu():
+            # DeepEP kernels dispatched the mxfp4-quantised activations
+            # together with their E8M0 scales; unpack and return directly.
+            x, x_scales = x
+            return x, x_scales
+
         assert isinstance(x, (torch.Tensor, tuple))
         q_dtype = quant_config.quant_dtype
 
@@ -229,7 +237,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
             )
-            x = x.view((num_experts, -1, hidden_dim))
+            # For mxfp4 on PPU, x is now (E*T, H//2) uint8 and
+            # x_scales is (E*T, H//32) uint8 — reshape using the
+            # actual quantised dimensions, not the original hidden_dim.
+            if q_dtype == "mxfp4" and current_platform.is_ppu():
+                x = x.view((num_experts, max_tokens, x.size(-1)))
+            else:
+                x = x.view((num_experts, -1, hidden_dim))
 
         if q_dtype is not None and q_dtype != "nvfp4":
             assert x_scales is not None
@@ -326,11 +340,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             async_finish=False,
             return_recv_hook=True,
             **(dict(use_int8=self.use_int8_dispatch) if current_platform.is_ppu() else dict()),
+            **(dict(use_mxfp4=self.use_mxfp4_dispatch) if current_platform.is_ppu() else dict()),
+            **(dict(mxfp4_scale_row_major=False) if (current_platform.is_ppu() and self.use_mxfp4_dispatch) else dict()),
             **(
                 dict(
-                    quant_size=quant_config.block_shape[1]
-                    if quant_config.block_shape
-                    else hidden_size
+                    quant_size=32
+                    if self.use_mxfp4_dispatch 
+                    else (quant_config.block_shape[1] if quant_config.block_shape else hidden_size)
                 )
                 if current_platform.is_ppu()
                 else dict()

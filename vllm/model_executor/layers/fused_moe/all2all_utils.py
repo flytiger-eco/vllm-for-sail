@@ -191,12 +191,16 @@ def maybe_make_prepare_finalize(
                 quant_config.quant_dtype == torch.int8
                 and quant_config.block_shape is None
             )
+            use_mxfp4_dispatch = (
+                quant_config.quant_dtype == "mxfp4"
+            )
         else:
             use_fp8_dispatch = (
                 quant_config.quant_dtype == current_platform.fp8_dtype()
                 and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
             )
             use_int8_dispatch = False
+            use_mxfp4_dispatch = False
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
             handle,
@@ -204,6 +208,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
             use_int8_dispatch=use_int8_dispatch,
+            use_mxfp4_dispatch=use_mxfp4_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
