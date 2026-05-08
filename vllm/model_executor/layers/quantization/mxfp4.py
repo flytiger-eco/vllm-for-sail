@@ -388,6 +388,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w2_scale = layer.w2_weight_scale
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
+        swiglu_limit = getattr(layer, "swiglu_limit", None)
 
         if self.mxfp4_backend in TRITON_BACKENDS:
             assert self.w13_precision_config is not None
@@ -403,7 +404,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             gemm1_alpha=1.702,
             gemm1_beta=1.0,
-            swiglu_limit=7.0,
+            # FIXME (binbin): this is temporary fallback with GptOssMxfp4MoEMethod following upstream usage
+            swiglu_limit=swiglu_limit,
         )
 
     def select_gemm_impl(
