@@ -56,6 +56,12 @@ if has_triton_kernels():
             e,
         )
 
+if current_platform.is_ppu():
+    try:
+        # necessary call for PPU mxfp4 deepgemm usage
+        from deep_gemm import preprocess_mxfp4_scales
+    except ImportError as e:
+        logger.warning(f"Import deepgemm error for running mxfp4 on PPU! {e}")
 
 def _pack_deepgemm_mxfp4_scales(
     w13_weight: torch.Tensor,
@@ -95,6 +101,9 @@ class Mxfp4MoeBackend(Enum):
     NONE = "None"
     # DeepGEMM FP8xFP4 backend (SM100+)
     DEEPGEMM_MXFP4 = "DEEPGEMM_MXFP4"
+    # PPU DeepGEMM MXFP4 backends (w4a4)
+    PPU_DEEPGEMM_MXFP4 = "PPU_DEEPGEMM_MXFP4"
+    BATCHED_PPU_DEEPGEMM_MXFP4 = "BATCHED_PPU_DEEPGEMM_MXFP4"
     # FlashInfer TRTLLM backends
     FLASHINFER_TRTLLM_MXFP4_MXFP8 = "FLASHINFER_TRTLLM_MXFP4_MXFP8"
     FLASHINFER_TRTLLM_MXFP4_BF16 = "FLASHINFER_TRTLLM_MXFP4_BF16"
@@ -152,6 +161,20 @@ def backend_to_kernel_cls(
         )
 
         return [DeepGemmFP4Experts]
+
+    elif backend == Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+            PPUDeepGemmExpertsMXFP4,
+        )
+
+        return [PPUDeepGemmExpertsMXFP4]
+
+    elif backend == Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+            PPUBatchedDeepGemmExpertsMXFP4,
+        )
+
+        return [PPUBatchedDeepGemmExpertsMXFP4]
 
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -268,6 +291,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
         "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
+        "ppu_deep_gemm": [Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4],
         "flashinfer_trtllm": [
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
@@ -305,6 +329,8 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
     _AVAILABLE_BACKENDS = [
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
@@ -336,6 +362,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
@@ -349,6 +377,12 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     """Map backend to its activation key (FP8, MXFP8, or None for BF16)."""
     if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         return kFp8Dynamic128Sym
+    if backend in (
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
+    ):
+        # PPU DeepGEMM MXFP4 uses mxfp4 activations (w4a4)
+        return kMxfp4Dynamic
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -462,9 +496,14 @@ def select_mxfp4_moe_backend(
     if runner_backend != "auto":
         requested_backends = map_mxfp4_backend(runner_backend)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            _batched_backend_map = {
+                Mxfp4MoeBackend.MARLIN: Mxfp4MoeBackend.BATCHED_MARLIN,
+                Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4: (
+                    Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4
+                ),
+            }
             requested_backends = [
-                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
-                for b in requested_backends
+                _batched_backend_map.get(b, b) for b in requested_backends
             ]
         candidates = _filter_by_activation(requested_backends, requested_activation_key)
         if not candidates:
@@ -638,6 +677,9 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # DeepGEMM requires M/N/K alignment
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
+    elif backend in (Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4, Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4):
+        intermediate_size = round_up(intermediate_size, 32)
+        hidden_size = round_up(hidden_size, 32)
     elif backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
         intermediate_size = round_up(intermediate_size, 128)
         if current_platform.is_xpu():
@@ -732,6 +774,29 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         return prepare_moe_mxfp4_layer_for_marlin(
             layer,
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
+    ):
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32)
+        w13_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w13_weight_scale), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w2_weight_scale), requires_grad=False
+        )
+        return (
             w13_weight,
             w2_weight,
             w13_weight_scale,
@@ -1400,6 +1465,29 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
+    ):
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32)
+        w13_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w13_weight_scale), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w2_weight_scale), requires_grad=False
+        )
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
 
@@ -1541,6 +1629,22 @@ def make_mxfp4_moe_quant_config(
             _a2=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
             _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
             _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
+    ):
+        return ocp_mx_moe_quant_config(
+            quant_dtype="mxfp4",
+            weight_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            block_shape=[1, 16],  # block_shape[1]: mxfp4 block size // 2
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,

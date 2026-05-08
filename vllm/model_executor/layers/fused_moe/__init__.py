@@ -118,9 +118,13 @@ if HAS_TRITON:
         XPUExpertsFp8,
         XPUExpertsMxFp4,
     )
-    from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import PPUDeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+        PPUDeepGemmExperts,
+        PPUDeepGemmExpertsMXFP4,
+    )
     from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
         PPUBatchedDeepGemmExperts,
+        PPUBatchedDeepGemmExpertsMXFP4,
     )
     from vllm.model_executor.layers.fused_moe.experts.acext import AcextExperts
     from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -149,7 +153,9 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "PPUDeepGemmExperts",
+        "PPUDeepGemmExpertsMXFP4",
         "PPUBatchedDeepGemmExperts",
+        "PPUBatchedDeepGemmExpertsMXFP4",
         "AcextExperts",
         "TritonOrDeepGemmExperts",
         "XPUExperts",
