@@ -234,6 +234,122 @@ def _fwd_kernel_ep_scatter_2_bf16(
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
 
 
+@triton.jit
+def _fwd_kernel_ep_scatter_2_optimal(
+    total_token_num,
+    expert_start_loc,
+    recv_x,
+    recv_x_stride0,
+    recv_x_stride1,
+    recv_x_scale,
+    recv_x_scale_stride0,
+    recv_x_scale_stride1,
+    recv_topk,
+    recv_topk_stride0,
+    recv_topk_stride1,
+    output_tensor,
+    output_tensor_stride0,
+    output_tensor_stride1,
+    output_tensor_scale,
+    output_tensor_scale_stride0,
+    output_tensor_scale_stride1,
+    output_index,
+    output_index_stride0,
+    output_index_stride1,
+    expert_map,
+    HAS_EXPERT_MAP: tl.constexpr,
+    with_scale: tl.constexpr,
+    IS_BLOCK_WISE_QUANT: tl.constexpr,
+    topk_num: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    SCALE_HIDDEN_SIZE: tl.constexpr,
+    COPY_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    num_stages: tl.constexpr,
+):
+    token_id_int32 = tl.program_id(0)
+    token_id = token_id_int32.to(tl.int64)
+
+    expert_offsets = tl.arange(0, BLOCK_SIZE)
+    expert_mask = expert_offsets < topk_num
+    expert_loc = tl.load(
+        recv_topk + token_id * recv_topk_stride0 + expert_offsets,
+        mask=expert_mask,
+        other=-1,
+    )
+
+    if HAS_EXPERT_MAP:
+        expert_loc = tl.load(expert_map + expert_loc, mask=(expert_loc != -1)).to(
+            expert_loc.dtype
+        )
+    tt_mask = expert_mask & (expert_loc >= 0)
+    if tt_mask.sum() == 0:
+        return
+    dest_token_index_int32 = tl.atomic_add(
+        expert_start_loc + expert_loc, 1, mask=tt_mask
+    )
+    tl.store(
+        output_index + token_id * output_index_stride0 + expert_offsets,
+        dest_token_index_int32,
+        mask=tt_mask,
+        eviction_policy="evict_last",
+    )
+    tl.debug_barrier()
+    dest_token_index = tl.load(
+        output_index + token_id * output_index_stride0 + expert_offsets, mask=tt_mask
+    ).to(tl.int64)
+
+    value_offsets = tl.arange(0, COPY_SIZE)
+    for _ in tl.range(0, triton.cdiv(HIDDEN_SIZE, COPY_SIZE), num_stages=num_stages):
+        copy_mask = value_offsets < HIDDEN_SIZE
+        to_copy = tl.load(
+            recv_x + token_id * recv_x_stride0 + value_offsets, mask=copy_mask
+        )
+        output_offsets = (
+            dest_token_index[:, None] * output_tensor_stride0 + value_offsets[None, :]
+        )
+        to_copy = to_copy[None, :].broadcast_to(BLOCK_SIZE, COPY_SIZE)
+        tl.store(
+            output_tensor + output_offsets,
+            to_copy,
+            mask=(copy_mask[None, :] & tt_mask[:, None]),
+        )
+        value_offsets += COPY_SIZE
+
+    if with_scale:
+        if IS_BLOCK_WISE_QUANT:
+            scale_offsets = tl.arange(0, COPY_SIZE)
+            for _ in tl.range(
+                0,
+                triton.cdiv(SCALE_HIDDEN_SIZE, COPY_SIZE),
+            ):
+                copy_mask = scale_offsets < SCALE_HIDDEN_SIZE
+                to_copy_scale = tl.load(
+                    recv_x_scale + token_id * recv_x_scale_stride0 + scale_offsets,
+                    mask=copy_mask,
+                )
+                output_scale_offsets = (
+                    dest_token_index[:, None] * output_tensor_scale_stride0
+                    + scale_offsets[None, :]
+                )
+                to_copy_scale = to_copy_scale[None, :].broadcast_to(
+                    BLOCK_SIZE, COPY_SIZE
+                )
+                tl.store(
+                    output_tensor_scale + output_scale_offsets,
+                    to_copy_scale,
+                    mask=(copy_mask[None, :] & tt_mask[:, None]),
+                )
+                scale_offsets += COPY_SIZE
+        else:
+            to_copy_scale = tl.load(recv_x_scale + token_id * recv_x_scale_stride0)
+            # to_copy_scale = to_copy_scale[None, :].broadcast_to(BLOCK_SIZE, 1)
+            output_scale_offsets = dest_token_index * output_tensor_scale_stride0
+            tl.store(
+                output_tensor_scale + output_scale_offsets, to_copy_scale, mask=tt_mask
+            )
+
+
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -252,7 +368,13 @@ def ep_scatter(
     # PPU NOTE: Using PPU DG nopad
     # token num of per expert is not need to be aligned to 128.
     BLOCK_E = 1
-    BLOCK_D = 128  # block size of quantization
+    if recv_x.dtype == torch.uint8:
+        # for mxfp4 quantization, block size is 32 and pack 2 e2m1 qweight into 1 uint8
+        # need to use 32 // 2
+        BLOCK_D = 16
+    else:
+        BLOCK_D = 128  # block size of quantization
+
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
@@ -271,6 +393,44 @@ def ep_scatter(
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
+
+    if recv_x.dtype == torch.uint8:
+        grid = lambda meta: (recv_x.shape[0],)
+
+        _fwd_kernel_ep_scatter_2_optimal[grid](
+            recv_topk.shape[0],
+            expert_start_loc,
+            recv_x,
+            recv_x.stride(0),
+            recv_x.stride(1),
+            recv_x_scale,
+            0 if recv_x_scale is None else recv_x_scale.stride(0),
+            0 if recv_x_scale is None else recv_x_scale.stride(1),
+            recv_topk,
+            recv_topk.stride(0),
+            recv_topk.stride(1),
+            output_tensor,
+            output_tensor.stride(0),
+            output_tensor.stride(1),
+            output_tensor_scale,
+            0 if output_tensor_scale is None else output_tensor_scale.stride(0),
+            0 if output_tensor_scale is None else output_tensor_scale.stride(1),
+            output_index,
+            output_index.stride(0),
+            output_index.stride(1),
+            expert_map=expert_map,
+            with_scale=(recv_x_scale is not None),
+            topk_num=recv_topk.shape[1],
+            HAS_EXPERT_MAP=expert_map is not None,
+            HIDDEN_SIZE=hidden_size,
+            SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
+            IS_BLOCK_WISE_QUANT=is_block_wise_quant,
+            BLOCK_SIZE=triton.next_power_of_2(recv_topk.shape[1]),
+            COPY_SIZE=512,
+            num_stages=3,
+            num_warps=8,
+        )
+        return
 
     grid = min(recv_topk.shape[0], 1024 * 8)
 
@@ -408,8 +568,6 @@ def ep_gather(
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
     BLOCK_D = min(hidden_size, 1024)
-    assert hidden_size % BLOCK_D == 0
-    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 
     # PPU NOTE: resize BLOCK_D to enable deep gemm backend for hidden_size
     # which is can't be divisible by 1024.
@@ -421,6 +579,8 @@ def ep_gather(
             f"to use the Triton / Acext MoE backend for this model instead.",
         )
         BLOCK_D = BLOCK_D // 2
+    assert hidden_size % BLOCK_D == 0
+    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 
     _fwd_kernel_ep_gather[grid](
         num_tokens,
@@ -469,7 +629,10 @@ def deepgemm_moe_permute(
     H = aq.size(1)
     device = aq.device
 
-    block_m, block_k = get_mk_alignment_for_contiguous_layout(is_blockwise=is_block_wise_quant)
+    is_mxfp4 = (aq.dtype == torch.uint8)
+    block_m, block_k = get_mk_alignment_for_contiguous_layout(
+        is_blockwise=is_block_wise_quant, is_mxfp4=is_mxfp4
+    )
 
     M_sum = compute_aligned_M(
         M=topk_ids.size(0),
@@ -488,9 +651,15 @@ def deepgemm_moe_permute(
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
 
     if is_block_wise_quant:
-        assert block_k == 128
+        # mxfp4: torch.uint8, others: torch.float32
+        if aq_scale is not None and aq_scale.dtype == torch.uint8:
+            assert block_k == 16
+            aq_scale_out_dtype = aq_scale.dtype
+        else:
+            assert block_k == 128
+            aq_scale_out_dtype = torch.float32
         aq_scale_out = torch.empty(
-            (M_sum, H // block_k), device=device, dtype=torch.float32
+            (M_sum, H // block_k), device=device, dtype=aq_scale_out_dtype
         )
     elif is_channel_wise_quant:
         aq_scale_out = torch.empty((M_sum, 1), device=device, dtype=torch.float32)
