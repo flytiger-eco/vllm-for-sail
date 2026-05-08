@@ -799,6 +799,10 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         E, N, _ = w1.shape
         K = a1.size(-1)
 
+        if current_platform.is_ppu() and w1.dtype == torch.uint8 and a1.dtype == torch.uint8:
+            # PPU mxfp4 impl, need to process K
+            K = K * 2
+
         if a1.dim() == 2:
             # Make sure we are using the correct a1 (pre-permute).
             assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
