@@ -453,7 +453,7 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     # Pointers ---------------------------------------------------------------
     input_ptr,   # bf16 activations (E, T, 2*H)
     y_q_ptr,     # packed fp4 output (E, T, H//2), uint8
-    y_s_ptr,     # mxfp4 scales (E, T, H//32), uint8 (E8M0)
+    y_s_ptr,     # mxfp4 scales (E, H//32//2, T), uint16 (packed E8M0 pairs, col-major)
     counts_ptr,  # int32 valid tokens per expert (E,)
     # Sizes ------------------------------------------------------------------
     H: tl.constexpr,   # hidden dimension (output half, i.e. H = N//2)
@@ -465,10 +465,10 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     stride_yq_e,
     stride_yq_t,
     stride_yq_h,
-    # Strides for y_s (elements) ---------------------------------------------
+    # Strides for y_s (elements): layout [E, H//32//2, T] ------------------
     stride_ys_e,
-    stride_ys_t,
-    stride_ys_g,
+    stride_ys_h,   # stride along H//32//2 dim (hidden dim, second dim)
+    stride_ys_t,   # stride along T dim (fastest, third dim)
     # Meta -------------------------------------------------------------------
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -478,18 +478,13 @@ def _silu_mul_mxfp4_quant_deep_gemm(
 
     Grid: (hidden_dim_split, token_blocks_per_expert, expert_num)
 
-    Each program processes a (expert, token-block, hidden-dim-block) tile and
-    iterates over valid tokens with a stride equal to the number of parallel
-    token blocks per expert.  For every token it:
-      1. Loads gate & up vectors (bf16 → fp32)
-      2. Optionally clamps gate (DeepSeek V4 swiglu_limit)
-      3. Computes silu(gate) * up
-      4. Quantises to e2m1 fp4 with per-group E8M0 scales
-      5. Packs pairs of e2m1 into uint8 via PTX cvt.rn.satfinite.e2m1x2.f32
-      6. Stores packed fp4 and E8M0 scale bytes
+    Scale output layout: [E, H//32//2, T] uint16 (col-major: H//32//2 is contiguous over T).
+    Packing: uint16 = lo_e8m0 | (hi_e8m0 << 8), where lo/hi are adjacent groups.
     """
     GROUP_SIZE: tl.constexpr = 32  # mxfp4 block size
     QUANT_MAX: tl.constexpr = 6.0  # max abs value of e2m1
+    NUM_GROUPS: tl.constexpr = BLOCK_N // GROUP_SIZE
+    NUM_SCALE_PAIRS: tl.constexpr = NUM_GROUPS // 2
 
     BLOCK_NUM_PER_EXPERT = tl.num_programs(1)
 
@@ -504,7 +499,7 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     stride_yq_e = tl.cast(stride_yq_e, tl.int64)
     stride_yq_t = tl.cast(stride_yq_t, tl.int64)
     stride_ys_e = tl.cast(stride_ys_e, tl.int64)
-    stride_ys_t = tl.cast(stride_ys_t, tl.int64)
+    stride_ys_h = tl.cast(stride_ys_h, tl.int64)
 
     # Input offsets for this hidden-dim block
     offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -514,9 +509,9 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     offs_out_d = hidden_dim_block_index * (BLOCK_N // 2) + tl.arange(0, BLOCK_N // 2)
     y_q_ptr_offs = y_q_ptr + expert_id * stride_yq_e + offs_out_d * stride_yq_h
 
-    # Scale offsets: one E8M0 per GROUP_SIZE elements
-    NUM_GROUPS: tl.constexpr = BLOCK_N // GROUP_SIZE
-    offs_scale = hidden_dim_block_index * NUM_GROUPS + tl.arange(0, NUM_GROUPS)
+    # Scale offsets: one uint16 pair per 2*GROUP_SIZE elements
+    # Layout [E, H//32//2, T]: stride_ys_h along H//32//2 dim, stride_ys_t along T dim
+    offs_scale_pairs = hidden_dim_block_index * NUM_SCALE_PAIRS + tl.arange(0, NUM_SCALE_PAIRS)
 
     mask_d = offs_in_d < H
 
@@ -556,7 +551,13 @@ def _silu_mul_mxfp4_quant_deep_gemm(
         ds_e8m0_uint32 = (ds_uint32 + 0x007FFFFF) & 0x7F800000
         dequant_scale_rounded = ds_e8m0_uint32.to(tl.float32, bitcast=True)
         quant_scale = 1.0 / dequant_scale_rounded
-        scale_e8m0 = (ds_e8m0_uint32 >> 23).to(tl.uint8)  # [NUM_GROUPS]
+
+        # Pack two adjacent uint8 E8M0 exponents into one uint16
+        # scale_e8m0: [NUM_GROUPS] uint32 (exponent byte in bits [7:0] after >> 23)
+        # Reshape to [NUM_SCALE_PAIRS, 2], split lo/hi, pack into uint16
+        scale_pairs = tl.reshape(ds_e8m0_uint32, [NUM_SCALE_PAIRS, 2])
+        lo_u32, hi_u32 = tl.split(scale_pairs)
+        scale_u16 = ((lo_u32 >> 23) | ((hi_u32 >> 23) << 8)).to(tl.uint16)
 
         # Broadcast quant_scale and apply
         quant_scale_broadcast = tl.reshape(quant_scale, [NUM_GROUPS, 1])
@@ -590,10 +591,16 @@ def _silu_mul_mxfp4_quant_deep_gemm(
             packed,
             mask=offs_out_d < (H // 2),
         )
+        # Store uint16 scale pairs into [E, H//32//2, T] layout:
+        # base = expert_id * stride_ys_e + offs_scale_pairs * stride_ys_h
+        # token offset = token_index * stride_ys_t
         tl.store(
-            y_s_ptr + expert_id * stride_ys_e + token_index * stride_ys_t + offs_scale,
-            scale_e8m0,
-            mask=offs_scale < (H // GROUP_SIZE),
+            y_s_ptr
+            + expert_id * stride_ys_e
+            + offs_scale_pairs * stride_ys_h
+            + token_index * stride_ys_t,
+            scale_u16,
+            mask=offs_scale_pairs < (H // GROUP_SIZE // 2),
         )
 
 
@@ -616,35 +623,35 @@ def silu_mul_mxfp4_quant_masked(
         Tuple ``(y_q, y_s)`` where:
         * ``y_q``: Packed FP4 tensor, shape ``(E, T, H//2)``, dtype uint8.
           Two consecutive E2M1 values are packed into one uint8.
-        * ``y_s``: E8M0 scale tensor, shape ``(E, T, H//32)``, dtype uint8.
-          One scale per 32-element mxfp4 group.
+        * ``y_s``: E8M0 scale tensor, shape ``(E, H//32//2, T)``, dtype uint16.
+          Two adjacent per-group uint8 E8M0 exponents are packed into one
+          uint16 (lo | (hi << 8)), stored in col-major [E, H//32//2, T] layout.
+          Call ``.permute(0, 2, 1)`` before passing to
+          fp4_m_grouped_gemm_nt_masked which expects ``[E, T, H//32//2]``.
     """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
     assert H2 % 2 == 0
     H = H2 // 2
-    assert H % _MXFP4_BLOCK_SIZE == 0, f"H must be divisible by {_MXFP4_BLOCK_SIZE}"
-    G = H // _MXFP4_BLOCK_SIZE
+    assert H % (_MXFP4_BLOCK_SIZE * 2) == 0, f"H must be divisible by {_MXFP4_BLOCK_SIZE * 2} for uint16 packing, got {H}"
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
     y_q = torch.empty((E, T, H // 2), dtype=torch.uint8, device=y.device)
-    y_s = torch.empty((E, T, G),      dtype=torch.uint8, device=y.device)
+    # Scale output: [E, H//32//2, T] uint16 (col-major: H//32//2 dim is contiguous over T)
+    y_s = torch.empty((E, H // _MXFP4_BLOCK_SIZE // 2, T), dtype=torch.uint16, device=y.device)
 
     stride_i_e, stride_i_t, stride_i_h = y.stride()
     stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
-    stride_ys_e, stride_ys_t, stride_ys_g = y_s.stride()
+    stride_ys_e, stride_ys_h, stride_ys_t = y_s.stride()
 
     # Dynamic BLOCK_N: larger blocks for better memory throughput
     if H > 256:
         BLOCK_N = 256
     elif H > 128:
         BLOCK_N = 128
-    elif H > 64:
-        BLOCK_N = 64
     else:
-        BLOCK_N = 32
-    assert BLOCK_N % _MXFP4_BLOCK_SIZE == 0
+        BLOCK_N = 64
 
     hidden_dim_split_block_num = triton.cdiv(H, BLOCK_N)
 
@@ -671,8 +678,8 @@ def silu_mul_mxfp4_quant_masked(
         stride_yq_t,
         stride_yq_h,
         stride_ys_e,
+        stride_ys_h,
         stride_ys_t,
-        stride_ys_g,
         BLOCK_N=BLOCK_N,
         NUM_STAGES=3,
         SWIGLU_LIMIT=swiglu_limit_val,
@@ -943,6 +950,9 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
+        # MXFP4 (w4a4) requires sm90+ on PPU; disable on sm80
+        if current_platform.is_device_capability((8, 0)):
+            return False
         return is_deep_gemm_supported()
 
     @staticmethod
@@ -1067,11 +1077,6 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         # workspace1: (E, T, N) — gemm1 bf16 output
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        if a1q_scale.dtype == torch.int32:
-            # deepep low_latency with row_major layout dispatch
-            assert a1q_scale.is_contiguous()
-            a1q_scale = a1q_scale.view(torch.uint8)
-
         fp4_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
             (w1, self.w1_scale),
@@ -1095,6 +1100,9 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
                 workspace1, expert_num_tokens,
                 swiglu_limit=self.gemm1_clamp_limit,
             )
+            # silu_mul_mxfp4_quant_masked outputs scale in [E, H//32//2, T] layout.
+            # fp4_m_grouped_gemm_nt_masked expects [E, T, H//32//2], so permute.
+            a2q_scale = a2q_scale.permute(0, 2, 1)
         else:
             # Fallback for SWIGLUSTEP / SWIGLUOAI: reshape (E,T,2H) -> (E*T, 2H),
             # apply 2D-only activation, reshape back, then quantise separately.
