@@ -2411,6 +2411,28 @@ def moe_lora_align_block_size(
     )
 
 
+def ep_scatter_2_cuda(
+    recv_x: torch.Tensor,
+    recv_x_scale: torch.Tensor | None,
+    recv_topk_ids: torch.Tensor,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    output_index: torch.Tensor,
+    output_tensor_scale: torch.Tensor | None,
+    with_scale: bool,
+):
+    torch.ops._moe_C.ep_scatter_2_cuda(
+        recv_x,
+        recv_x_scale,
+        recv_topk_ids,
+        expert_start_loc,
+        output_tensor,
+        output_index,
+        output_tensor_scale,
+        with_scale,
+    )
+
+
 def moe_wna16_gemm(
     input: torch.Tensor,
     output: torch.Tensor,
