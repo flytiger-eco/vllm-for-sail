@@ -84,4 +84,14 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
 void dsv3_router_gemm(torch::stable::Tensor& output,
                       const torch::stable::Tensor& mat_a,
                       const torch::stable::Tensor& mat_b);
+
+void ep_scatter_2_cuda(torch::stable::Tensor hidden_states,
+                       std::optional<torch::stable::Tensor> scales_opt,
+                       torch::stable::Tensor topk_ids,
+                       torch::stable::Tensor expert_start_loc,
+                       torch::stable::Tensor output_tensor,
+                       torch::stable::Tensor output_index,
+                       std::optional<torch::stable::Tensor> output_tensor_scale_opt,
+                       bool with_scale);
+
 #endif
