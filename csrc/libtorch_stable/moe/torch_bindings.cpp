@@ -125,7 +125,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   // conditionally compiled so impl registration is in source file
+
+  m.def(
+    "ep_scatter_2_cuda(Tensor hidden_states, "
+    "                 Tensor? scales_opt, "
+    "                 Tensor topk_ids, "
+    "                 Tensor expert_start_loc, "
+    "                 Tensor output_tensor, "
+    "                 Tensor output_index, "
+    "                 Tensor? output_tensor_scale_opt, "
+    "                 bool with_scale) -> ()");
 #endif
+
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
@@ -141,6 +152,7 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
   m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
+  m.impl("ep_scatter_2_cuda", TORCH_BOX(&ep_scatter_2_cuda));
 #endif
 }
 
