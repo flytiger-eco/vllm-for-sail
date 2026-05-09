@@ -1154,7 +1154,8 @@ set(VLLM_MOE_EXT_SRC
   "csrc/libtorch_stable/moe/torch_bindings.cpp"
   "csrc/libtorch_stable/moe/moe_align_sum_kernels.cu"
   "csrc/libtorch_stable/moe/topk_softmax_kernels.cu"
-  "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu"
+  "csrc/libtorch_stable/moe/ep_scatter_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
