@@ -7,7 +7,9 @@ and updated to fit vllm needs and terminology.
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm import _custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
@@ -394,44 +396,59 @@ def ep_scatter(
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
 
-    if recv_x.dtype == torch.uint8:
-        grid = lambda meta: (recv_x.shape[0],)
-
-        _fwd_kernel_ep_scatter_2_optimal[grid](
-            recv_topk.shape[0],
-            expert_start_loc,
+    # FIXME(kai): cause crash for dsv4 flash base
+    if 0 and expert_map is None and recv_x.dtype != torch.uint8:
+        # cuda kernel do not support uint8 for mxfp4
+        ops.ep_scatter_2_cuda(
             recv_x,
-            recv_x.stride(0),
-            recv_x.stride(1),
             recv_x_scale,
-            0 if recv_x_scale is None else recv_x_scale.stride(0),
-            0 if recv_x_scale is None else recv_x_scale.stride(1),
             recv_topk,
-            recv_topk.stride(0),
-            recv_topk.stride(1),
+            expert_start_loc,
             output_tensor,
-            output_tensor.stride(0),
-            output_tensor.stride(1),
-            output_tensor_scale,
-            0 if output_tensor_scale is None else output_tensor_scale.stride(0),
-            0 if output_tensor_scale is None else output_tensor_scale.stride(1),
             output_index,
-            output_index.stride(0),
-            output_index.stride(1),
-            expert_map=expert_map,
-            with_scale=(recv_x_scale is not None),
-            topk_num=recv_topk.shape[1],
-            HAS_EXPERT_MAP=expert_map is not None,
-            HIDDEN_SIZE=hidden_size,
-            SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
-            IS_BLOCK_WISE_QUANT=is_block_wise_quant,
-            BLOCK_SIZE=triton.next_power_of_2(recv_topk.shape[1]),
-            COPY_SIZE=512,
-            num_stages=3,
-            num_warps=8,
+            output_tensor_scale,
+            (recv_x_scale is not None),
         )
-        return
 
+
+    grid = lambda meta: (recv_x.shape[0],)
+
+    _fwd_kernel_ep_scatter_2_optimal[grid](
+        recv_topk.shape[0],
+        expert_start_loc,
+        recv_x,
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_x_scale,
+        0 if recv_x_scale is None else recv_x_scale.stride(0),
+        0 if recv_x_scale is None else recv_x_scale.stride(1),
+        recv_topk,
+        recv_topk.stride(0),
+        recv_topk.stride(1),
+        output_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_tensor_scale,
+        0 if output_tensor_scale is None else output_tensor_scale.stride(0),
+        0 if output_tensor_scale is None else output_tensor_scale.stride(1),
+        output_index,
+        output_index.stride(0),
+        output_index.stride(1),
+        expert_map=expert_map,
+        with_scale=(recv_x_scale is not None),
+        topk_num=recv_topk.shape[1],
+        HAS_EXPERT_MAP=expert_map is not None,
+        HIDDEN_SIZE=hidden_size,
+        SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
+        IS_BLOCK_WISE_QUANT=is_block_wise_quant,
+        BLOCK_SIZE=triton.next_power_of_2(recv_topk.shape[1]),
+        COPY_SIZE=512,
+        num_stages=3,
+        num_warps=8,
+    )
+    return
+
+    # keep codes only for debug
     grid = min(recv_topk.shape[0], 1024 * 8)
 
     if is_block_wise_quant or is_channel_wise_quant:
@@ -540,7 +557,7 @@ def _fwd_kernel_ep_gather(
                 )
                 tmp = tl.load(
                     input_tensor
-                    + source_token_index * input_tensor_stride0
+                    + source_token_index.to(tl.int64) * input_tensor_stride0
                     + cur_block * BLOCK_D
                     + off_d
                 )
