@@ -326,13 +326,18 @@ def _fwd_kernel_ep_scatter_2_optimal(
                 triton.cdiv(SCALE_HIDDEN_SIZE, COPY_SIZE),
             ):
                 copy_mask = scale_offsets < SCALE_HIDDEN_SIZE
+                # Use stride-based access for both input and output scale.
+                # For row-major uint8 scales: stride1 == 1, equivalent to
+                # contiguous access.  For col-major uint16 scales: stride1
+                # is the outer dimension (M), so scale_offsets must be
+                # multiplied by stride1.
                 to_copy_scale = tl.load(
-                    recv_x_scale + token_id * recv_x_scale_stride0 + scale_offsets,
+                    recv_x_scale + token_id * recv_x_scale_stride0 + scale_offsets * recv_x_scale_stride1,
                     mask=copy_mask,
                 )
                 output_scale_offsets = (
                     dest_token_index[:, None] * output_tensor_scale_stride0
-                    + scale_offsets[None, :]
+                    + scale_offsets[None, :] * output_tensor_scale_stride1
                 )
                 to_copy_scale = to_copy_scale[None, :].broadcast_to(
                     BLOCK_SIZE, COPY_SIZE
@@ -413,6 +418,14 @@ def ep_scatter(
 
     grid = lambda meta: (recv_x.shape[0],)
 
+    # For uint16 col-major scale, use aq_scale.shape[1] (S_groups // 2) as
+    # SCALE_HIDDEN_SIZE and pass the actual strides so the kernel handles
+    # the non-unit stride access correctly.
+    if recv_x_scale is not None and recv_x_scale.dtype == torch.uint16:
+        scale_hidden_size = recv_x_scale.shape[1]
+    else:
+        scale_hidden_size = hidden_size // BLOCK_D
+
     _fwd_kernel_ep_scatter_2_optimal[grid](
         recv_topk.shape[0],
         expert_start_loc,
@@ -439,7 +452,7 @@ def ep_scatter(
         topk_num=recv_topk.shape[1],
         HAS_EXPERT_MAP=expert_map is not None,
         HIDDEN_SIZE=hidden_size,
-        SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
+        SCALE_HIDDEN_SIZE=scale_hidden_size,
         IS_BLOCK_WISE_QUANT=is_block_wise_quant,
         BLOCK_SIZE=triton.next_power_of_2(recv_topk.shape[1]),
         COPY_SIZE=512,
@@ -668,16 +681,24 @@ def deepgemm_moe_permute(
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
 
     if is_block_wise_quant:
-        # mxfp4: torch.uint8, others: torch.float32
-        if aq_scale is not None and aq_scale.dtype == torch.uint8:
+        if aq_scale is not None and aq_scale.dtype == torch.uint16:
+            # uint16 col-major scale: physical layout [S//2, M_sum] contiguous,
+            # logical layout [M_sum, S//2] via .t() (stride(0)=1, stride(1)=M_sum).
+            scale_hidden = aq_scale.shape[1]  # S_groups // 2
+            aq_scale_out = torch.empty(
+                (scale_hidden, M_sum), device=device, dtype=torch.uint16
+            ).t()
+        elif aq_scale is not None and aq_scale.dtype == torch.uint8:
+            # Legacy mxfp4 uint8 row-major scale
             assert block_k == 16
-            aq_scale_out_dtype = aq_scale.dtype
+            aq_scale_out = torch.empty(
+                (M_sum, H // block_k), device=device, dtype=torch.uint8
+            )
         else:
             assert block_k == 128
-            aq_scale_out_dtype = torch.float32
-        aq_scale_out = torch.empty(
-            (M_sum, H // block_k), device=device, dtype=aq_scale_out_dtype
-        )
+            aq_scale_out = torch.empty(
+                (M_sum, H // block_k), device=device, dtype=torch.float32
+            )
     elif is_channel_wise_quant:
         aq_scale_out = torch.empty((M_sum, 1), device=device, dtype=torch.float32)
     else:

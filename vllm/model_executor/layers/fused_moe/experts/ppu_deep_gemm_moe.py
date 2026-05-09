@@ -602,22 +602,26 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
             experts_for_rows,
         )
 
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
         if self.gemm1_clamp_limit is not None and activation == MoEActivation.SILU:
             # deepseek_v4
-            swiglu_limit_func(
-                mm1_out,
-                mm1_out,
-                self.gemm1_clamp_limit,
+            act_out = torch.empty(
+                (M_sum, activation_out_dim), dtype=mm1_out.dtype, device=mm1_out.device
             )
-
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-        quant_out = _resize_cache(
-            workspace13.view(dtype=torch.uint8),
-            (M_sum, activation_out_dim),
-        )
-        a2q, a2q_scale = self._act_mul_quant(
-            input=mm1_out.view(-1, N), output=quant_out, activation=activation
-        )
+            swiglu_limit_func(
+                output=act_out,
+                input=mm1_out.view(-1, N),
+                swiglu_limit=self.gemm1_clamp_limit,
+            )
+            a2q, a2q_scale = downcast_to_mxfp4(act_out, axis=1)
+        else:
+            quant_out = _resize_cache(
+                workspace13.view(dtype=torch.uint8),
+                (M_sum, activation_out_dim),
+            )
+            a2q, a2q_scale = self._act_mul_quant(
+                input=mm1_out.view(-1, N), output=quant_out, activation=activation
+            )
 
         # for mxfp4, K is hidden_size // 2, need to set `K * 2` here
         mm2_out = _resize_cache(workspace2, (M_sum, K * 2))

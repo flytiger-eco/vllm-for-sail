@@ -359,6 +359,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 return_recv_hook=True,
                 **(dict(use_int8=self.use_int8_dispatch) if current_platform.is_ppu() else dict()),
                 **(dict(use_mxfp4=self.use_mxfp4_dispatch) if current_platform.is_ppu() else dict()),
+                **(dict(mxfp4_scale_row_major=False) if (current_platform.is_ppu() and self.use_mxfp4_dispatch) else dict()),
                 **(
                     dict(
                         quant_size=32
