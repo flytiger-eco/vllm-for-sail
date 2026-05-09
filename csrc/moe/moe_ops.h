@@ -75,4 +75,12 @@ void shuffle_rows(const torch::Tensor& input_tensor,
 // Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
 void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
                       const torch::Tensor& mat_b);
+
+void ep_scatter_2_cuda(torch::Tensor hidden_states,
+                       std::optional<torch::Tensor> scales_opt,
+                       torch::Tensor topk_ids, torch::Tensor expert_start_loc,
+                       torch::Tensor output_tensor, torch::Tensor output_index,
+                       std::optional<torch::Tensor> output_tensor_scale_opt,
+                       bool with_scale);
+
 #endif
