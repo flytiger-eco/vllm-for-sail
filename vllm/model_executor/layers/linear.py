@@ -43,6 +43,14 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+# Add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    from vllm.utils.nvtx_ops import (
+        nvtx_pop_range_for_gemm,
+        nvtx_push_range_for_gemm,
+    )
+
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -377,9 +385,15 @@ class ReplicatedLinear(LinearBase):
         x: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
-
+        assert self.quant_method is not None
+        if NVTX_PROFILE:
+            tmp_weight = getattr(self, "weight", None)
+            nvtx_push_range_for_gemm(
+                "ReplicatedLinear", x, tmp_weight, None, None, bias
+            )
         output = self.quant_method.apply(self, x, bias)
-
+        if NVTX_PROFILE:
+            nvtx_pop_range_for_gemm(output)
         if not self.return_bias:
             return output
         output_bias = self.bias if self.skip_bias_add else None
@@ -555,7 +569,16 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
+        assert self.quant_method is not None
+
+        if NVTX_PROFILE:
+            tmp_weight = getattr(self, "weight", None)
+            nvtx_push_range_for_gemm(
+                "ColumnParallelLinear", input_, tmp_weight, None, None, bias
+            )
         output_parallel = self.quant_method.apply(self, input_, bias)
+        if NVTX_PROFILE:
+            nvtx_pop_range_for_gemm(output_parallel)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1685,7 +1708,15 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+
+        if NVTX_PROFILE:
+            tmp_weight = getattr(self, "weight", None)
+            nvtx_push_range_for_gemm(
+                "RowParallelLinear", input_, tmp_weight, None, None, bias_
+            )
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        if NVTX_PROFILE:
+            nvtx_pop_range_for_gemm(output_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)

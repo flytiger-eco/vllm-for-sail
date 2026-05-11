@@ -43,6 +43,24 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
+# Add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
+
+
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
 # The goal is to be able to utilize different communication mechanisms with
@@ -1414,6 +1432,16 @@ class FusedMoEKernelModularImpl:
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+        if NVTX_PROFILE:
+            if torch.cuda.is_current_stream_capturing():
+                th_nvtx_range_push(
+                    f"D_MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}"
+                )
+            else:
+                th_nvtx_range_push(
+                    f"P_MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}"
+                )
+
         output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
@@ -1455,6 +1483,9 @@ class FusedMoEKernelModularImpl:
 
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
+
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         return self._finalize(
             output,
