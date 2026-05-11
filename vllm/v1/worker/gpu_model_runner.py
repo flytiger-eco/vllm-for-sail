@@ -222,6 +222,52 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
+# Add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_SAIL_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from model_prof import prof_iter
+        from nvtx import annotate, mark
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+
+        def sche_mark(sche_output):
+            if len(sche_output.scheduled_new_reqs) > 0:
+                reqs = [req.req_id for req in sche_output.scheduled_new_reqs]
+                mark(f"new_reqs: {reqs}")
+            mark(
+                f"total_tokens={sche_output.total_num_scheduled_tokens},req_id:num_tokens={sche_output.num_scheduled_tokens}"
+            )
+            if len(sche_output.finished_req_ids) > 0:
+                mark(f"finish_req: {sche_output.finished_req_ids}")
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
+
+    def prof_iter(func):
+        pass
+
+    def sche_mark(sche_output):
+        pass
+
+    def annotate(name):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                result = func(*args, **kwargs)
+                return result
+
+            return wrapper
+
+        return decorator
+
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -410,6 +456,7 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.iteration = 0
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -1773,6 +1820,7 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    @annotate("prepare_inputs")
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3332,15 +3380,22 @@ class GPUModelRunner(
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
+        if NVTX_PROFILE:
+            logits_shape = getattr(logits, "shape", None)
+            th_nvtx_range_push(f"[FW_NATIVE] op:sampler,logits:{logits_shape}")
+
         sampling_metadata = self.input_batch.sampling_metadata
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            return self.sampler(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            if NVTX_PROFILE:
+                th_nvtx_range_pop()
+            return sampler_output
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
@@ -3354,6 +3409,8 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
         return sampler_output
 
     def _bookkeeping_sync(
@@ -3789,6 +3846,10 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        if NVTX_PROFILE:
+            prof_iter(self.iteration)
+            th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
+            self.iteration += 1
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3831,6 +3892,10 @@ class GPUModelRunner(
         ):
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
+
+
+            if NVTX_PROFILE:
+                sche_mark(scheduler_output)
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
@@ -4030,6 +4095,12 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+
+        if NVTX_PROFILE:
+            th_nvtx_range_push(
+                f"total bs={len(scheduler_output.num_scheduled_tokens)}, P bs={(np.array(list(scheduler_output.num_scheduled_tokens.values())) > 1).sum()}"
+            )  # noqa: E501
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -4055,6 +4126,9 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4084,7 +4158,13 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
+                if NVTX_PROFILE:
+                    th_nvtx_range_push(
+                        f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
+                    )
                 logits = self.model.compute_logits(sample_hidden_states)
+                if NVTX_PROFILE:
+                    th_nvtx_range_pop()
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4103,7 +4183,13 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
+                    if NVTX_PROFILE:
+                        th_nvtx_range_push(
+                            f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
+                        )
                     logits = self.model.compute_logits(sample_hidden_states)
+                    if NVTX_PROFILE:
+                        th_nvtx_range_pop()
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:
@@ -4348,6 +4434,9 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
             )
+
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         if not self.use_async_scheduling:
             return output

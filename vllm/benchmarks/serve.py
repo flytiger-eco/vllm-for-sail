@@ -54,6 +54,14 @@ from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
+try:
+    from model_prof import start_active_profile
+except ImportError:
+    print("benchmark_serving: failed to import start_active_profile")
+
+    def start_active_profile():
+        pass
+
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -630,6 +638,7 @@ async def benchmark(
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    skip_first_concurrency: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -792,14 +801,22 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    async def limited_request_func(request_func_input, session, pbar):
+    async def limited_request_func(request_func_input, session, pbar, task_id):
         async with semaphore:
+            if skip_first_concurrency:
+                if task_id == 2 * max_concurrency:
+                    print(f"Start active profiling with request id: {task_id}")
+                    start_active_profile()
+            elif task_id == 1:
+                print("Start active profiling")
+                start_active_profile()
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
+    task_id = 0
 
     rps_change_events = []
     last_int_rps = -1
@@ -856,10 +873,14 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input=request_func_input, session=session, pbar=pbar
+                    request_func_input=request_func_input,
+                    session=session,
+                    pbar=pbar,
+                    task_id=task_id,
                 )
             )
         )
+        task_id += 1
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if pbar is not None:
@@ -1624,7 +1645,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Generate a matplotlib figure with dataset statistics showing "
         "prompt tokens, output tokens, and combined token distributions.",
     )
-
+    parser.add_argument(
+        "--skip-first-concurrency",
+        action="store_true",
+        help="Skip the first max_concurrency requests to "
+        "improve the accuracy of the calculation.",
+    )
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1842,6 +1868,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        skip_first_concurrency=args.skip_first_concurrency,
     )
 
     # Save config and results to json

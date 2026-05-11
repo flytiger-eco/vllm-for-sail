@@ -29,8 +29,16 @@ except ImportError as e:
 
 #Add for nvtx profiling
 import os
-NVTX_PROFILE = os.getenv("VLLM_SAIL_NVTX_PROFILE", False)
-NVTX_PROFILE_DUMP_SEQLEN = os.getenv("VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN", False)
+_nvtx_env = os.getenv("VLLM_SAIL_NVTX_PROFILE", "").strip().lower()
+_nvtx_sail_env = os.getenv("VLLM_SAIL_NVTX_PROFILE", "").strip().lower()
+NVTX_PROFILE = _nvtx_env in ("true", "1") or _nvtx_sail_env in ("true", "1")
+_dump_env = os.getenv("VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN", "").strip().lower()
+_dump_sail_env = os.getenv(
+    "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN", ""
+).strip().lower()
+NVTX_PROFILE_DUMP_SEQLEN = (
+    _dump_env in ("true", "1") or _dump_sail_env in ("true", "1")
+)
 if NVTX_PROFILE:
     try:
         from torch.cuda.nvtx import range_push as  th_nvtx_range_push
@@ -38,7 +46,7 @@ if NVTX_PROFILE:
     except ImportError:
         NVTX_PROFILE = False
         NVTX_PROFILE_DUMP_SEQLEN = False
-if NVTX_PROFILE == False:
+if not NVTX_PROFILE:
     def th_nvtx_range_push(label):
         pass
     def th_nvtx_range_pop():
