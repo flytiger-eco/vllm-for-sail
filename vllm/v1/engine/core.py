@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import gc
 import os
 import queue
@@ -89,6 +90,53 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from model_prof import prof_iter
+        from nvtx import annotate, mark
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+
+        def sche_mark(sche_output):
+            if len(sche_output.scheduled_new_reqs) > 0:
+                reqs = [req.req_id for req in sche_output.scheduled_new_reqs]
+                mark(f"new_reqs: {reqs}")
+            mark(
+                f"total_tokens={sche_output.total_num_scheduled_tokens},req_id:num_tokens={sche_output.num_scheduled_tokens}"
+            )
+            if len(sche_output.finished_req_ids) > 0:
+                mark(f"finish_req: {sche_output.finished_req_ids}")
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
+
+    def prof_iter(func):
+        pass
+
+    def mark(func):
+        pass
+
+    def sche_mark(func):
+        pass
+
+    def annotate(name):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                result = func(*args, **kwargs)
+                return result
+
+            return wrapper
+
+        return decorator
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
@@ -127,6 +175,7 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
+        self.iteration = 0
         self.available_gpu_memory_for_kv_cache = -1
 
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
@@ -579,12 +628,17 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
+        if NVTX_PROFILE:
+            prof_iter(self.iteration)
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if NVTX_PROFILE:
+            sche_mark(scheduler_output)
+            th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
+            self.iteration += 1
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -602,6 +656,8 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -633,6 +689,8 @@ class EngineCore:
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
+        if NVTX_PROFILE:
+            prof_iter(self.iteration)
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
@@ -643,10 +701,20 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if NVTX_PROFILE:
+                sche_mark(scheduler_output)
+                th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
+                self.iteration += 1
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
+            # NOTE: In async batch-queue mode the pop is placed right after
+            # execute_model because the result is processed later from the
+            # batch queue.  The actual GPU work is covered by
+            # GPUModelRunner's own [prof_range] range.
+            if NVTX_PROFILE:
+                th_nvtx_range_pop()
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 

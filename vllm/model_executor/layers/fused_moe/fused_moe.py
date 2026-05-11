@@ -37,6 +37,24 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+# Add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
+
+
 @triton.jit
 def _moe_sum_reduce_kernel(
     input_ptr,
@@ -905,6 +923,11 @@ def invoke_fused_moe_triton_kernel(
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
     even_Ks = (B.size(2) % BLOCK_SIZE_K == 0) and current_platform.has_device_capability((8, 9))
 
+    if NVTX_PROFILE:
+        th_nvtx_range_push(
+            f"MoeFused BM_{config['BLOCK_SIZE_M']},BN_{config['BLOCK_SIZE_N']},BK_{BLOCK_SIZE_K},GM_{config['GROUP_SIZE_M']},warps_{config.get('num_warps', 0)},stages_{config.get('num_stages', 0)},USE_VALU_{int(use_valu)}"
+        )
+
     fused_moe_kernel[grid](
         A,
         B,
@@ -951,6 +974,8 @@ def invoke_fused_moe_triton_kernel(
         even_Ks=even_Ks,
         **config,
     )
+    if NVTX_PROFILE:
+        th_nvtx_range_pop()    
 
 
 def dispatch_fused_moe_kernel(
@@ -1557,6 +1582,46 @@ def fused_experts_op(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if NVTX_PROFILE:
+        if torch.cuda.is_current_stream_capturing():
+            th_nvtx_range_push(
+                f"D_MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}"
+            )
+        else:
+            th_nvtx_range_push(
+                f"P_MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}"
+            )
+        output_hidden_states = fused_experts_impl(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            False,
+            activation,
+            apply_router_weight_on_input,
+            use_fp8_w8a8,
+            use_int8_w8a8,
+            use_int8_w8a16,
+            use_int4_w4a16,
+            ocp_mx_scheme,
+            per_channel_quant,
+            global_num_experts,
+            expert_map,
+            w1_scale,
+            w2_scale,
+            w1_zp,
+            w2_zp,
+            a1_scale,
+            a2_scale,
+            block_shape,
+            w1_bias,
+            w2_bias,
+        )
+
+        th_nvtx_range_pop()
+        return output_hidden_states
+
     return fused_experts_impl(
         hidden_states,
         w1,
