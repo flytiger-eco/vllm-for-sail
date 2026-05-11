@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import itertools
 import time
 from collections import defaultdict, deque
@@ -7,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -63,6 +65,44 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+# add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from nvtx import annotate, mark
+
+        def sche_mark(sche_output):
+            if len(sche_output.scheduled_new_reqs) > 0:
+                reqs = [req.req_id for req in sche_output.scheduled_new_reqs]
+                mark(f"new_reqs: {reqs}")
+            mark(
+                f"total_tokens={sche_output.total_num_scheduled_tokens},req_id:num_tokens={sche_output.num_scheduled_tokens}"
+            )
+            if len(sche_output.finished_req_ids) > 0:
+                mark(f"finish_req: {sche_output.finished_req_ids}")
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def mark(func):
+        pass
+
+    def sche_mark(func):
+        pass
+
+    def annotate(name):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                result = func(*args, **kwargs)
+                return result
+
+            return wrapper
+
+        return decorator
 
 
 class Scheduler(SchedulerInterface):
@@ -385,6 +425,7 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
+    @annotate("schedule")
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -1155,12 +1196,6 @@ class Scheduler(SchedulerInterface):
                 self._inflight_prefills.discard(request)
 
         # Snapshot block IDs for routed experts before forward starts.
-        # A concurrent schedule() may preempt requests and free blocks
-        # before update_from_output runs; the snapshot survives that.
-        # Use update() to preserve entries from the previous step that
-        # have not yet been consumed by update_from_output (async
-        # scheduling may call _update_after_schedule again before the
-        # prior update_from_output runs).
         if self.enable_return_routed_experts:
             gid = self.routed_experts_mgr.attn_gid
             self._re_block_ids.update(
@@ -1170,6 +1205,8 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
+        if NVTX_PROFILE:
+            sche_mark(scheduler_output)
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.

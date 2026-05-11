@@ -27,6 +27,31 @@ except ImportError as e:
     FA3_UNAVAILABLE_REASON = str(e)
     FA3_AVAILABLE = False
 
+#Add for nvtx profiling
+import os
+_nvtx_env = os.getenv("VLLM_PPU_NVTX_PROFILE", "").strip().lower()
+_nvtx_sail_env = os.getenv("VLLM_SAIL_NVTX_PROFILE", "").strip().lower()
+NVTX_PROFILE = _nvtx_env in ("true", "1") or _nvtx_sail_env in ("true", "1")
+_dump_env = os.getenv("VLLM_PPU_NVTX_VFA_DUMP_SEQLEN", "").strip().lower()
+_dump_sail_env = os.getenv(
+    "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN", ""
+).strip().lower()
+NVTX_PROFILE_DUMP_SEQLEN = (
+    _dump_env in ("true", "1") or _dump_sail_env in ("true", "1")
+)
+if NVTX_PROFILE:
+    try:
+        from torch.cuda.nvtx import range_push as  th_nvtx_range_push
+        from torch.cuda.nvtx import range_pop  as  th_nvtx_range_pop
+    except ImportError:
+        NVTX_PROFILE = False
+        NVTX_PROFILE_DUMP_SEQLEN = False
+if not NVTX_PROFILE:
+    def th_nvtx_range_push(label):
+        pass
+    def th_nvtx_range_pop():
+        pass
+
 # isort: on
 
 DEFAULT_FA_VERSION = 2
@@ -228,6 +253,17 @@ def flash_attn_varlen_func(
         real_window_size = (window_size[0], window_size[1])
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
+    if NVTX_PROFILE:
+        if torch.cuda.is_current_stream_capturing():
+            nvtx_message = (f"[FW_FMHA] --format=flash_attn_{fa_version},Forward,type:D,seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},head_dim_value:{v.shape[-1]},num_heads_k:{k.shape[-2]},num_heads:{q.shape[-2]},batch_size:{len(cu_seqlens_q) - 1},seqlen_k:{max_seqlen_k},data_type:{q.dtype},window_size_left:{real_window_size[0]},window_size_right:{real_window_size[1]},softcap:{softcap}")
+        else:
+            if NVTX_PROFILE_DUMP_SEQLEN:
+                cu_seqlens_q_list = cu_seqlens_q.flatten().cpu().tolist() if cu_seqlens_q is not None else "[]"
+                cu_seqlens_k_list = cu_seqlens_k.flatten().cpu().tolist() if cu_seqlens_k is not None else "[]"
+                nvtx_message = (f"[FW_FMHA] --format=flash_attn_{fa_version},Forward,type:P,seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},head_dim_value:{v.shape[-1]},num_heads_k:{k.shape[-2]},num_heads:{q.shape[-2]},batch_size:{len(cu_seqlens_q) - 1},seqlen_k:{max_seqlen_k},data_type:{q.dtype},window_size_left:{real_window_size[0]},window_size_right:{real_window_size[1]},softcap:{softcap},cu_seqlens_q:{cu_seqlens_q_list},cu_seqlens_k:{cu_seqlens_k_list}")
+            else:
+                nvtx_message = (f"[FW_FMHA] --format=flash_attn_{fa_version},Forward,type:P,seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},head_dim_value:{v.shape[-1]},num_heads_k:{k.shape[-2]},num_heads:{q.shape[-2]},batch_size:{len(cu_seqlens_q) - 1},seqlen_k:{max_seqlen_k},data_type:{q.dtype},window_size_left:{real_window_size[0]},window_size_right:{real_window_size[1]},softcap:{softcap}")
+        th_nvtx_range_push(nvtx_message)
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
     
@@ -305,6 +341,8 @@ def flash_attn_varlen_func(
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
+    if NVTX_PROFILE:
+        th_nvtx_range_pop()
     return (out, softmax_lse) if return_softmax_lse else out
 
 
