@@ -45,6 +45,25 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+NVTX_PROFILE_DUMP_TOPK = envs.VLLM_PPU_NVTX_DUMP_TOPK
+
+if NVTX_PROFILE:
+    try:
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+    except ImportError:
+        NVTX_PROFILE = False
+        NVTX_PROFILE_DUMP_TOPK = False
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
+
+
 class FlashMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -308,6 +327,25 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
             scheduler_metadata.num_splits = num_splits
 
+        if NVTX_PROFILE:
+            tmp_k_cache = kv_c_and_k_pe_cache.unsqueeze(-2)  # Add head dim of 1
+            batch_size = q.shape[0]
+            if len(q.shape) == 4:
+                max_seqlen_q = q.shape[-3]
+            else:
+                max_seqlen_q = 1
+            if not torch.cuda.is_current_stream_capturing() and NVTX_PROFILE_DUMP_TOPK:
+                cache_seqlens = attn_metadata.decode.seq_lens
+                cu_seqlens_k_list = (
+                    cache_seqlens.flatten().cpu().tolist()
+                    if cache_seqlens is not None
+                    else "[]"
+                )
+                nvtx_message = f"[FM_FMHA] --format=MLA,Forward,type:D,seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},head_dim_v:{self.kv_lora_rank},num_heads_kv:{tmp_k_cache.shape[-2]},num_heads:{q.shape[-2]},batch_size:{batch_size},data_type:{q.dtype},causal:True,num_blocks:{tmp_k_cache.shape[-4]},page_block_size:{tmp_k_cache.shape[-3]},cu_seqlens_k:{cu_seqlens_k_list}"
+            else:
+                nvtx_message = f"[FM_FMHA] --format=MLA,Forward,type:D,seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},head_dim_v:{self.kv_lora_rank},num_heads_kv:{tmp_k_cache.shape[-2]},num_heads:{q.shape[-2]},batch_size:{batch_size},data_type:{q.dtype},causal:True"
+            th_nvtx_range_push(nvtx_message)
+
         if is_quantized_kv_cache(self.kv_cache_dtype):
             o, lse = flash_mla_with_kvcache_fp8(
                 q=q,
@@ -334,6 +372,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                 causal=True,
                 is_fp8_kvcache=False,
             )
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         o = reshape_attn_output_for_spec_decode(o)
 

@@ -55,8 +55,27 @@ from vllm.utils.ppu_deep_gemm import (
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.platforms import current_platform
+import vllm.envs as envs
 
 logger = init_logger(__name__)
+
+
+# Add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_PPU_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from torch.cuda.nvtx import range_pop as th_nvtx_range_pop
+        from torch.cuda.nvtx import range_push as th_nvtx_range_push
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def th_nvtx_range_push(label):
+        pass
+
+    def th_nvtx_range_pop():
+        pass
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
@@ -328,6 +347,18 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         mm1_out = _resize_cache(workspace2, (M_sum, N))
 
+        nvtx_pushed = False
+        if NVTX_PROFILE:
+            if (
+                envs.VLLM_PPU_NVTX_DUMP_TOPK
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                num_activated_experts = (expert_num_tokens > 0).sum().item()
+                th_nvtx_range_push(
+                    f"MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}_topkids{expert_num_tokens.flatten().cpu().tolist()}_unique_{num_activated_experts}"
+                )
+                nvtx_pushed = True
+
         # calculate expert_first_token_offset for deepgemm
         experts_for_rows = torch.zeros(
             local_num_experts, dtype=torch.int32, device="cuda"
@@ -414,6 +445,9 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
         if apply_router_weight_on_input:
             assert topk_weights is not None
             # topk_weights = torch.ones_like(topk_weights)
+
+        if nvtx_pushed:
+            th_nvtx_range_pop()
 
         deepgemm_unpermute_and_reduce(
             a=mm2_out,
@@ -582,6 +616,18 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
 
         mm1_out = _resize_cache(workspace2, (M_sum, N))
 
+        nvtx_pushed = False
+        if NVTX_PROFILE:
+            if (
+                envs.VLLM_PPU_NVTX_DUMP_TOPK
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                num_activated_experts = (expert_num_tokens > 0).sum().item()
+                th_nvtx_range_push(
+                    f"MoE,M_{hidden_states.shape[0]}_E_{w1.shape[0]}_H_{w1.shape[2]}_In_{w1.shape[1]}_topk_{topk_ids.shape[1]}_topkids{expert_num_tokens.flatten().cpu().tolist()}_unique_{num_activated_experts}"
+                )
+                nvtx_pushed = True
+
         # calculate expert_first_token_offset for deepgemm
         experts_for_rows = torch.zeros(
             local_num_experts, dtype=torch.int32, device="cuda"
@@ -635,6 +681,9 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         if apply_router_weight_on_input:
             assert topk_weights is not None
             # topk_weights = torch.ones_like(topk_weights)
+
+        if nvtx_pushed:
+            th_nvtx_range_pop()
 
         deepgemm_unpermute_and_reduce(
             a=mm2_out,

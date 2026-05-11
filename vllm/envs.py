@@ -289,7 +289,8 @@ if TYPE_CHECKING:
     VLLM_PPU_ENABLE_MOE_MARLIN: bool = False
     VLLM_PPU_FUSED_GDN_DECODE: bool = True
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
-
+    VLLM_PPU_NVTX_PROFILE: bool = False
+    VLLM_PPU_NVTX_DUMP_TOPK: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -2047,6 +2048,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use triton_int8_quant
     "VLLM_PPU_USE_TRITON_INT8_QUANT": lambda: (
         os.getenv("VLLM_PPU_USE_TRITON_INT8_QUANT", "True").strip().lower() in ("true", "1")
+    ),
+    # If set, will use nvtx and model_prof to capture trace for profiling
+    "VLLM_PPU_NVTX_PROFILE": lambda: (
+        os.getenv("SAIL_NVTX_PROFILE", "False").strip().lower() in ("true", "1")
+        or os.getenv("VLLM_SAIL_NVTX_PROFILE", "False").strip().lower() in ("true", "1")
+        or os.getenv("VLLM_PPU_NVTX_PROFILE", "False").strip().lower() in ("true", "1")
+    ),
+    # Enable it to dump moe top k list for prefill
+    "VLLM_PPU_NVTX_DUMP_TOPK": lambda: (
+        os.getenv("VLLM_SAIL_NVTX_DUMP_TOPK", "False").lower() in ("true", "1")
+        or os.getenv("VLLM_PPU_NVTX_DUMP_TOPK", "False").lower() in ("true", "1")
     ),
 }
 
