@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import itertools
 import time
 from collections import defaultdict, deque
@@ -62,6 +63,44 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+# add for nvtx profiling
+NVTX_PROFILE = envs.VLLM_SAIL_NVTX_PROFILE
+if NVTX_PROFILE:
+    try:
+        from nvtx import annotate, mark
+
+        def sche_mark(sche_output):
+            if len(sche_output.scheduled_new_reqs) > 0:
+                reqs = [req.req_id for req in sche_output.scheduled_new_reqs]
+                mark(f"new_reqs: {reqs}")
+            mark(
+                f"total_tokens={sche_output.total_num_scheduled_tokens},req_id:num_tokens={sche_output.num_scheduled_tokens}"
+            )
+            if len(sche_output.finished_req_ids) > 0:
+                mark(f"finish_req: {sche_output.finished_req_ids}")
+    except ImportError:
+        NVTX_PROFILE = False
+
+if not NVTX_PROFILE:
+
+    def mark(func):
+        pass
+
+    def sche_mark(func):
+        pass
+
+    def annotate(name):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                result = func(*args, **kwargs)
+                return result
+
+            return wrapper
+
+        return decorator
 
 
 class Scheduler(SchedulerInterface):
@@ -349,6 +388,7 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    @annotate("schedule")
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -1005,6 +1045,8 @@ class Scheduler(SchedulerInterface):
                 request.use_structured_output and not request.is_prefill_chunk
             )
 
+        if NVTX_PROFILE:
+            sche_mark(scheduler_output)
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
