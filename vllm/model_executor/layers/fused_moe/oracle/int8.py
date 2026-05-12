@@ -221,6 +221,7 @@ def make_int8_moe_quant_config(
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
         a1_scale is not None and a2_scale is not None
@@ -233,6 +234,7 @@ def make_int8_moe_quant_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             per_act_token_quant=per_act_token_quant,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     if a1_scale is None or a2_scale is None:

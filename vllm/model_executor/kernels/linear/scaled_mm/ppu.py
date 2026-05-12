@@ -285,6 +285,13 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
+        # Flatten leading dimensions to avoid issues with deepgemm/acext
+        # kernels that only accept 2D inputs. The GPU cutlass_scaled_mm
+        # wrapper applies the same flatten/reshape pattern internally
+        # (see vllm/_custom_ops.py).
+        original_shape = x.shape
+        x = x.reshape(-1, x.shape[-1])
+
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
@@ -307,7 +314,7 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             # Currently, static is always per-tensor and dynamic is per-token
             static = i_zp is not None
             azp = None if static else x_zp
-            return ops.cutlass_scaled_mm_azp(
+            out = ops.cutlass_scaled_mm_azp(
                 x_q,
                 w_q,
                 scale_a=x_s,
@@ -317,16 +324,19 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 azp=azp,
                 bias=bias,
             )
+            return out.view(*original_shape[:-1], out.shape[-1])
         if (bias is None) and self.use_deepgemm_int8_gemm:
-            return torch.ops.vllm.w8a8_int8_matmul_deepgemm(
+            out = torch.ops.vllm.w8a8_int8_matmul_deepgemm(
                 x_q, w_q, scale_x=x_s, scale_w=w_s, out_dtype=x.dtype
             )
+            return out.view(*original_shape[:-1], out.shape[-1])
         elif self.use_acext_int8_gemm:
-            return torch.ops.vllm.w8a8_int8_matmul_acext(
+            out = torch.ops.vllm.w8a8_int8_matmul_acext(
                 x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
             )
+            return out.view(*original_shape[:-1], out.shape[-1])
         else:
-            return ops.cutlass_scaled_mm(
+            out = ops.cutlass_scaled_mm(
                 x_q,
                 w_q.t() if self.weight_RowMajor else w_q,
                 scale_a=x_s,
@@ -334,6 +344,7 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 out_dtype=x.dtype,
                 bias=bias,
             )
+            return out.view(*original_shape[:-1], out.shape[-1])
 
 
 class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):

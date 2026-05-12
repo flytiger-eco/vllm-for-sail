@@ -334,11 +334,18 @@ class DeepSeekV4MTP(nn.Module):
             )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
-        # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
+        # FP4/MXFP4/INT8/INT4 experts register ``..._weight_scale``. Choose the suffix
         # for the rename below based on the model's expert dtype.
+        expert_dtype = getattr(self.config, "expert_dtype", "fp4")
         expert_scale_suffix = (
             ".weight_scale"
-            if getattr(self.config, "expert_dtype", "fp4") == "fp4"
+            if expert_dtype in ("fp4", "int8", "int4")
+            else ".weight_scale_inv"
+        )
+        # INT8/INT4 non-expert weights also use ``.weight_scale`` (not the inverse).
+        non_expert_scale_suffix = (
+            ".weight_scale"
+            if expert_dtype in ("int8", "int4")
             else ".weight_scale_inv"
         )
 
@@ -365,7 +372,7 @@ class DeepSeekV4MTP(nn.Module):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
-                    else ".weight_scale_inv"
+                    else non_expert_scale_suffix
                 )
                 name = name.removesuffix(".scale") + suffix
             for param_name, weight_name, shard_id in stacked_params_mapping:

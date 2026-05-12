@@ -25,8 +25,10 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
+    _fused_kv_compress_norm_rope_insert_indexer_attn_sm80,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _fused_kv_compress_norm_rope_insert_sparse_attn,
+    _fused_kv_compress_norm_rope_insert_sparse_attn_sm80,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
     MXFP4_BLOCK_SIZE,
@@ -244,7 +246,14 @@ class DeepseekCompressor(nn.Module):
             assert not use_fp4_cache, (
                 "MXFP4 cache is only supported for indexer (head=128)"
             )
-            self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
+            if current_platform.is_device_capability((8, 0)):
+                self._fused_kernel = (
+                    _fused_kv_compress_norm_rope_insert_sparse_attn_sm80
+                )
+            else:
+                self._fused_kernel = (
+                    _fused_kv_compress_norm_rope_insert_sparse_attn
+                )
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
@@ -258,7 +267,14 @@ class DeepseekCompressor(nn.Module):
                 self._token_stride = self.head_dim // 2
                 self._scale_dim = self.head_dim // MXFP4_BLOCK_SIZE
             else:
-                self._fused_kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
+                if current_platform.is_device_capability((8, 0)):
+                    self._fused_kernel = (
+                        _fused_kv_compress_norm_rope_insert_indexer_attn_sm80
+                    )
+                else:
+                    self._fused_kernel = (
+                        _fused_kv_compress_norm_rope_insert_indexer_attn
+                    )
                 self._quant_block = 128
                 self._token_stride = self.head_dim
                 self._scale_dim = 4  # single float32 scale
