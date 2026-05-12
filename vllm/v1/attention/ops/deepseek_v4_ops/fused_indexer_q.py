@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.platforms import current_platform
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -77,6 +78,83 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
     hi_nib = _e2m1_nibble(x_hi * inv_scale)
     packed = lo_nib | (hi_nib << 4)
     return packed, ue8m0
+
+
+@triton.jit
+def _fused_indexer_q_rope_fp32_kernel(
+    pos_ptr,
+    index_q_ptr,
+    index_q_stride0,
+    index_q_stride1,
+    index_q_cos_sin_ptr,
+    index_q_cos_sin_stride,
+    INDEX_Q_HALF_ROT_DIM: tl.constexpr,
+    out_fp32_ptr,
+    out_stride0,
+    out_stride1,
+    INDEX_Q_HEAD_DIM: tl.constexpr,
+    index_weights_ptr,
+    index_weights_stride,
+    index_weights_softmax_scale,
+    index_weights_head_scale,
+    index_weights_out_ptr,
+    index_weights_out_stride,
+):
+    """SM80 variant of `_fused_indexer_q_rope_quant_kernel`. Outputs the
+    scaled-and-clamped fp32 Q (which the wrapper casts to fp8 in PyTorch
+    via .to(torch.float8_e4m3fn)). Triton on SM80 cannot compile
+    `tl.float8e4nv`, so the cast happens outside Triton."""
+    INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
+    INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
+    tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
+
+    tok_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+
+    pos = tl.load(pos_ptr + tok_idx)
+    cos, sin = _get_cos_sin(
+        index_q_cos_sin_ptr,
+        index_q_cos_sin_stride,
+        pos,
+        INDEX_Q_HALF_ROT_DIM,
+    )
+    half_offset = tl.arange(0, INDEX_Q_HALF_ROT_DIM)
+    base_ptr = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
+
+    rot_base = base_ptr + INDEX_Q_NOPE_DIM
+    x_even = tl.load(rot_base + half_offset * 2).to(tl.float32)
+    x_odd = tl.load(rot_base + half_offset * 2 + 1).to(tl.float32)
+    r_even = x_even * cos - x_odd * sin
+    r_odd = x_odd * cos + x_even * sin
+    r_even = r_even.to(tl.bfloat16).to(tl.float32)
+    r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
+
+    amax = tl.maximum(tl.max(tl.abs(r_even)), tl.max(tl.abs(r_odd)))
+    if INDEX_Q_NOPE_DIM > 0:
+        nope_offset = tl.arange(0, INDEX_Q_NOPE_DIM)
+        x_nope = tl.load(base_ptr + nope_offset).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(x_nope)))
+    index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), 448.0)
+    index_q_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(index_q_scale)))
+
+    out_base_ptr = out_fp32_ptr + tok_idx * out_stride0 + head_idx * out_stride1
+    if INDEX_Q_NOPE_DIM > 0:
+        tl.store(out_base_ptr + nope_offset, tl.div_rn(x_nope, index_q_scale))
+    out_rot_base = out_base_ptr + INDEX_Q_NOPE_DIM
+    tl.store(out_rot_base + half_offset * 2, tl.div_rn(r_even, index_q_scale))
+    tl.store(out_rot_base + half_offset * 2 + 1, tl.div_rn(r_odd, index_q_scale))
+
+    index_weights = tl.load(
+        index_weights_ptr + tok_idx * index_weights_stride + head_idx
+    )
+    index_weights = index_weights.to(tl.float32)
+    index_weights *= index_q_scale
+    index_weights *= index_weights_softmax_scale
+    index_weights *= index_weights_head_scale
+    tl.store(
+        index_weights_out_ptr + tok_idx * index_weights_out_stride + head_idx,
+        index_weights,
+    )
 
 
 @triton.jit
@@ -334,6 +412,43 @@ def fused_indexer_q_rope_quant(
     assert positions.ndim == 1
     assert index_q.ndim == 3
     assert index_q_cos_sin_cache.ndim == 2
+
+    if current_platform.is_device_capability((8,0)):
+        # SM80/ROCm hybrid: Triton kernel emits scaled fp32 Q + fp32
+        # weights_out, then PyTorch casts Q to fp8_e4m3fn (Triton on SM80
+        # cannot compile `tl.float8e4nv`). MXFP4 path is unchanged because
+        # it uses uint8 + ue8m0 (no fp8e4nv).
+        num_tokens = positions.shape[0]
+        num_index_q_heads = index_q.shape[1]
+        index_q_head_dim = index_q.shape[2]
+        out_fp32 = torch.empty(
+            (num_tokens, num_index_q_heads, index_q_head_dim),
+            dtype=torch.float32,
+            device=index_q.device,
+        )
+        weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+        _fused_indexer_q_rope_fp32_kernel[(num_tokens, num_index_q_heads)](
+            positions,
+            index_q,
+            index_q.stride(0),
+            index_q.stride(1),
+            index_q_cos_sin_cache,
+            index_q_cos_sin_cache.stride(0),
+            index_q_cos_sin_cache.shape[-1] // 2,
+            out_fp32,
+            out_fp32.stride(0),
+            out_fp32.stride(1),
+            index_q_head_dim,
+            index_weights,
+            index_weights.stride(0),
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            weights_out,
+            weights_out.stride(0),
+            num_warps=1,
+        )
+        index_q_int8 = out_fp32.to(torch.int8)
+        return index_q_int8, weights_out
 
     num_tokens = positions.shape[0]
     num_index_q_heads = index_q.shape[1]

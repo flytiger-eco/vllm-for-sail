@@ -1008,7 +1008,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
+        self.scale_fmt = config.quantization_config.get("scale_fmt", None)
 
         self.rope_parameters = config.rope_scaling
 
@@ -1495,12 +1495,16 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
-    else:
+    elif expert_dtype == "fp8":
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
+        }
+    elif expert_dtype in ("int8", "int4"):
+        scale_regex = {
+            re.compile(r"\.scale$"): ".weight_scale",
         }
     return WeightsMapper(
         orig_to_new_prefix={
