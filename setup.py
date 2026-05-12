@@ -1057,6 +1057,9 @@ def get_nvcc_cuda_version() -> Version:
 
 
 def get_vllm_version() -> str:
+    # PPU FIXME: Explicitly set vLLM version for PPU pypi
+    os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.24.0"
+
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
