@@ -1,0 +1,19 @@
+# Common dependencies
+-r common.txt
+
+numba
+
+# Dependencies for PPU
+torch
+torchaudio
+flashmla==2.0.0
+# These must be updated alongside torch
+torchvision
+# FlashInfer should be updated together with the Dockerfile
+flashinfer-python
+apache-tvm-ffi==0.1.9
+tilelang
+
+# Required for faster safetensors model loading
+fastsafetensors >= 0.2.2
+
