@@ -1,0 +1,21 @@
+# Common dependencies
+-r common.txt
+
+# numba == 0.65.0 # Required for N-gram speculative decoding
+
+# Dependencies for PPU
+
+# torch
+# torchaudio
+# torchvision
+
+# flashmla==2.0.0
+# flashinfer-python
+# tilelang
+apache-tvm-ffi==0.1.9
+
+# Required for faster safetensors model loading
+fastsafetensors >= 0.3.2
+
+# Tokenspeed_MLA for faster mla with spec decode
+tokenspeed-mla==0.1.2
