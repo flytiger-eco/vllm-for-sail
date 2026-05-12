@@ -113,7 +113,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
     const uint32_t hw_resident_cap =
         static_cast<uint32_t>(num_sms) * static_cast<uint32_t>(occupancy);
     uint32_t max_resident_ctas = hw_resident_cap;
-    if (needs_cooperative) {
+    {
       // Reserve one CTA per SM when occupancy allows; fall back to a single
       // CTA when occupancy == 1 (the most deadlock-prone case — any straggler
       // kernel that takes the only slot on one SM hangs the barrier). Never
@@ -153,14 +153,23 @@ void launch_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
                 "workspace too small, need ", state_bytes, " bytes");
 
-    // Zero the per-group RadixRowState region before launch — only when the
-    // radix path will actually run (max_seq_len > RADIX_THRESHOLD). The
-    // RadixRowState fields (arrival_counter, histograms) are only touched by
-    // radix_topk; the decode/medium paths inside the persistent kernel
-    // operate purely in shared memory and never read these globals, so a
-    // stale workspace is harmless for them.
+    // Zero the per-group RadixRowState region before launch.
     //
-    // Why we need the memset (when needs_cooperative is true):
+    // Issued UNCONDITIONALLY so the memset is captured as its own node in
+    // the cudagraph (a separate cudaMemsetAsync node, sequenced before the
+    // persistent_topk_kernel launch on the same stream). The previous
+    // host-side guard `if (needs_cooperative)` was evaluated at capture time;
+    // when capture-time max_seq_len <= RADIX_THRESHOLD (always true under
+    // FULL_DECODE_ONLY with max_model_len < 32 K) the memset would NOT be
+    // captured, leaving the workspace state to accumulate across replays.
+    // That's a latent correctness bug if the runtime data ever takes the
+    // radix path, and removes one variable while debugging hangs in the
+    // decode/medium paths.
+    //
+    // Cost is sub-microsecond: state_bytes = num_groups * sizeof(RadixRowState)
+    // is ~3 KB per group, ~100 KB for the largest grids on this hardware.
+    //
+    // Why the memset is required (regardless of which path the kernel takes):
     //   1. arrival_counter accumulates within a launch and is never reset,
     //      so a prior call leaves it at a large positive value. Without this
     //      reset, the very first wait_ge in the next call sees counter >>
