@@ -157,15 +157,20 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         # FlashMLA sparse kernel only supports 64 or 128 heads; pad up to the
         # next supported size. Must match DeepseekV4MLAAttention.padded_heads.
-        if num_heads <= 64:
-            self.padded_heads = 64
-        elif num_heads <= 128:
-            self.padded_heads = 128
+        from vllm.platforms import current_platform
+        if current_platform.is_ppu():
+            # PPU FlashMLA supports arbitrary head counts; no padding needed.
+            self.padded_heads = num_heads
         else:
-            raise ValueError(
-                f"DeepseekV4 attention does not support {num_heads} heads "
-                "(must be <= 128)."
-            )
+            if num_heads <= 64:
+                self.padded_heads = 64
+            elif num_heads <= 128:
+                self.padded_heads = 128
+            else:
+                raise ValueError(
+                    f"DeepseekV4 attention does not support {num_heads} heads "
+                    "(must be <= 128)."
+                )
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
@@ -205,8 +210,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Pick fp8_einsum recipe based on GPU arch:
         # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
         # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        from vllm.platforms import current_platform
-
         cap = current_platform.get_device_capability()
         assert cap is not None, "DeepseekV4 attention requires a CUDA device"
         self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
@@ -733,18 +736,23 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.ln_events = [torch.cuda.Event(), torch.cuda.Event()]
 
         # Determine padded head count for FlashMLA
-        if num_heads not in self.SUPPORTED_HEAD_COUNTS:
-            if num_heads < 64:
-                self.padded_heads = 64
-            elif num_heads < 128:
-                self.padded_heads = 128
-            else:
-                raise ValueError(
-                    f"DeepseekV4MLAAttention does not support {num_heads} heads. "
-                    f"Supported: <= 128 (will be padded to 64 or 128)"
-                )
-        else:
+        from vllm.platforms import current_platform
+        if current_platform.is_ppu():
+            # PPU FlashMLA supports arbitrary head counts; no padding needed.
             self.padded_heads = num_heads
+        else:
+            if num_heads not in self.SUPPORTED_HEAD_COUNTS:
+                if num_heads < 64:
+                    self.padded_heads = 64
+                elif num_heads < 128:
+                    self.padded_heads = 128
+                else:
+                    raise ValueError(
+                        f"DeepseekV4MLAAttention does not support {num_heads} heads. "
+                        f"Supported: <= 128 (will be padded to 64 or 128)"
+                    )
+            else:
+                self.padded_heads = num_heads
 
         # Store attention sink
         assert attn_sink is not None
