@@ -964,7 +964,11 @@ class DeepseekV4Attention(nn.Module):
 
         # Padded to min 64 heads for FlashMLA, initialized to -inf
         # (no sink effect). Weight loading fills the first n_local_heads slots.
-        padded_heads = max(self.n_local_heads, 64)
+        if current_platform.is_ppu():
+            # PPU FlashMLA supports arbitrary head counts; no padding needed.
+            padded_heads = self.n_local_heads
+        else:
+            padded_heads = max(self.n_local_heads, 64)
         self.attn_sink = nn.Parameter(
             torch.full((padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
