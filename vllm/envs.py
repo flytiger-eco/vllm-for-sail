@@ -262,6 +262,8 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_SAIL_MOE_BACKEND: str | None = None
+    VLLM_SAIL_DENSE_BACKEND: str | None = None
 
 
 def get_default_cache_root():
@@ -330,6 +332,7 @@ def env_with_choices(
     default: str | None,
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
+    fallback_env: str | None = None,
 ) -> Callable[[], str | None]:
     """
     Create a lambda that validates environment variable against allowed choices
@@ -339,6 +342,7 @@ def env_with_choices(
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
+        fallback_env: Fallback environment variable name if primary is not set
 
     Returns:
         Lambda function for environment_variables dict
@@ -346,6 +350,8 @@ def env_with_choices(
 
     def _get_validated_env() -> str | None:
         value = os.getenv(env_name)
+        if value is None and fallback_env:
+            value = os.getenv(fallback_env)
         if value is None:
             return default
 
@@ -385,6 +391,7 @@ def env_list_with_choices(
         default: Default list of values if not set
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
+        fallback_env: Fallback environment variable name if primary is not set
 
     Returns:
         Lambda function for environment_variables
@@ -1751,6 +1758,38 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to enable dual cuda streams for LoRA computation
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
+    ),
+    # PPU MoE Group Gemm backend 
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm group GEMM backend
+    # - "acext": use acext group GEMM backend
+    # - "triton": use triton group GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_SAIL_MOE_BACKEND": env_with_choices(
+        "VLLM_SAIL_MOE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+        fallback_env="VLLM_PPU_MOE_BACKEND",
+    ),
+    # PPU Dense Gemm backend for quantization
+    # Supported options:
+    # - "deepgemm": use ppu deepgemm dense GEMM backend
+    # - "acext": use acext dense GEMM backend
+    # - "triton": use triton dense GEMM backend
+    # - <none>: automatically pick an available backend
+    "VLLM_SAIL_DENSE_BACKEND": env_with_choices(
+        "VLLM_SAIL_DENSE_BACKEND",
+        None,
+        [
+            "deepgemm",
+            "acext",
+            "triton",
+        ],
+        fallback_env="VLLM_PPU_DENSE_BACKEND",
     ),
 }
 
