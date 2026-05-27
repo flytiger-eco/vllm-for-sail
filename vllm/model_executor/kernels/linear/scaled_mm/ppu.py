@@ -323,6 +323,63 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             )
 
 
+class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    """PPU DeepGEMM kernel for FP8 channelwise (per-channel weight scale)."""
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not current_platform.is_ppu():
+            return False, "DeepGEMM is only supported on ppu platform"
+        if current_platform.is_device_capability((8, 0)):
+            return False, "FP8 DeepGEMM is not supported on SM80 devices."
+        if not is_deep_gemm_supported():
+            return False, "DeepGEMM library is not available."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        if config.out_dtype != torch.bfloat16:
+            return False, "Supports only output dtype of bfloat16"
+        if not should_use_deepgemm_for_fp8_linear(
+            config.out_dtype, config.weight_shape
+        ):
+            return False, "The provided metadata is not supported."
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Base class stores weight as [K, N] (col-major).
+        # fp8_gemm_nt channelwise requires row-major [N, K], transpose here.
+        w = getattr(layer, "weight")
+        replace_parameter(
+            layer,
+            "weight",
+            torch.nn.Parameter(w.data.t().contiguous(), requires_grad=False),
+        )
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        # B is [N, K] (row-major after process_weights_after_loading).
+        # output_shape[-1] from base class is w.shape[1] which was K before
+        # transpose, now correct N = B.shape[0].
+        M = A.shape[0]
+        N = B.shape[0]
+        output = torch.empty((M, N), dtype=out_dtype, device=A.device)
+        torch.ops.vllm.w8a8_fp8_matmul_deepgemm(A, As, B, Bs, output)
+        if bias is not None:
+            output = output + bias
+        correct_output_shape = output_shape[:-1] + [N]
+        return output.view(*correct_output_shape)
+
+
 class PPUCutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -425,6 +482,8 @@ class PPUDeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_ppu():
             return False, "DeepGEMM is only supported on ppu platform"
+        if current_platform.is_device_capability((8, 0)):
+            return False, "FP8 DeepGEMM is not supported on SM80 devices."
         if not is_deep_gemm_supported():
             return False, "Currently, only sm89 PPU are supported."
         return True, None

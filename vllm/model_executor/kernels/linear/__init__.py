@@ -136,6 +136,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ppu import (
+    PPUDeepGemmFP8ScaledMMLinearKernel,
     PPUDeepGemmFp8BlockScaledMMKernel,
     PPUCutlassFp8BlockScaledMMKernel,
     PPUCutlassFP8ScaledMMLinearKernel,
@@ -177,6 +178,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.PPU: [
+        PPUDeepGemmFP8ScaledMMLinearKernel,
         PPUCutlassFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
@@ -789,6 +791,7 @@ __all__ = [
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
+    "PPUDeepGemmFP8ScaledMMLinearKernel",
     "PPUDeepGemmFp8BlockScaledMMKernel",
     "PPUCutlassFp8BlockScaledMMKernel",
     "PPUCutlassFP8ScaledMMLinearKernel",
