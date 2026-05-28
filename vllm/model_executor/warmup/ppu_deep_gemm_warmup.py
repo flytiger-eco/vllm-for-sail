@@ -437,7 +437,7 @@ def _int8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, CompressedTensorsLinearMethod)
-        and module.quant_method.quantization_config.quant_format == "int-quantized"
+        and getattr(module.quant_method.quantization_config, "quant_format", None) == "int-quantized"
     ):
         return False
 

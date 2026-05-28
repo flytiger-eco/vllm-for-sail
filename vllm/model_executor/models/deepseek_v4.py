@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
@@ -135,11 +136,19 @@ class DeepseekV4FP8Config(Fp8Config):
     constructed during VllmConfig setup, before ``set_current_vllm_config``
     is active. Reading hf_config eagerly in ``__init__`` would always see
     the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
+
+    ``fp8_channelwise_layers`` is an optional list of layer prefixes (in
+    vLLM naming after mapper, e.g. ``model.layers.0.attn.wkv``) that use
+    FP8 per-channel (channelwise) quantization instead of the default
+    block-wise quantization.  These layers register ``weight_scale``
+    (no ``_inv`` suffix) rather than ``weight_scale_inv``.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, fp8_channelwise_layers: list[str] | None = None,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
+        self.fp8_channelwise_layers: list[str] = fp8_channelwise_layers or []
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
@@ -180,17 +189,106 @@ class DeepseekV4FP8Config(Fp8Config):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
-        if not (
-            isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
-        ):
+        if not isinstance(hf_quant_cfg, dict):
             return None
+        quant_method = hf_quant_cfg.get("quant_method")
         model_type = getattr(hf_config, "model_type", None)
-        if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
+        if quant_method in ("fp8", "deepseek_v4_fp8"):
+            if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
+                return "deepseek_v4_fp8"
+        # PPU-only: mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense).
+        # The quantization_config carries ``fp8_channelwise_layers`` to identify
+        # which linear layers use per-channel FP8 instead of the default MXFP4.
+        if (
+            current_platform.is_ppu()
+            and quant_method == "mxfp4"
+            and model_type == "deepseek_v4"
+            and hf_quant_cfg.get("fp8_channelwise_layers")
+        ):
             return "deepseek_v4_fp8"
         return None
 
+    @classmethod
+    def from_config(cls, config: dict) -> "DeepseekV4FP8Config":
+        # The mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense)
+        # uses ``quant_method=mxfp4`` in its JSON but has been overridden to
+        # ``deepseek_v4_fp8`` by override_quantization_method.  Treat it as a
+        # serialized FP8 checkpoint so Fp8LinearMethod is used for dense layers.
+        # fp8_channelwise_layers is PPU-only; ignored on other platforms.
+        quant_method = config.get("quant_method", "")
+        fp8_channelwise_layers: list[str] = []
+        if current_platform.is_ppu():
+            fp8_channelwise_layers = config.get("fp8_channelwise_layers") or []
+        is_fp8_serialized = "fp8" in quant_method or bool(fp8_channelwise_layers)
+        activation_scheme = config.get("activation_scheme", "dynamic")
+        ignored_layers = config.get("ignored_layers") or config.get(
+            "modules_to_not_convert"
+        )
+        weight_block_size = config.get("weight_block_size")
+        return cls(
+            is_checkpoint_fp8_serialized=is_fp8_serialized,
+            activation_scheme=activation_scheme,
+            ignored_layers=ignored_layers,
+            weight_block_size=weight_block_size,
+            fp8_channelwise_layers=fp8_channelwise_layers,
+        )
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper") -> None:
+        super().apply_vllm_mapper(hf_to_vllm_mapper)
+        # PPU-only: translate channelwise layer names from checkpoint to vLLM naming
+        if current_platform.is_ppu() and self.fp8_channelwise_layers:
+            self.fp8_channelwise_layers = hf_to_vllm_mapper.apply_list(
+                self.fp8_channelwise_layers
+            )
+
     def get_quant_method(self, layer, prefix):
+        # PPU-only: channelwise FP8 dense layers use the compressed-tensors
+        # W8A8-FP8 channelwise scheme, which registers ``weight_scale`` (no
+        # ``_inv`` suffix).  ``fp8_channelwise_layers`` contains short
+        # patterns (e.g. ``attn.wkv``) that should match the tail of the
+        # full prefix (``model.layers.0.attn.wkv``); use ``skip_with_substr``
+        # so substring matching is performed instead of exact match.  Fused
+        # layers (e.g. ``fused_wqa_wkv``) are resolved via
+        # ``packed_modules_mapping`` (populated from the model class
+        # attribute by ``configure_quant_config``) and require every shard
+        # component to match.
+        if (
+            current_platform.is_ppu()
+            and isinstance(layer, LinearBase)
+            and self.fp8_channelwise_layers
+        ):
+            matched = is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.fp8_channelwise_layers,
+                fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
+            )
+            if matched:
+                from compressed_tensors.quantization import (
+                    QuantizationArgs,
+                    QuantizationStrategy,
+                    QuantizationType,
+                )
+
+                from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+                    CompressedTensorsLinearMethod,
+                )
+                from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
+                    CompressedTensorsW8A8Fp8,
+                )
+
+                channelwise_args = QuantizationArgs(
+                    strategy=QuantizationStrategy.CHANNEL,
+                    type=QuantizationType.FLOAT,
+                    num_bits=8,
+                    symmetric=True,
+                )
+                scheme = CompressedTensorsW8A8Fp8(
+                    weight_quant=channelwise_args,
+                    is_static_input_scheme=False,
+                )
+                layer.scheme = scheme
+                return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
             if is_layer_skipped(
                 prefix=prefix,
@@ -993,11 +1091,42 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
+        # PPU: pre-dequant wo_a to FP32 before TP sharding.
+        # Only triggered for FP8 channelwise wo_a — INT8 channelwise keeps the
+        # normal quantized flow (forward path at deepseek_v4_attention.py
+        # branches on wo_a.weight.dtype == torch.int8 and reads weight_scale).
+        wo_a_pre_dequant = False
+        if current_platform.is_ppu() and quant_config is not None:
+            fp8_cw_layers = getattr(
+                quant_config, "fp8_channelwise_layers", None
+            )
+            if fp8_cw_layers and any("wo_a" in p for p in fp8_cw_layers):
+                wo_a_pre_dequant = True
+            elif hasattr(quant_config, "target_scheme_map"):
+                for scheme_dict in quant_config.target_scheme_map.values():
+                    weights_args = scheme_dict.get("weights")
+                    if weights_args is None:
+                        continue
+                    strategy = str(
+                        getattr(weights_args, "strategy", "")
+                    ).lower()
+                    qtype = str(getattr(weights_args, "type", "")).lower()
+                    num_bits = getattr(weights_args, "num_bits", 0)
+                    # FP8 channelwise: type=FLOAT, num_bits=8, strategy=CHANNEL.
+                    # INT8 channelwise (type=INT) must not match here.
+                    if (
+                        "channel" in strategy
+                        and "float" in qtype
+                        and num_bits == 8
+                    ):
+                        wo_a_pre_dequant = True
+                        break
         self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None if wo_a_pre_dequant else quant_config,
+            params_dtype=torch.float32 if wo_a_pre_dequant else None,
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
@@ -1489,16 +1618,30 @@ def hc_head(
     return out.view(*outer_shape, hidden_size)
 
 
-def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+def _make_deepseek_v4_weights_mapper(
+    expert_dtype: str,
+    fp8_channelwise_layers: list[str] | None = None,
+) -> WeightsMapper:
     if expert_dtype == "fp4":
-        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # shared experts use Fp8LinearMethod's block scales, which
-        # register as ``weight_scale_inv``.
-        scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
+        if fp8_channelwise_layers:
+            # Mixed-precision checkpoint (mxfp4 MoE + fp8 channelwise dense):
+            # MXFP4 MoE registers ``weight_scale`` and channelwise dense layers
+            # also register ``weight_scale`` (no ``_inv`` suffix).  Mapping all
+            # ``.scale`` keys uniformly avoids the fused-layer name mismatch
+            # (e.g. ``fused_wqa_wkv`` vs original ``wq_a``/``wkv``) that a
+            # per-layer regex cannot handle.
+            scale_regex: dict[re.Pattern, str] = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
+            # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
+            # shared experts use Fp8LinearMethod's block scales, which
+            # register as ``weight_scale_inv``.
+            scale_regex = {
+                re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
     elif expert_dtype == "fp8":
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
@@ -1531,12 +1674,76 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
+def _pre_dequant_wo_a_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Pre-dequant FP8 channelwise wo_a before TP sharding.
+
+    Buffers only wo_a entries; all others pass through immediately.
+    Block-FP8 scales (2D, both dims > 1) are passed through unchanged.
+    """
+    wo_a_buf: dict[str, dict[str, tuple[str, torch.Tensor]]] = {}
+
+    for name, tensor in weights:
+        if name.endswith(".wo_a.weight"):
+            key = name[: -len(".weight")]
+            wo_a_buf.setdefault(key, {})["weight"] = (name, tensor)
+        elif ".wo_a." in name and "scale" in name:
+            key = name.split(".wo_a.")[0] + ".wo_a"
+            wo_a_buf.setdefault(key, {})["scale"] = (name, tensor)
+        else:
+            yield name, tensor
+
+    for key, buf in wo_a_buf.items():
+        if "weight" not in buf:
+            if "scale" in buf:
+                yield buf["scale"]
+            continue
+
+        w_name, w = buf["weight"]
+
+        if "scale" not in buf or w.dtype != torch.float8_e4m3fn:
+            yield w_name, w
+            if "scale" in buf:
+                yield buf["scale"]
+            continue
+
+        s_name, s = buf["scale"]
+
+        is_channelwise = s.dim() == 1 or (
+            s.dim() == 2 and (s.shape[0] == 1 or s.shape[1] == 1)
+        )
+        if not is_channelwise:
+            yield w_name, w
+            yield s_name, s
+            continue
+
+        scale_flat = s.float().reshape(-1)
+        if scale_flat.numel() == w.shape[0]:
+            # Per-output-channel
+            dequanted = w.float() * scale_flat.unsqueeze(1)
+        elif scale_flat.numel() == w.shape[1]:
+            # Per-input-channel
+            dequanted = w.float() * scale_flat.unsqueeze(0)
+        else:
+            raise ValueError(
+                f"wo_a scale shape {tuple(s.shape)} does not match weight "
+                f"shape {tuple(w.shape)} (expected per-output or per-input "
+                f"channel)"
+            )
+        yield w_name, dequanted.contiguous()
+
+
 class DeepseekV4ForCausalLM(nn.Module):
     model_cls = DeepseekV4Model
 
-    # Default mapper assumes the original FP4-expert checkpoint layout.
-    # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1544,8 +1751,32 @@ class DeepseekV4ForCausalLM(nn.Module):
         config = vllm_config.model_config.hf_config
         self.config = config
         expert_dtype = getattr(config, "expert_dtype", "fp4")
-        if expert_dtype != "fp4":
-            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
+
+        fp8_channelwise_layers: list[str] = []
+        if current_platform.is_ppu():
+            quant_cfg = getattr(config, "quantization_config", {}) or {}
+            fp8_channelwise_layers = quant_cfg.get("fp8_channelwise_layers", []) or []
+
+        # PPU: detect full channelwise model → use int8 mapper (.scale → .weight_scale).
+        is_full_channelwise = False
+        if current_platform.is_ppu():
+            quant_config = getattr(vllm_config, "quant_config", None)
+            target_scheme_map = getattr(quant_config, "target_scheme_map", None)
+            if target_scheme_map:
+                for scheme_dict in target_scheme_map.values():
+                    weights_args = scheme_dict.get("weights")
+                    strategy = getattr(weights_args, "strategy", None)
+                    if strategy is not None and "channel" in str(strategy).lower():
+                        is_full_channelwise = True
+                        break
+
+        if is_full_channelwise:
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("int8")
+        elif expert_dtype != "fp4" or fp8_channelwise_layers:
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
+                expert_dtype,
+                fp8_channelwise_layers=fp8_channelwise_layers if expert_dtype == "fp4" else None,
+            )
 
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -1586,6 +1817,9 @@ class DeepseekV4ForCausalLM(nn.Module):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if current_platform.is_ppu():
+            weights = _pre_dequant_wo_a_weights(weights)
+
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()

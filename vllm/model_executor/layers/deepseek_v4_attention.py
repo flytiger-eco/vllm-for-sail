@@ -340,8 +340,47 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             return self.wo_b(z.flatten(1))
 
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+        wo_a_scale_inv = getattr(self.wo_a, "weight_scale_inv", None)
+
+        if wo_a_scale_inv is not None:
+            # Block FP8 path: inverse RoPE + FP8 quant + fp8_einsum
+            wo_a_fp8 = self.wo_a.weight
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                nope_dim=self.nope_head_dim,
+                rope_dim=self.rope_head_dim,
+                tma_aligned_scales=self._tma_aligned_scales,
+            )
+            z = torch.empty(
+                (num_tokens, self.n_local_groups, self.o_lora_rank),
+                device=o.device,
+                dtype=torch.bfloat16,
+            )
+            torch.ops.vllm.deepseek_v4_fp8_einsum(
+                o_fp8,
+                o_scale,
+                wo_a_fp8,
+                wo_a_scale_inv,
+                z,
+                "bhr,hdr->bhd",
+                list(self._einsum_recipe),
+            )
+            return self.wo_b(z.flatten(1))
+
+        # Channelwise FP8 (PPU): wo_a pre-dequanted to FP32 at load time.
+        assert self.wo_a.weight.dtype != torch.float8_e4m3fn, (
+            "wo_a.weight should be pre-dequanted to FP32 on PPU channelwise "
+            "path. Check wo_a_pre_dequant condition in "
+            "DeepseekV4Attention.__init__."
+        )
+        wo_a_view = self.wo_a.weight.reshape(
+            self.n_local_groups, self.o_lora_rank, -1
+        )
+        o_f = fused_inv_rope_float32(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -349,27 +388,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
             rope_dim=self.rope_head_dim,
-            tma_aligned_scales=self._tma_aligned_scales,
         )
-
-        wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
-
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
             device=o.device,
             dtype=torch.bfloat16,
         )
-        torch.ops.vllm.deepseek_v4_fp8_einsum(
-            o_fp8,
-            o_scale,
-            wo_a_fp8,
-            wo_a_scale,
-            z,
-            "bhr,hdr->bhd",
-            list(self._einsum_recipe),
+        torch.ops.vllm.deepseek_v4_unquantized_einsum(
+            o_f, wo_a_view, z, "bhr,hdr->bhd",
         )
-
         return self.wo_b(z.flatten(1))
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
