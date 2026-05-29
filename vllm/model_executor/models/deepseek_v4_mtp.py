@@ -40,6 +40,7 @@ from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
+    _pre_dequant_wo_a_weights,
     hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
@@ -76,14 +77,16 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # V4 keeps e_ and h_ proj separate (with fp8 linear quant) rather than
-        # fusing them the way V3 does with eh_proj.
+        # V4 keeps e_/h_proj separate (unlike V3's fused eh_proj). ``prefix`` is
+        # required so per-layer quant configs (e.g. PPU fp8_channelwise_layers)
+        # can route to the channelwise scheme instead of the default per-tensor.
         self.e_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -91,6 +94,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -275,6 +279,11 @@ class DeepSeekV4MTP(nn.Module):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # PPU: pre-dequant fp8 channelwise wo_a (wo_a is built with
+        # quant_config=None, so the raw scale has no parameter to load into).
+        if current_platform.is_ppu():
+            weights = _pre_dequant_wo_a_weights(weights)
+
         # Weight name remapping for checkpoint compatibility.
         # Maps checkpoint weight paths to model parameter paths.
         WEIGHT_NAME_REMAPPING: dict[str, str] = {
@@ -337,15 +346,22 @@ class DeepSeekV4MTP(nn.Module):
         # FP4/MXFP4/INT8/INT4 experts register ``..._weight_scale``. Choose the suffix
         # for the rename below based on the model's expert dtype.
         expert_dtype = getattr(self.config, "expert_dtype", "fp4")
+        # PPU mxfp4 MoE + fp8 channelwise dense uses ``.weight_scale`` (no
+        # ``_inv``) for both experts and channelwise dense layers.
+        has_fp8_channelwise = False
+        if current_platform.is_ppu() and expert_dtype == "fp4":
+            quant_cfg = getattr(self.config, "quantization_config", {}) or {}
+            has_fp8_channelwise = bool(quant_cfg.get("fp8_channelwise_layers"))
         expert_scale_suffix = (
             ".weight_scale"
             if expert_dtype in ("fp4", "int8", "int4")
             else ".weight_scale_inv"
         )
         # INT8/INT4 non-expert weights also use ``.weight_scale`` (not the inverse).
+        # Mixed-precision FP4+FP8-channelwise also uses ``.weight_scale`` uniformly.
         non_expert_scale_suffix = (
             ".weight_scale"
-            if expert_dtype in ("int8", "int4")
+            if expert_dtype in ("int8", "int4") or has_fp8_channelwise
             else ".weight_scale_inv"
         )
 
