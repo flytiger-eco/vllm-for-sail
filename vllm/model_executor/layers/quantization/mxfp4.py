@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -136,6 +137,16 @@ class Mxfp4Config(QuantizationConfig):
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
+            # PPU mixed precision: MTP-block experts (and any other layer the
+            # checkpoint lists under ``ignore``) are stored unquantized; route
+            # them to UnquantizedFusedMoEMethod so the param shape matches the
+            # BF16 checkpoint instead of the MXFP4-packed layout.
+            if self.ignored_layers and is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             logger.debug_once(
