@@ -100,10 +100,23 @@ def _fused_indexer_q_rope_fp32_kernel(
     index_weights_out_ptr,
     index_weights_out_stride,
 ):
-    """SM80 variant of `_fused_indexer_q_rope_quant_kernel`. Outputs the
-    scaled-and-clamped fp32 Q (which the wrapper casts to fp8 in PyTorch
-    via .to(torch.float8_e4m3fn)). Triton on SM80 cannot compile
-    `tl.float8e4nv`, so the cast happens outside Triton."""
+    """SM80 / PPU variant of `_fused_indexer_q_rope_quant_kernel`. Outputs
+    scaled fp32 Q; the wrapper casts it to int8 in PyTorch via
+    `.to(torch.int8)` because the downstream `int8_mqa_logits` kernel on
+    PPU btv1.0 expects int8 Q (Triton on SM80 also cannot compile
+    `tl.float8e4nv`, so any cast must happen outside Triton).
+
+    Quantization choices that differ from the FP8 kernel:
+    - Scale divisor is 127.0 (INT8 max), NOT 448.0 (FP8 E4M3 max). Cast
+      target dtype must match scale divisor — using 448 here would scale
+      values into [-448, 448] before clamping to int8 [-127, 127],
+      truncating ~71% of the dynamic range.
+    - No UE8M0 (`exp2(ceil(log2(scale)))`) rounding. UE8M0 is the MX
+      FP8/FP4 scale format and is mandatory when scales are packed into
+      1-byte UE8M0 slots; here `index_q_scale` is folded into `weights_out`
+      as a free-floating fp32, so the round-up to the next power of two
+      only enlarges the int8 quantization step (up to 2x worst case) with
+      no benefit."""
     INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
     INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
     tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
@@ -134,8 +147,7 @@ def _fused_indexer_q_rope_fp32_kernel(
         nope_offset = tl.arange(0, INDEX_Q_NOPE_DIM)
         x_nope = tl.load(base_ptr + nope_offset).to(tl.float32)
         amax = tl.maximum(amax, tl.max(tl.abs(x_nope)))
-    index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), 448.0)
-    index_q_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(index_q_scale)))
+    index_q_scale = tl.div_rn(tl.maximum(amax, 1e-4), 127.0)
 
     out_base_ptr = out_fp32_ptr + tok_idx * out_stride0 + head_idx * out_stride1
     if INDEX_Q_NOPE_DIM > 0:
