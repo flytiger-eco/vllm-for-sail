@@ -217,6 +217,12 @@ class Worker(WorkerBase):
             yield
             return
 
+        # FIXME: This torch _C API only exists for torch 2.11+,
+        # can be fixed after we upgrade torch
+        if current_platform.is_ppu():
+            yield
+            return
+
         conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
         match = re.search(r"max_split_size_mb:(\d+)", conf)
         original_value = match.group(1) if match else None
