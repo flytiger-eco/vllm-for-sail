@@ -50,8 +50,25 @@ USE_PRECOMPILED_RUST_FRONTEND = (
 
 
 def should_require_rust_frontend() -> bool:
+    """Whether the Rust frontend (vllm-rs) is a *required* build artifact.
+
+    When True, ``RustExtension`` is built with ``optional=False`` so any
+    Rust build failure aborts the wheel build.
+    When False, the Rust frontend is best-effort: failures are logged but
+    do not fail the build.
+
+    Resolution order:
+    1. ``VLLM_REQUIRE_RUST_FRONTEND`` env var if explicitly set
+       (``1``/``true``/``yes`` -> required; ``0``/``false``/``no`` -> optional).
+    2. PPU target device defaults to required — PPU wheels always ship
+       with the Rust frontend, and PPU runtime enables it by default
+       (see ``VLLM_USE_RUST_FRONTEND`` default in ``vllm/envs.py``).
+    3. Other platforms default to optional, preserving prior behavior.
+    """
     value = os.getenv("VLLM_REQUIRE_RUST_FRONTEND", "")
-    return value.lower() not in ("", "0", "false", "no")
+    if value:
+        return value.lower() not in ("0", "false", "no")
+    return VLLM_TARGET_DEVICE == "ppu"
 
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
