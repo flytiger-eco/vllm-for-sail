@@ -286,7 +286,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
-            if _try_load_fp8_indexer_wk(
+            if self.is_fp4_ckpt and _try_load_fp8_indexer_wk(
                 name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
             ):
                 continue
