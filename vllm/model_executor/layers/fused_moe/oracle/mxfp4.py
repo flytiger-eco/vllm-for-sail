@@ -1505,6 +1505,29 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
+    ):
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32)
+        w13_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w13_weight_scale), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            preprocess_mxfp4_scales(w2_weight_scale), requires_grad=False
+        )
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
