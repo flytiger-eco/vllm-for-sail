@@ -8,6 +8,8 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+#include "../sampler_bf16.cuh"
+
 namespace vllm {
 
 template <typename scalar_t>
@@ -753,4 +755,69 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
             static_cast<int>(stride0), static_cast<int>(stride1),
             static_cast<int>(topK), kSortingAlgorithmThreshold);
   }
+}
+
+
+void top_k_per_row_prefill_bf16(const torch::stable::Tensor& logits,
+                                const torch::stable::Tensor& rowStarts,
+                                const torch::stable::Tensor& rowEnds,
+                                torch::stable::Tensor& indices,
+                                int64_t numRows, int64_t stride0,
+                                int64_t stride1, int64_t topK) {
+#ifndef USE_ROCM
+  using namespace vllm;
+
+  STD_TORCH_CHECK(
+      stride1 == 1,
+      "BF16 top-k prefill requires contiguous inner dim (stride1=1)");
+  STD_TORCH_CHECK(
+      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "BF16 top-k prefill requires bf16 input");
+
+  const cudaStream_t stream = get_current_cuda_stream();
+  const auto numColumns = logits.size(1);
+
+  const auto* scores =
+      reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr());
+
+  if (numColumns <= kBF16Max2PassLen) {
+    // Register kernel — smaller smem footprint.
+    const size_t smemBytes =
+        sizeof(BF16RegisterSmem) + topK * sizeof(int32_t);
+
+    static bool smemConfigured = false;
+    if (!smemConfigured) {
+      VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
+          topKPerRowPrefillBF16Register, smemBytes);
+      smemConfigured = true;
+    }
+
+    topKPerRowPrefillBF16Register
+        <<<numRows, kBF16BlockSize, smemBytes, stream>>>(
+            scores, rowStarts.const_data_ptr<int>(),
+            rowEnds.const_data_ptr<int>(),
+            indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
+            static_cast<int>(topK));
+  } else {
+    // Streaming kernel — cp.async double-buffered pipeline.
+    const size_t smemBytes =
+        sizeof(BF16StreamSmem) + topK * sizeof(int32_t);
+
+    static bool smemConfigured = false;
+    if (!smemConfigured) {
+      VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
+          topKPerRowPrefillBF16Stream, smemBytes);
+      smemConfigured = true;
+    }
+
+    topKPerRowPrefillBF16Stream
+        <<<numRows, kBF16BlockSize, smemBytes, stream>>>(
+            scores, rowStarts.const_data_ptr<int>(),
+            rowEnds.const_data_ptr<int>(),
+            indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
+            static_cast<int>(topK));
+  }
+#else
+  STD_TORCH_CHECK(false, "BF16 top-k prefill is not supported on ROCm");
+#endif
 }
