@@ -18,11 +18,17 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
-    get_paged_mqa_logits_metadata,
-    has_deep_gemm,
-    native_next_n_supported,
-)
+if current_platform.is_ppu():
+    from vllm.utils.ppu_deep_gemm import (
+        get_paged_mqa_logits_metadata,
+        has_deep_gemm,
+    )
+else:
+    from vllm.utils.deep_gemm import (
+        get_paged_mqa_logits_metadata,
+        has_deep_gemm,
+        native_next_n_supported,
+    )
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -44,6 +50,9 @@ logger = init_logger(__name__)
 # and mxfp4 is the opt-in Blackwell path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
 
+PPU_DEEP_GEMM_TB_PER_CU = 8
+PPU_FP4_INDEXER_ELEMENT_SIZE = 1
+
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     """Whether the DeepSeek sparse indexer should use the MXFP4 K cache."""
@@ -55,13 +64,13 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         )
     use_fp4 = kv_dtype == "mxfp4"
     if use_fp4 and not current_platform.is_device_capability_family(100):
-        raise ValueError(
-            "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
-        )
+        if not current_platform.is_ppu():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
+                "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
+                "earlier architectures are not supported."
+            )
     return use_fp4
-
 
 @triton.jit
 def _prepare_uniform_decode_kernel(
@@ -106,6 +115,7 @@ def split_indexer_prefill_chunks(
     workspace_size: int,
     max_logits_bytes: int,
     request_offset: int = 0,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> list[tuple[slice, slice]]:
     """
     Split prefill requests into chunks for the sparse indexer, respecting:
@@ -119,7 +129,8 @@ def split_indexer_prefill_chunks(
     """
     chunks: list[tuple[slice, slice]] = []
     n = len(seq_lens_cpu)
-    max_logits_elems = max_logits_bytes // 4
+    bytes_per_elem = torch.empty((), dtype=logits_dtype).element_size()
+    max_logits_elems = max(1, max_logits_bytes // bytes_per_elem)
     end = 0
 
     while end < n:
@@ -550,6 +561,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
 
+        if self.use_fp4_indexer_cache and current_platform.is_ppu():
+            self.indexer_n_head = self.kv_cache_spec.indexer_n_head
+            self.indexer_q_head_dim = self.kv_cache_spec.indexer_q_head_dim
+        else:
+            self.indexer_n_head = 0
+            self.indexer_q_head_dim = 0
+
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
@@ -613,9 +631,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
         # build() narrows it to whatever the kernel actually schedules.
-        self.scheduler_metadata_buffer = torch.empty(
-            (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
-        )
+        if current_platform.is_ppu() and self.use_fp4_indexer_cache:
+            # NOTE(kai): fp4 paged using extra metadata
+            # (num_sms * tb_per_cu + 1, 2)
+            self.scheduler_metadata_buffer = torch.empty(
+                (self.num_sms * PPU_DEEP_GEMM_TB_PER_CU + 1, 2), dtype=torch.int32, device=self.device
+            )
+        else:
+            self.scheduler_metadata_buffer = torch.empty(
+                (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
+            )
 
         # KV compression. Default to 1 for no compression.
         self.compress_ratio = 1
@@ -902,6 +927,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
                 request_offset=num_decodes,
+                logits_dtype=torch.bfloat16 if self.use_fp4_indexer_cache else torch.float32,
             )
 
             chunks = []
@@ -1027,25 +1053,43 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # kernels see the same (B, next_n) layout as the MTP path.
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
-
+            
+            metadata_extra = None
+            if current_platform.is_ppu() and self.indexer_n_head > 0:
+                metadata_extra = (
+                    next_n,
+                    self.indexer_n_head,
+                    self.indexer_q_head_dim,
+                    PPU_FP4_INDEXER_ELEMENT_SIZE,
+                )
+            scheduler_metadata = None
+            n = self.scheduler_metadata_buffer.shape[0]
+            if current_platform.is_ppu() and has_deep_gemm():
+                scheduler_metadata = get_paged_mqa_logits_metadata(
+                    seq_lens,
+                    self.kv_cache_spec.storage_block_size,
+                    self.num_sms,
+                    metadata_extra,
+                )
+                n = scheduler_metadata.shape[0]
+                self.scheduler_metadata_buffer[:n] = scheduler_metadata        
             # DeepGEMM is required for the paged MQA logits on CUDA devices
-            schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            elif current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                     indices=decode_indices,
                 )
-                schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
-                schedule_metadata[:] = metadata
+                n = metadata.shape[0]
+                self.scheduler_metadata_buffer[:n] = metadata
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
-                schedule_metadata=schedule_metadata,
+                schedule_metadata=self.scheduler_metadata_buffer[:n],
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
             )

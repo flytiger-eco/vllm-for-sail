@@ -390,6 +390,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
+    indexer_n_head: int | None = None
+    indexer_q_head_dim: int | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -434,6 +436,13 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
+            # Indexer geometry is uniform across the layers of a group, so take
+            # it from specs[0] like the other geometry fields above. It must be
+            # forwarded: DeepseekV32IndexerMetadataBuilder reads it off the
+            # merged group spec, and letting it fall back to None makes the
+            # `indexer_n_head > 0` test raise TypeError.
+            indexer_n_head=specs[0].indexer_n_head,
+            indexer_q_head_dim=specs[0].indexer_q_head_dim,
         )
         for spec in specs:
             for f in fields(AttentionSpec):

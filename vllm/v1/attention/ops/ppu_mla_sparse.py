@@ -7,6 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.indexer import (
@@ -30,6 +31,8 @@ if current_platform.is_ppu():
         fp8_paged_mqa_logits,
         int8_mqa_logits,
         int8_paged_mqa_logits,
+        fp8_fp4_mqa_logits,
+        fp8_fp4_paged_mqa_logits,
         is_deep_gemm_supported,
     )
 
@@ -83,6 +86,7 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+@eager_break_during_capture
 def ppu_sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -227,16 +231,16 @@ def ppu_sparse_attn_indexer(
 
             if is_deep_gemm_supported():
                 if use_fp4_cache:
-                    raise RuntimeError("do not support fp4 indexer now")
-                    # logits = fp8_fp4_mqa_logits(
-                    #     (q_slice_cast, q_scale_slice),
-                    #     (k_quant_cast, k_scale_cast),
-                    #     weights[chunk.token_start : chunk.token_end],
-                    #     chunk.cu_seqlen_ks,
-                    #     chunk.cu_seqlen_ke,
-                    #     clean_logits=False,
-                    # )
-                if q_dtype == torch.int8:
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        weights[chunk.token_start : chunk.token_end],
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        clean_logits=False,
+                        logits_dtype=torch.bfloat16,
+                    )
+                elif q_dtype == torch.int8:
                     logits = int8_mqa_logits(
                         q_slice_cast,
                         (k_quant_cast, k_scale_cast),
@@ -255,7 +259,7 @@ def ppu_sparse_attn_indexer(
                         clean_logits=False,
                     )
                 else:
-                    raise RuntimeError("PPU mqa_logtis only support int8 on btv1.0 and fp8 on >= btv1.5")
+                    raise RuntimeError(f"PPU mqa_logits get unsupported q_dtype: {q_dtype}")
             else:
                 raise RuntimeError("indexer need PPU deep gemm installed")
 
@@ -264,17 +268,29 @@ def ppu_sparse_attn_indexer(
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            
+            if logits.dtype == torch.bfloat16:
+                torch.ops._C.top_k_per_row_prefill_bf16(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -329,11 +345,17 @@ def ppu_sparse_attn_indexer(
 
         if is_deep_gemm_supported():
             if use_fp4_cache:
-                raise RuntimeError("ppu do not support fp4 indexer now")
-            if q_dtype == torch.int8:
-                # logits = torch.ones([batch_size * next_n, max_model_len],
-                #                      device=q_quant.device,
-                #                      dtype=torch.float32)
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                )
+            elif q_dtype == torch.int8:
                 logits = int8_paged_mqa_logits(
                     padded_q_quant_cast,
                     kv_cache,
@@ -356,7 +378,7 @@ def ppu_sparse_attn_indexer(
                     clean_logits=False,
                 )
             else:
-                raise RuntimeError("PPU mqa_logtis only support int8 on btv1.0 and fp8 on >= btv1.5")
+                raise RuntimeError(f"PPU paged mqa_logits get unsupported q_dtype: {q_dtype}")
         else:
             raise RuntimeError("indexer need ppu deep gemm installed")
         num_rows = logits.shape[0]
