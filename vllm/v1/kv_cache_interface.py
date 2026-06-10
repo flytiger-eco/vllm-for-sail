@@ -341,6 +341,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
+    indexer_n_head: int | None = None
+    indexer_q_head_dim: int | None = None
 
     def __post_init__(self):
         super().__post_init__()

@@ -849,6 +849,8 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         prefix: str,
         cache_config: CacheConfig,
         compress_ratio: int = 1,
+        n_head: int | None = None,
+        q_head_dim: int | None = None,
     ):
         super().__init__()
         self.kv_cache = torch.tensor([])
@@ -857,6 +859,8 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.cache_config = cache_config
         self.dtype = dtype
         self.compress_ratio = compress_ratio
+        self.n_head = n_head
+        self.q_head_dim = q_head_dim
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -874,6 +878,8 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=576,
+            indexer_n_head=self.n_head,
+            indexer_q_head_dim=self.q_head_dim,
         )
 
     def forward(self): ...
@@ -955,6 +961,8 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
+            n_head=self.n_head,
+            q_head_dim=self.head_dim,
         )
         self.compressor = DeepseekCompressor(
             vllm_config=vllm_config,

@@ -120,6 +120,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
 
   ops.def(
+      "top_k_per_row_prefill_bf16(Tensor logits, Tensor rowStarts, "
+      "Tensor rowEnds, Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+  ops.impl("top_k_per_row_prefill_bf16", torch::kCUDA,
+           &top_k_per_row_prefill_bf16);
+
+  ops.def(
       "top_k_per_row_decode(Tensor logits, int next_n, "
       "Tensor seq_lens, Tensor! indices, "
       "int numRows, int stride0, int stride1, int topK) -> ()");
