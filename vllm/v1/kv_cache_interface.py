@@ -395,6 +395,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
+    indexer_n_head: int | None = None
+    indexer_q_head_dim: int | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -458,6 +460,13 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
+            # Indexer geometry is uniform across the layers of a group, so take
+            # it from specs[0] like the other geometry fields above. It must be
+            # forwarded: DeepseekV32IndexerMetadataBuilder reads it off the
+            # merged group spec, and letting it fall back to None makes the
+            # `indexer_n_head > 0` test raise TypeError.
+            indexer_n_head=specs[0].indexer_n_head,
+            indexer_q_head_dim=specs[0].indexer_q_head_dim,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
