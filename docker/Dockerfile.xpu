@@ -19,6 +19,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /workspace
 
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY build_rust.sh build_rust.sh
@@ -30,7 +35,7 @@ ENV CARGO_BUILD_JOBS=4
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/workspace/rust/target \
-    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+    bash build_rust.sh
 
 FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04 AS vllm-base
 
@@ -134,9 +139,10 @@ ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \

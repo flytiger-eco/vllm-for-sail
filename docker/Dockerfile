@@ -295,7 +295,12 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /workspace
 
-# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY build_rust.sh build_rust.sh
@@ -304,13 +309,12 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build the release binary. Cache cargo registry/git and target/, but copy the
-# binary out of the target/ cache mount so it persists into the image layer
-# for later COPY --from=rust-build.
+# Build the release artifacts. Cache cargo registry/git and target/ for
+# faster incremental builds.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/workspace/rust/target \
-    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+    bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -517,9 +521,10 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
