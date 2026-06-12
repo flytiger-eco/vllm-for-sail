@@ -728,10 +728,14 @@ class Indexer(nn.Module):
             q_pe, q_nope = torch.split(
                 q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
             )
-            # Fused wk + weights_proj: one GEMM, then split
-            kw, _ = self.wk_weights_proj(hidden_states)
-            k = kw[:, : self.head_dim]
-            weights = kw[:, self.head_dim :]
+            if self.is_fp4_ckpt:
+                # Fused wk + weights_proj: one GEMM, then split
+                kw, _ = self.wk_weights_proj(hidden_states)
+                k = kw[:, : self.head_dim]
+                weights = kw[:, self.head_dim :]
+            else:
+                k, _ = self.wk(hidden_states)
+                weights, _ = self.weights_proj(hidden_states)
 
             k = self.k_norm(k)
             k_pe, k_nope = torch.split(
