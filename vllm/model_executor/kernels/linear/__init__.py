@@ -93,6 +93,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.xpu import (
     XPUMxFp8LinearKernel,
 )
@@ -417,6 +420,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         # To be added
     ],
     PlatformEnum.ROCM: [
+        # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
+        # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
+        RocmDotScaledMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.XPU: [
