@@ -1,7 +1,15 @@
-// TODO: Remove this once ROCm upgrade to torch 2.11.
 #include <torch/all.h>
 #include <torch/cuda.h>
 #include <cuda_runtime.h>
+
+// PPU [WA]: This file was migrated to csrc/libtorch_stable/cuda_view.cu by
+// upstream PR #44334, which assumes torch >= 2.11 stable ABI. Since the PPU
+// build environment is locked to torch 2.10, the stable from_blob() variant
+// cannot accept a deleter callback (torch 2.10's signature ends with
+// `Layout layout = Strided`, with no deleter slot). We therefore keep the
+// pre-#44334 non-stable implementation here so that this kernel continues to
+// build on torch 2.10. Once PPU upgrades to torch 2.11+, this file can be
+// dropped and the stable version restored.
 
 // This function assumes that `cpu_tensor` is a CPU tensor,
 // and that UVA (Unified Virtual Addressing) is enabled.

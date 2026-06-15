@@ -164,8 +164,14 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 // TODO: Move this out once ROCm upgrade their torch to 2.11.
 // CPU tensor -> CUDA UVA view (shared CUDA)
+// PPU [WA]: PPU is also locked to torch 2.10, so when
+// VLLM_PPU_REGULAR_ABI_CUDA_VIEW is defined we skip the stable-ABI
+// declaration entirely and use the regular-ABI impl in csrc/cuda_view.cu
+// (see csrc/ops.h / csrc/torch_bindings.cpp).
+#ifndef VLLM_PPU_REGULAR_ABI_CUDA_VIEW
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
+#endif
 
 #endif
 

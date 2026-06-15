@@ -608,6 +608,16 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
 # if ROCM endif
 endif()
 
+# PPU [WA]: PPU is locked to torch 2.10, whose stable from_blob() has no
+# deleter slot. Compile cuda_view.cu as a regular-ABI kernel for CUDA too
+# (mirrors the ROCm fallback above). Drop this block once PPU upgrades to
+# torch 2.11+.
+if (VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_EXT_SRC
+    "csrc/cuda_view.cu"
+  )
+endif()
+
 message(STATUS "Enabling C extension.")
 define_extension_target(
   _C
@@ -661,7 +671,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/cuda_view.cu"
+      # PPU [WA]: cuda_view.cu is now compiled as regular ABI (see above).
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
@@ -1083,13 +1093,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-    # This ensures we only use C-shim APIs available in PyTorch 2.11.
-    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-    # which is currently set to 2.11.
+    # PPU [WA]: PPU build is locked to torch 2.10, so target the 2.10 stable
+    # ABI here as well (was 0x020B000000000000ULL on upstream v0.23.0).
     target_compile_definitions(_C_stable_libtorch PRIVATE
-      TORCH_TARGET_VERSION=0x020B000000000000ULL)
+      TORCH_TARGET_VERSION=0x020A000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    # PPU [WA]: signal to source files that cuda_view falls back to regular
+    # ABI on this build (see ops.h / torch_bindings.cpp).
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      VLLM_PPU_REGULAR_ABI_CUDA_VIEW)
+    target_compile_definitions(_C PRIVATE VLLM_PPU_REGULAR_ABI_CUDA_VIEW)
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)

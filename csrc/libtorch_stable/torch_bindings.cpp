@@ -32,7 +32,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifndef USE_ROCM
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
+  // PPU [WA]: also skip on PPU torch 2.10 (regular-ABI version registered
+  // separately via csrc/torch_bindings.cpp).
+#ifndef VLLM_PPU_REGULAR_ABI_CUDA_VIEW
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+#endif
 #endif
 
 #ifndef USE_ROCM
@@ -683,12 +687,18 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 }
 
 // TODO: Remove this once ROCm upgrade to torch 2.11.
-#ifndef USE_ROCM
+// PPU [WA]: also skip on PPU torch 2.10 (regular-ABI version registered
+// separately via csrc/torch_bindings.cpp). Note: only the cuda_view IMPL is
+// gated by VLLM_PPU_REGULAR_ABI_CUDA_VIEW; the _C_cuda_utils library below
+// must remain enabled on PPU CUDA, hence the split into two #ifndef blocks.
+#if !defined(USE_ROCM) && !defined(VLLM_PPU_REGULAR_ABI_CUDA_VIEW)
 STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
   ops.impl("get_cuda_view_from_cpu_tensor",
            TORCH_BOX(&get_cuda_view_from_cpu_tensor));
 }
+#endif
 
+#ifndef USE_ROCM
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
   cuda_utils.def(

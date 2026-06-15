@@ -102,7 +102,14 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
+#endif
 
-// TODO: Remove this once ROCm upgrade to torch 2.11.
+// PPU [WA]: get_cuda_view_from_cpu_tensor was migrated to stable ABI
+// (csrc/libtorch_stable/cuda_view.cu) by upstream PR #44334 which assumes
+// torch >= 2.11. PPU is locked to torch 2.10 and cannot use the stable
+// from_blob signature, so we keep the regular-ABI declaration available
+// whenever VLLM_PPU_REGULAR_ABI_CUDA_VIEW is defined (in addition to ROCm).
+// TODO: Remove this once both ROCm and PPU upgrade to torch 2.11.
+#if defined(USE_ROCM) || defined(VLLM_PPU_REGULAR_ABI_CUDA_VIEW)
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 #endif
