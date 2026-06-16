@@ -17,6 +17,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 
 from ..nvidia.model import make_deepseek_v4_expert_params_mapping
 from ..nvidia.mtp import (
@@ -25,6 +26,7 @@ from ..nvidia.mtp import (
 from ..nvidia.mtp import (
     get_spec_layer_idx_from_weight_name,
 )
+from .model import _pre_dequant_wo_a_weights
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
@@ -41,6 +43,10 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> set[str]:
+        # PPU: pre-dequant fp8 channelwise wo_a (wo_a is built with
+        # quant_config=None, so the raw scale has no parameter to load into).
+        if current_platform.is_ppu():
+            weights = _pre_dequant_wo_a_weights(weights)
         # Reuse the parent's internal helpers
         def _remap_weight_name(name: str) -> str:
             remap_table = {
@@ -96,15 +102,22 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
 
         # INT8/INT4 experts and non-expert weights use .weight_scale
         expert_dtype = getattr(self.config, "expert_dtype", "fp4")
+        # PPU mxfp4 MoE + fp8 channelwise dense uses ``.weight_scale`` (no
+        # ``_inv``) for both experts and channelwise dense layers.
+        has_fp8_channelwise = False
+        if current_platform.is_ppu() and expert_dtype == "fp4":
+            quant_cfg = getattr(self.config, "quantization_config", {}) or {}
+            has_fp8_channelwise = bool(quant_cfg.get("fp8_channelwise_layers"))
         expert_scale_suffix = (
             ".weight_scale"
             if expert_dtype in ("fp4", "int8", "int4")
             else ".weight_scale_inv"
         )
         # INT8/INT4 non-expert weights also use .weight_scale
+        # Mixed-precision FP4+FP8-channelwise also uses ``.weight_scale`` uniformly.
         non_expert_scale_suffix = (
             ".weight_scale"
-            if expert_dtype in ("int8", "int4")
+            if expert_dtype in ("int8", "int4") or has_fp8_channelwise
             else ".weight_scale_inv"
         )
 

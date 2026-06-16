@@ -82,14 +82,17 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # V4 keeps e_ and h_ proj separate (with fp8 linear quant) rather than
-        # fusing them the way V3 does with eh_proj.
+        # V4 keeps e_/h_proj separate (unlike V3's fused eh_proj). ``prefix`` is
+        # fusing them the way V3 does with eh_proj.	        
+        # required so per-layer quant configs (e.g. PPU fp8_channelwise_layers)
+        # can route to the channelwise scheme instead of the default per-tensor.
         self.e_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -97,6 +100,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
