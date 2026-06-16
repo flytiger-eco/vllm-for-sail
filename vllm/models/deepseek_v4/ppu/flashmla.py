@@ -55,6 +55,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 nope_dim=self.nope_head_dim,
                 rope_dim=self.rope_head_dim,
                 o_lora_rank=self.o_lora_rank,
+                einsum_recipe=self._einsum_recipe,
             )
         elif self.wo_a.weight.dtype != torch.float8_e4m3fn:
             # Channelwise FP8 (PPU): wo_a pre-dequanted to FP32 at load time.
@@ -69,6 +70,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 nope_dim=self.nope_head_dim,
                 rope_dim=self.rope_head_dim,
                 o_lora_rank=self.o_lora_rank,
+                einsum_recipe=self._einsum_recipe,
             )
         return deep_gemm_fp8_o_proj(
             o,

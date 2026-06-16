@@ -9,6 +9,7 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
@@ -86,7 +87,6 @@ def deep_gemm_int8_o_proj(
     o_lora_rank: int,
     einsum_recipe: tuple[int, int, int],
 ):
-    wo_a_scale = wo_a.weight_scale
     # Fused inv RoPE → float32 (skip INT8 roundtrip)
     o_f = fused_inv_rope_float32(
         o,
@@ -98,11 +98,11 @@ def deep_gemm_int8_o_proj(
         rope_dim,
     )
     # Weight dequant (per-channel INT8 → float32) + reshape for einsum
-    wo_a_f = _dequant_channel(wo_a, wo_a_scale).reshape(
+    wo_a_f = _dequant_channel(wo_a.weight, wo_a.weight_scale).reshape(
         n_groups, o_lora_rank, -1
     )
     z = torch.empty(
-        (num_tokens, n_groups, o_lora_rank),
+        (o.shape[0], n_groups, o_lora_rank),
         device=o.device,
         dtype=torch.bfloat16,
     )
@@ -140,7 +140,7 @@ def deep_gemm_fp8_channel_o_proj(
         rope_dim,
     )
     z = torch.empty(
-        (num_tokens, n_groups, o_lora_rank),
+        (o.shape[0], n_groups, o_lora_rank),
         device=o.device,
         dtype=torch.bfloat16,
     )

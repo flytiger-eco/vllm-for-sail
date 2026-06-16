@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 import torch
 
@@ -27,6 +27,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 logger = init_logger(__name__)
 
@@ -255,6 +258,7 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from acext import (
