@@ -379,6 +379,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.model_config.max_model_len,
             self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
         )
+        # Match the alignment applied in MultiGroupBlockTable
+        # (vllm/v1/worker/block_table.py:260-264) to ensure the buffer's
+        # second dimension is >= the block_table tensor from the scheduler.
+        bs = self.kv_cache_spec.block_size
+        if bs <= 128:
+            align = 128 // bs
+            max_num_blocks_per_req = cdiv(max_num_blocks_per_req, align) * align
         self.expanded_block_table_buffer = torch.zeros(
             (
                 scheduler_config.max_num_batched_tokens,
