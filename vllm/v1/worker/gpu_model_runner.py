@@ -4064,10 +4064,6 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
-        if NVTX_PROFILE:
-            prof_iter(self.iteration)
-            th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
-            self.iteration += 1
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -4136,6 +4132,13 @@ class GPUModelRunner(
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
+            # NVTX prof_range: push after all early-return checks so that
+            # every push has a matching pop.
+            if NVTX_PROFILE:
+                prof_iter(self.iteration)
+                th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
+                self.iteration += 1
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (
@@ -4327,9 +4330,15 @@ class GPUModelRunner(
         defer_kv_connector_finalize = self.speculative_config is not None
 
         if NVTX_PROFILE:
+            _total_bs = len(scheduler_output.num_scheduled_tokens)
+            _spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+            _p_bs = sum(
+                1 for rid, n in scheduler_output.num_scheduled_tokens.items()
+                if n - len(_spec_tokens.get(rid, ())) > 1
+            )
             th_nvtx_range_push(
-                f"total bs={len(scheduler_output.num_scheduled_tokens)}, P bs={(np.array(list(scheduler_output.num_scheduled_tokens.values())) > 1).sum()}"
-            )  # noqa: E501
+                f"total bs={_total_bs}, P bs={_p_bs}"
+            )
 
         with (
             set_forward_context(
@@ -4375,10 +4384,14 @@ class GPUModelRunner(
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     self.kv_connector_output = kv_connector_output
+                    if NVTX_PROFILE:
+                        th_nvtx_range_pop()
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
+                    if NVTX_PROFILE:
+                        th_nvtx_range_pop()
                     return self._pool(
                         hidden_states,
                         num_scheduled_tokens,

@@ -559,7 +559,6 @@ class EngineCore:
         assert batch_queue is not None
         if NVTX_PROFILE:
             prof_iter(self.iteration)
-            self.iteration += 1
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
@@ -573,10 +572,15 @@ class EngineCore:
             if NVTX_PROFILE:
                 sche_mark(scheduler_output)
                 th_nvtx_range_push(f"[prof_range]: iter {self.iteration}")
+                self.iteration += 1
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
+            # NOTE: In async batch-queue mode the pop is placed right after
+            # execute_model because the result is processed later from the
+            # batch queue.  The actual GPU work is covered by
+            # GPUModelRunner's own [prof_range] range.
             if NVTX_PROFILE:
                 th_nvtx_range_pop()
             if self.is_ec_consumer:

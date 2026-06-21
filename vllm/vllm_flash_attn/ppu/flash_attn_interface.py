@@ -332,6 +332,8 @@ def flash_attn_varlen_func(
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
+    if NVTX_PROFILE:
+        th_nvtx_range_pop()
     return (out, softmax_lse) if return_softmax_lse else out
 
 
