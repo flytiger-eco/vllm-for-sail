@@ -233,9 +233,6 @@ def flash_attn_varlen_func(
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     assert block_table is None or seqused_k is not None, \
         "seqused_k must be provided if block_table is provided"
-    
-    if s_aux is not None:
-        raise NotImplementedError("PPU FA does not support s_aux")
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
@@ -270,6 +267,8 @@ def flash_attn_varlen_func(
                 )
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if s_aux is not None:
+            raise NotImplementedError("FA2 does not support s_aux")
         out_fa2, softmax_lse, _, _ = torch.ops.flash_attn._flash_attn_varlen_forward(
             q, k, v,
             cu_seqlens_q,
@@ -328,7 +327,8 @@ def flash_attn_varlen_func(
             scheduler_metadata,
             num_splits,
             None,             # pack_gqa
-            0                 # sm_margin
+            0,                # sm_margin
+            s_aux,            # s_aux
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
