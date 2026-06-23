@@ -120,6 +120,8 @@ class FusedMoE(PluggableLayer):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         swiglu_limit: float | None = None,
+        swiglu_alpha: float | None = None,
+        swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -149,6 +151,8 @@ class FusedMoE(PluggableLayer):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         self.swiglu_limit = swiglu_limit
+        self.swiglu_alpha = swiglu_alpha
+        self.swiglu_beta = swiglu_beta
 
         # FIXME (varun): We should have a better way of inferring the activation
         # datatype. This works for now as the tensor datatype entering the MoE
@@ -334,6 +338,8 @@ class FusedMoE(PluggableLayer):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             swiglu_limit=swiglu_limit,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_beta=swiglu_beta,
             # TODO: in_dtype == out_dtype?
         )
         if self.moe_config.use_mori_kernels:

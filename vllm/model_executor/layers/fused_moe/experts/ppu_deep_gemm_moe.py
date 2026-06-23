@@ -154,6 +154,14 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             )
 
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        # FP8 (silu) configs leave these None, reproducing plain silu.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -182,7 +190,15 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.SWIGLUSTEP]
+        # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
+        # uses the unfused activation path. The fused kernel reads packed w13
+        # (gate = first half, up = second half), so it implements the
+        # *uninterleaved* SwiGLU-OAI variant.
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -237,7 +253,14 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
             )
-            self.activation(activation, act_out, input)
+            self.activation(
+                activation,
+                act_out,
+                input,
+                clamp_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+            )
             a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 act_out,
                 block_k,
@@ -267,7 +290,14 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             )
         else:
             # Assign act path
-            self.activation(activation, act_out, input)
+            self.activation(
+                activation,
+                act_out,
+                input,
+                clamp_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+            )
         if output.dtype == torch.float8_e4m3fn:
             block_k = (
                 self.block_shape[1] if self.block_shape else activation_out_dim
@@ -471,6 +501,14 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        # FP8 (silu) configs leave these None, reproducing plain silu.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -499,7 +537,12 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.SWIGLUSTEP, MoEActivation.SWIGLUOAI]
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -550,7 +593,14 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
-        self.activation(activation, act_out, input)
+        self.activation(
+            activation,
+            act_out,
+            input,
+            clamp_limit=self.gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+        )
         a_q, a_scale = downcast_to_mxfp4(act_out, axis=1)
         return a_q, a_scale
 

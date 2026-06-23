@@ -713,6 +713,15 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             assert (
                 self.block_shape[1] == get_mk_alignment_for_contiguous_layout(is_blockwise=self.block_wise)[1]
             )
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        # FP8 (silu) configs leave these None, reproducing plain silu.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -741,7 +750,18 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
+        # uses the unfused activation path. The fused kernel reads packed w13
+        # (gate = first half, up = second half), so it implements the
+        # *uninterleaved* SwiGLU-OAI variant.
+        return activation in [
+            MoEActivation.SILU,
+            # FIXME(kai): ppu batched deep gemm does not support minimax-m3, stepfun, deepseek v4 with int8 / fp8 / bf16
+            # need support fused activation for that later
+            # MoEActivation.SWIGLUSTEP,
+            # MoEActivation.SWIGLUOAI,
+            # MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -943,6 +963,14 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        # FP8 (silu) configs leave these None, reproducing plain silu.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -971,7 +999,9 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.SWIGLUSTEP,
-            MoEActivation.SWIGLUOAI,
+            # FIXME(kai): PPU Batched DG need support gemm1 clamp / alpha / beta in fused act func
+            # MoEActivation.SWIGLUOAI,
+            # MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -1111,7 +1141,15 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
                 dtype=workspace1.dtype,
                 device=workspace1.device,
             )
-            self.activation(activation, act_out_2d, workspace1.view(E * max_num_tokens, N))
+
+            self.activation(
+                activation,
+                act_out_2d,
+                workspace1.view(E * max_num_tokens, N),
+                clamp_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+            )
             act_out = act_out_2d.view(E, max_num_tokens, activation_out_dim)
             a2q, a2q_scale = downcast_to_mxfp4(act_out, axis=-1)
 
