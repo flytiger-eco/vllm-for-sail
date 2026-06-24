@@ -264,14 +264,16 @@ def mhc_pre(
         device=residual.device,
     )
 
-    gemm_out_mul = torch.empty(
+    # NOTE(PPU): Need to use torch.zeros instead of torch.empty here
+    # to fix precision problem on PPU SM80 with DeepSeek V4 Pro W8A8
+    gemm_out_mul = torch.zeros(
         n_splits,
         num_tokens,
         hc_mult3,
         dtype=torch.float32,
         device=residual.device,
     )
-    gemm_out_sqrsum = torch.empty(
+    gemm_out_sqrsum = torch.zeros(
         n_splits,
         num_tokens,
         dtype=torch.float32,
