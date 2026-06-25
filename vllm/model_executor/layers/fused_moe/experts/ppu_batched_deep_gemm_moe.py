@@ -92,6 +92,9 @@ def _silu_mul_quant_deep_gemm(
     quant_min: tl.constexpr,
     quant_max: tl.constexpr,
     ceil_ue8m0: tl.constexpr,
+    SWIGLU_LIMIT: tl.constexpr,
+    ALPHA: tl.constexpr,
+    BETA: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -124,8 +127,11 @@ def _silu_mul_quant_deep_gemm(
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
-        gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
-        y = gate * up
+        if SWIGLU_LIMIT > 0.0:
+            gate = tl.minimum(gate, SWIGLU_LIMIT)
+            up = tl.clamp(up, -SWIGLU_LIMIT, SWIGLU_LIMIT)
+        gate = gate * (1.0 / (1.0 + tl.exp(-ALPHA * gate)))
+        y = gate * (up + BETA)
 
         y_s = tl.maximum(tl.max(tl.abs(y)), eps) / quant_max
 
@@ -146,6 +152,9 @@ def _persistent_masked_m_silu_mul_quant(
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
     use_int8: bool = False,
     use_fp8: bool = False,
+    swiglu_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -227,9 +236,11 @@ def _persistent_masked_m_silu_mul_quant(
         device_id=y.device.index
     ).to_int()
 
-    if cuda_arch >= 80 and use_fp8 and group_size == 128:
-        # This kernel currently only supports H % 128 == 0 and assumes a
-        # fixed GROUP_SIZE of 128.
+    swiglu_limit_val = swiglu_limit if swiglu_limit is not None else 0.0
+    is_plain_silu = swiglu_limit_val == 0.0 and alpha == 1.0 and beta == 0.0
+
+    if cuda_arch >= 80 and use_fp8 and group_size == 128 and is_plain_silu:
+        # C++ fast path only supports plain silu(gate) * up.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
@@ -276,6 +287,9 @@ def _persistent_masked_m_silu_mul_quant(
             quant_min,
             quant_max,
             ceil_ue8m0,
+            swiglu_limit_val,
+            alpha,
+            beta,
             BLOCK=triton.next_power_of_2(group_size),
             NUM_STAGES=4,
             num_warps=1,
@@ -290,6 +304,9 @@ def persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    swiglu_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     return _persistent_masked_m_silu_mul_quant(
         y,
@@ -299,6 +316,9 @@ def persistent_masked_m_silu_mul_quant(
         quant_scale_fmt=quant_scale_fmt,
         use_int8=False,
         use_fp8=True,
+        swiglu_limit=swiglu_limit,
+        alpha=alpha,
+        beta=beta,
     )
 
 
@@ -308,6 +328,9 @@ def int8_persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 1,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    swiglu_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     return _persistent_masked_m_silu_mul_quant(
         y,
@@ -317,6 +340,9 @@ def int8_persistent_masked_m_silu_mul_quant(
         quant_scale_fmt=quant_scale_fmt,
         use_int8=True,
         use_fp8=False,
+        swiglu_limit=swiglu_limit,
+        alpha=alpha,
+        beta=beta,
     )
 
 
@@ -341,6 +367,9 @@ def _silu_mul_deep_gemm(
     stride_counts_e,
     # Numeric params ------------------------------------------------------
     eps: tl.constexpr,
+    SWIGLU_LIMIT: tl.constexpr,
+    ALPHA: tl.constexpr,
+    BETA: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -377,8 +406,11 @@ def _silu_mul_deep_gemm(
             other=0.0,
         ).to(tl.float32)
 
-        x = x * (1.0 / (1.0 + tl.exp(-x)))
-        y = x * y2
+        if SWIGLU_LIMIT > 0.0:
+            x = tl.minimum(x, SWIGLU_LIMIT)
+            y2 = tl.clamp(y2, -SWIGLU_LIMIT, SWIGLU_LIMIT)
+        x = x * (1.0 / (1.0 + tl.exp(-ALPHA * x)))
+        y = x * (y2 + BETA)
         y_q = y
 
         tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
@@ -389,11 +421,14 @@ def silu_mul_deep_gemm(
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     group_size: int = 128,
     eps: float = 1e-10,
+    swiglu_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
-    """Unquantize compute silu(y[..., :H]) * y[..., H:]
+    """Compute gate * sigmoid(alpha * gate) * (up + beta) with optional clamping.
 
-    y has shape (E, T, 2*H). The first half of the last dimension is
-    silu-activated, multiplied by the second half.
+    y has shape (E, T, 2*H). The first half of the last dimension is the gate,
+    the second half is the up projection.
 
     Returns `y_q` where
     * `y_q` is the BF16 tensor of shape `(E, T, H)`, same layout as `y[..., :H]`.
@@ -422,6 +457,8 @@ def silu_mul_deep_gemm(
     # A loop inside the kernel handles the token dim
     grid = (E * G,)
 
+    swiglu_limit_val = swiglu_limit if swiglu_limit is not None else 0.0
+
     _silu_mul_deep_gemm[grid](
         y,
         y_q,
@@ -436,6 +473,9 @@ def silu_mul_deep_gemm(
         stride_yq_h,
         stride_cnt_e,
         eps,
+        swiglu_limit_val,
+        alpha,
+        beta,
         BLOCK=group_size,
         NUM_STAGES=8,
         num_warps=1,
@@ -473,6 +513,8 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
     SWIGLU_LIMIT: tl.constexpr,
+    ALPHA: tl.constexpr,
+    BETA: tl.constexpr,
 ):
     """Fused SiLU+mul + MXFP4 quantisation for batched-expert (EP) layout.
 
@@ -528,15 +570,15 @@ def _silu_mul_mxfp4_quant_deep_gemm(
             mask=mask_d, other=0.0,
         ).to(tl.float32)
 
-        # -- SWIGLU clamp (DeepSeek V4) --
+        # -- Clamp: gate at max only, up both ways (matches C++ reference) --
         if SWIGLU_LIMIT > 0.0:
-            gate = tl.where(gate > SWIGLU_LIMIT, SWIGLU_LIMIT, gate)
-            gate = tl.where(gate < -SWIGLU_LIMIT, -SWIGLU_LIMIT, gate)
+            gate = tl.minimum(gate, SWIGLU_LIMIT)
+            up = tl.clamp(up, -SWIGLU_LIMIT, SWIGLU_LIMIT)
 
-        # -- SiLU(gate) * up --
-        gate = gate / (1.0 + tl.exp(-gate))
+        # -- gate * sigmoid(alpha * gate) * (up + beta) --
+        gate = gate / (1.0 + tl.exp(-ALPHA * gate))
         gate = gate.to(input_ptr.dtype.element_ty)
-        gate_up = up * gate
+        gate_up = (up + BETA) * gate
 
         # -- MXFP4 e2m1 quantisation with E8M0 scale, RTNE rounding --
         gate_up_grouped = tl.reshape(gate_up, [NUM_GROUPS, GROUP_SIZE])
@@ -608,6 +650,8 @@ def silu_mul_mxfp4_quant_masked(
     y: torch.Tensor,               # (E, T, 2*H) bf16
     tokens_per_expert: torch.Tensor,  # (E,) int32
     swiglu_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused SiLU+mul + MXFP4 quantisation (masked / batched-expert layout).
 
@@ -683,6 +727,8 @@ def silu_mul_mxfp4_quant_masked(
         BLOCK_N=BLOCK_N,
         NUM_STAGES=3,
         SWIGLU_LIMIT=swiglu_limit_val,
+        ALPHA=alpha,
+        BETA=beta,
         num_warps=1,
     )
 
@@ -750,17 +796,11 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
-        # uses the unfused activation path. The fused kernel reads packed w13
-        # (gate = first half, up = second half), so it implements the
-        # *uninterleaved* SwiGLU-OAI variant.
         return activation in [
             MoEActivation.SILU,
-            # FIXME(kai): ppu batched deep gemm does not support minimax-m3, stepfun, deepseek v4 with int8 / fp8 / bf16
-            # need support fused activation for that later
-            # MoEActivation.SWIGLUSTEP,
-            # MoEActivation.SWIGLUOAI,
-            # MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -895,6 +935,9 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 expert_num_tokens,
                 group_size=group_size,
                 quant_scale_fmt=quant_scale_fmt,
+                swiglu_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
             )
 
             fp8_m_grouped_gemm_nt_masked(
@@ -918,6 +961,9 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 workspace1,
                 expert_num_tokens,
                 group_size=workspace1.shape[-1] // 2,
+                swiglu_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
             )
 
             int8_m_grouped_gemm_nt_masked(
@@ -933,7 +979,13 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 a1q, w1, workspace1, expert_num_tokens, expected_m
             )
 
-            a2q = silu_mul_deep_gemm(workspace1, expert_num_tokens)
+            a2q = silu_mul_deep_gemm(
+                workspace1,
+                expert_num_tokens,
+                swiglu_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+            )
 
             bf16_m_grouped_gemm_nt_masked(
                 a2q, w2, output, expert_num_tokens, expected_m
@@ -999,9 +1051,8 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.SWIGLUSTEP,
-            # FIXME(kai): PPU Batched DG need support gemm1 clamp / alpha / beta in fused act func
-            # MoEActivation.SWIGLUOAI,
-            # MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -1119,16 +1170,15 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         activation_out_dim = self.adjust_N_for_activation(N, activation)
 
         # SiLU+mul on (E, T, 2*H) -> (E, T, H//2) uint8 + scales, fused with
-        # mxfp4 quantisation.  The fused Triton kernel supports both plain
-        # SILU and SILU+clamp (DeepSeek V4 swiglu_limit) paths; other
-        # activation variants fall back to a two-step approach.
-        if activation == MoEActivation.SILU:
-            # Fused path: silu+mul+mxfp4-quant in a single Triton kernel.
-            # Avoids materialising an intermediate bf16 (E, T, H) tensor.
-            # SWIGLU_LIMIT is passed to the kernel for DSV4 clamp support.
+        # mxfp4 quantisation.  The fused Triton kernel supports SILU and
+        # SWIGLUOAI_UNINTERLEAVE (with clamp/alpha/beta); other activation
+        # variants fall back to a two-step approach.
+        if activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE):
             a2q, a2q_scale = silu_mul_mxfp4_quant_masked(
                 workspace1, expert_num_tokens,
                 swiglu_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
             )
             # silu_mul_mxfp4_quant_masked outputs scale in [E, H//32//2, T] layout.
             # fp4_m_grouped_gemm_nt_masked expects [E, T, H//32//2], so permute.
