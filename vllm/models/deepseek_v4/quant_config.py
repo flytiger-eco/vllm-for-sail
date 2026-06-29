@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from vllm.config import get_current_vllm_config
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
@@ -130,6 +132,19 @@ class DeepseekV4FP8Config(Fp8Config):
         if quant_method in ("fp8", "deepseek_v4_fp8"):
             if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
                 return "deepseek_v4_fp8"
+        # PPU mixed-precision (mxfp4 MoE + fp8 channelwise dense). MTP draft
+        # rewrites model_type to "deepseek_mtp"; accept it via architectures.
+        architectures = getattr(hf_config, "architectures", None) or []
+        is_v4_like = model_type == "deepseek_v4" or (
+            model_type == "deepseek_mtp" and "DeepSeekV4MTPModel" in architectures
+        )
+        if (
+            current_platform.is_ppu()
+            and quant_method == "mxfp4"
+            and is_v4_like
+            and hf_quant_cfg.get("fp8_channelwise_layers")
+        ):
+            return "deepseek_v4_fp8"
         return None
 
     @classmethod
@@ -153,9 +168,18 @@ class DeepseekV4FP8Config(Fp8Config):
     def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper) -> None:
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.fp8_channelwise_layers:
-            self.fp8_channelwise_layers = hf_to_vllm_mapper.apply_list(
-                self.fp8_channelwise_layers
-            )
+            # Map checkpoint names then strip per-layer/per-MTP-index prefixes
+            # so a single short pattern (e.g. ``attn.wkv``) substring-matches
+            # every absolute layer index, including MTP draft layers.
+            mapped = hf_to_vllm_mapper.apply_list(self.fp8_channelwise_layers)
+            layer_index_re = re.compile(r"^(?:model\.)?(?:layers|mtp)\.\d+\.")
+            augmented: list[str] = []
+            for entry in mapped:
+                augmented.append(entry)
+                stripped = layer_index_re.sub("", entry)
+                if stripped and stripped != entry:
+                    augmented.append(stripped)
+            self.fp8_channelwise_layers = list(dict.fromkeys(augmented))
 
     def get_quant_method(self, layer, prefix):
         # FP8 channelwise override for dense layers (quant-config-driven)
