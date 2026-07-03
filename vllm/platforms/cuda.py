@@ -39,10 +39,10 @@ else:
 
 logger = init_logger(__name__)
 
-try:
-    import vllm._qutlass_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
+# try:
+#     import vllm._qutlass_C  # noqa: F401
+# except ImportError as e:
+#     logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -224,10 +224,10 @@ class CudaPlatformBase(Platform):
             import vllm._moe_C_stable_libtorch  # noqa: F401
         except ImportError as e:
             logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
-        try:
-            import vllm._qutlass_C  # noqa: F401
-        except ImportError as e:
-            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
+        # try:
+        #     import vllm._qutlass_C  # noqa: F401
+        # except ImportError as e:
+        #     logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
