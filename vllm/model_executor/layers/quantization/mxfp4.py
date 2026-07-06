@@ -207,8 +207,11 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
-        if current_platform.is_ppu():
+        if current_platform.is_ppu() and not current_platform.is_device_capability(
+                (8, 0)):
             # NOTE: W4A4, PPU USE MXFP4 Weights + MXFP4 Activations
+            # Only on sm90+ (e.g. 890P); sm80 (e.g. 810E) falls back to
+            # w4a16 (BF16 activation) with Marlin backend.
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kMxfp4Dynamic)
         else:
