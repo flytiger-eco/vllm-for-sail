@@ -12,6 +12,7 @@ from .fused_indexer_q import MXFP4_BLOCK_SIZE, fused_indexer_q_rope_quant
 from .fused_inv_rope_fp8_quant import (
     fused_inv_rope_float32,
     fused_inv_rope_fp8_quant,
+    fused_inv_rope_fp8_quant_channelwise,
     fused_inv_rope_int8_quant_channelwise,
 )
 from .fused_mtp_input_rmsnorm import fused_mtp_input_rmsnorm, mtp_shared_head_rmsnorm
@@ -27,6 +28,7 @@ __all__ = [
     "fused_indexer_q_rope_quant",
     "fused_inv_rope_float32",
     "fused_inv_rope_fp8_quant",
+    "fused_inv_rope_fp8_quant_channelwise",
     "fused_inv_rope_int8_quant_channelwise",
     "fused_mtp_input_rmsnorm",
     "fused_q_kv_rmsnorm",
