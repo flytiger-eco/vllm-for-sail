@@ -2,84 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PPU-specific DeepSeek V4 model.
 
-Inherits from the NVIDIA implementation and overrides weight loading
+Inherits from the NVIDIA implementation and configures weight mapping
 to support PPU-specific quantization schemes (INT8/INT4 channelwise,
 FP8 channelwise dense + FP4 MoE mixed-precision).
 """
 
-from collections.abc import Iterable
-from typing_extensions import override
-
-import regex as re
-import torch
-
 from vllm.config import VllmConfig
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from ..nvidia.model import (
     DeepseekV4ForCausalLM as NvidiaDeepseekV4ForCausalLM,
     _make_deepseek_v4_weights_mapper,
 )
-
-
-def _pre_dequant_wo_a_weights(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Pre-dequant FP8 channelwise wo_a before TP sharding.
-
-    Buffers only wo_a entries; all others pass through immediately.
-    Block-FP8 scales (2D, both dims > 1) are passed through unchanged.
-    """
-    wo_a_buf: dict[str, dict[str, tuple[str, torch.Tensor]]] = {}
-
-    for name, tensor in weights:
-        if name.endswith(".wo_a.weight"):
-            key = name[: -len(".weight")]
-            wo_a_buf.setdefault(key, {})["weight"] = (name, tensor)
-        elif ".wo_a." in name and "scale" in name:
-            key = name.split(".wo_a.")[0] + ".wo_a"
-            wo_a_buf.setdefault(key, {})["scale"] = (name, tensor)
-        else:
-            yield name, tensor
-
-    for key, buf in wo_a_buf.items():
-        if "weight" not in buf:
-            if "scale" in buf:
-                yield buf["scale"]
-            continue
-
-        w_name, w = buf["weight"]
-
-        if "scale" not in buf or w.dtype != torch.float8_e4m3fn:
-            yield w_name, w
-            if "scale" in buf:
-                yield buf["scale"]
-            continue
-
-        s_name, s = buf["scale"]
-
-        is_channelwise = s.dim() == 1 or (
-            s.dim() == 2 and (s.shape[0] == 1 or s.shape[1] == 1)
-        )
-        if not is_channelwise:
-            yield w_name, w
-            yield s_name, s
-            continue
-
-        scale_flat = s.float().reshape(-1)
-        if scale_flat.numel() == w.shape[0]:
-            # Per-output-channel
-            dequanted = w.float() * scale_flat.unsqueeze(1)
-        elif scale_flat.numel() == w.shape[1]:
-            # Per-input-channel
-            dequanted = w.float() * scale_flat.unsqueeze(0)
-        else:
-            raise ValueError(
-                f"wo_a scale shape {tuple(s.shape)} does not match weight "
-                f"shape {tuple(w.shape)} (expected per-output or per-input "
-                f"channel)"
-            )
-        yield w_name, dequanted.contiguous()
 
 
 class DeepseekV4ForCausalLM(NvidiaDeepseekV4ForCausalLM):
@@ -88,7 +21,6 @@ class DeepseekV4ForCausalLM(NvidiaDeepseekV4ForCausalLM):
     Differences from NVIDIA version:
     1. Adds packed_modules_mapping for fused weight loading
     2. Detects fp8_channelwise_layers and int8/int4 expert_dtype for mapper
-    3. Pre-dequants wo_a weights at load time for channelwise path
     """
 
     packed_modules_mapping = {
@@ -138,16 +70,3 @@ class DeepseekV4ForCausalLM(NvidiaDeepseekV4ForCausalLM):
             )
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-    @override
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
-        """Load weights with PPU-specific wo_a pre-dequantization."""
-        weights = _pre_dequant_wo_a_weights(weights)
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
-        loaded_params = loader.load_weights(
-            weights, mapper=self.hf_to_vllm_mapper
-        )
-        self.model.finalize_mega_moe_weights()
-        return loaded_params

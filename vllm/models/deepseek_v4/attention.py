@@ -26,7 +26,6 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
     fused_q_kv_rmsnorm,
 )
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -218,50 +217,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        # Detect channelwise quant for wo_a and pre-dequant to FP32 before
-        # TP sharding. This is a PPU-only optimization for FP8 channelwise:
-        # PPU lacks an FP8 channelwise einsum kernel, so we eagerly dequant
-        # at load time and run the einsum unquantized.
-        #
-        # INT8 channelwise must NOT take this path: it has its own forward
-        # branch that consumes INT8 weight + weight_scale and dequants on
-        # the fly (see DeepseekV4MLAAttention.forward INT8 path). Treating
-        # INT8 as channelwise here would unquantize wo_a and drop the
-        # weight_scale parameter, causing a KeyError on weight_scale at
-        # load time.
-        wo_a_pre_dequant = False
-        if current_platform.is_ppu() and quant_config is not None:
-            fp8_cw_layers = getattr(
-                quant_config, "fp8_channelwise_layers", None
-            )
-            if fp8_cw_layers and any("wo_a" in p for p in fp8_cw_layers):
-                wo_a_pre_dequant = True
-            elif hasattr(quant_config, "target_scheme_map"):
-                for scheme_dict in quant_config.target_scheme_map.values():
-                    weights_args = scheme_dict.get("weights")
-                    if weights_args is None:
-                        continue
-                    strategy = str(
-                        getattr(weights_args, "strategy", "")
-                    ).lower()
-                    qtype = str(getattr(weights_args, "type", "")).lower()
-                    num_bits = getattr(weights_args, "num_bits", 0)
-                    # FP8 channelwise: type=FLOAT, num_bits=8,
-                    # strategy=CHANNEL. INT8 channelwise (type=INT) must
-                    # not match here.
-                    if (
-                        "channel" in strategy
-                        and "float" in qtype
-                        and num_bits == 8
-                    ):
-                        wo_a_pre_dequant = True
-                        break
+        # wo_a uses the standard quant_config for all quantization schemes
+        # (FP8 blockwise, FP8 channelwise, INT8 channelwise). The _o_proj
+        # method in the platform subclass dispatches at runtime based on
+        # weight dtype and scale attribute:
+        #   - int8 + weight_scale        → INT8 channelwise einsum
+        #   - fp8  + weight_scale        → FP8 channelwise einsum
+        #   - fp8  + weight_scale_inv    → FP8 blockwise einsum
         self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             bias=False,
-            quant_config=None if wo_a_pre_dequant else quant_config,
-            params_dtype=torch.float32 if wo_a_pre_dequant else None,
+            quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )

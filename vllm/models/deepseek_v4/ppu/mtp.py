@@ -27,7 +27,6 @@ from ..nvidia.mtp import (
 from ..nvidia.mtp import (
     get_spec_layer_idx_from_weight_name,
 )
-from .model import _pre_dequant_wo_a_weights
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
@@ -45,10 +44,6 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> set[str]:
-        # PPU: pre-dequant fp8 channelwise wo_a (wo_a is built with
-        # quant_config=None, so the raw scale has no parameter to load into).
-        if current_platform.is_ppu():
-            weights = _pre_dequant_wo_a_weights(weights)
         # Reuse the parent's internal helpers
         def _remap_weight_name(name: str) -> str:
             remap_table = {

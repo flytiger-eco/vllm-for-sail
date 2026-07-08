@@ -57,8 +57,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 o_lora_rank=self.o_lora_rank,
                 einsum_recipe=self._einsum_recipe,
             )
-        elif self.wo_a.weight.dtype != torch.float8_e4m3fn:
-            # Channelwise FP8 (PPU): wo_a pre-dequanted to FP32 at load time.
+        elif self.wo_a.weight.dtype == torch.float8_e4m3fn and hasattr(
+            self.wo_a, "weight_scale"
+        ):
+            # Channelwise FP8 (PPU): wo_a kept as FP8 + per-output-channel
+            # weight_scale (no pre-dequant).
             return deep_gemm_fp8_channel_o_proj(
                 o,
                 positions,

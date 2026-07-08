@@ -5,10 +5,12 @@ import torch.nn as nn
 
 from vllm.models.deepseek_v4.common.ops import (
     fused_inv_rope_fp8_quant,
-    fused_inv_rope_float32,
+    fused_inv_rope_fp8_quant_channelwise,
+    fused_inv_rope_int8_quant_channelwise,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.ppu_deep_gemm import fp8_einsum
+from vllm.utils.ppu_deep_gemm import int8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -72,7 +74,6 @@ def deep_gemm_fp8_o_proj(
     return wo_b(z.flatten(1))
 
 
-# FIXME: use deepgemm int8 einsum later
 def deep_gemm_int8_o_proj(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -87,8 +88,14 @@ def deep_gemm_int8_o_proj(
     o_lora_rank: int,
     einsum_recipe: tuple[int, int, int],
 ):
-    # Fused inv RoPE → float32 (skip INT8 roundtrip)
-    o_f = fused_inv_rope_float32(
+    # Channelwise INT8 GEMM via PPU DeepGEMM int8_einsum:
+    #   - activation: per-(token, group) symmetric INT8 quant.
+    #     o_int8 has shape (b=T, h=G, r=R) so o_scale is (b, h, 1).
+    #   - weight:     per-output-channel INT8. compressed-tensors
+    #     W8A8 channel scheme stores wo_a as 2D [G*d, R] / scale as
+    #     [G*d, 1]; reshape to 3D so int8_bmm sees (h=G, d=lora_rank,
+    #     r=R) for `hdr` and a (h, d, 1) scale broadcasting along r.
+    o_int8, o_scale = fused_inv_rope_int8_quant_channelwise(
         o,
         positions,
         cos_sin_cache,
@@ -97,22 +104,29 @@ def deep_gemm_int8_o_proj(
         nope_dim,
         rope_dim,
     )
-    # Weight dequant (per-channel INT8 → float32) + reshape for einsum
-    wo_a_f = _dequant_channel(wo_a.weight, wo_a.weight_scale).reshape(
+    wo_a_view = wo_a.weight.reshape(
         n_groups, o_lora_rank, -1
+    )
+    wo_a_scale_view = wo_a.weight_scale.reshape(
+        n_groups, o_lora_rank, 1
     )
     z = torch.empty(
         (o.shape[0], n_groups, o_lora_rank),
         device=o.device,
         dtype=torch.bfloat16,
     )
-    torch.ops.vllm.deepseek_v4_unquantized_einsum(
-        o_f, wo_a_f, z, "bhr,hdr->bhd",
+    torch.ops.vllm.deepseek_v4_int8_einsum(
+        o_int8,
+        o_scale,
+        wo_a_view,
+        wo_a_scale_view,
+        z,
+        "bhr,hdr->bhd",
+        [1, 1, o_int8.shape[-1]],
     )
     return wo_b(z.flatten(1))
 
 
-# FIXME: use deepgemm fp8 einsum later
 def deep_gemm_fp8_channel_o_proj(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -127,10 +141,14 @@ def deep_gemm_fp8_channel_o_proj(
     o_lora_rank: int,
     einsum_recipe: tuple[int, int, int],
 ):
-    wo_a_view = wo_a.weight.reshape(
-        n_groups, o_lora_rank, -1
-    )
-    o_f = fused_inv_rope_float32(
+    # Channelwise FP8 GEMM via PPU DeepGEMM fp8_einsum:
+    #   - activation: per-(token, group) symmetric FP8 quant.
+    #     o_fp8 has shape (b=T, h=G, r=R) so o_scale is (b, h, 1).
+    #   - weight:     per-output-channel FP8. Channelwise scheme stores
+    #     wo_a as 2D [G*d, R] / scale as [G*d, 1]; reshape to 3D so
+    #     fp8_bmm sees (h=G, d=lora_rank, r=R) for `hdr` and a
+    #     (h, d, 1) scale broadcasting along r.
+    o_fp8, o_scale = fused_inv_rope_fp8_quant_channelwise(
         o,
         positions,
         cos_sin_cache,
@@ -139,74 +157,88 @@ def deep_gemm_fp8_channel_o_proj(
         nope_dim,
         rope_dim,
     )
+    wo_a_view = wo_a.weight.reshape(
+        n_groups, o_lora_rank, -1
+    )
+    wo_a_scale_view = wo_a.weight_scale.reshape(
+        n_groups, o_lora_rank, 1
+    )
     z = torch.empty(
         (o.shape[0], n_groups, o_lora_rank),
         device=o.device,
         dtype=torch.bfloat16,
     )
-    torch.ops.vllm.deepseek_v4_unquantized_einsum(
-        o_f, wo_a_view, z, "bhr,hdr->bhd",
+    torch.ops.vllm.deepseek_v4_fp8_channel_einsum(
+        o_fp8,
+        o_scale,
+        wo_a_view,
+        wo_a_scale_view,
+        z,
+        "bhr,hdr->bhd",
+        [1, 1, o_fp8.shape[-1]],
     )
     return wo_b(z.flatten(1))
 
 
-
-def _dequant_channel(
+def deepseek_v4_int8_einsum(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
     b: torch.Tensor,
     b_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Dequantize per-channel INT8 quantized weight back to float32.
-
-    For a weight tensor of shape [K, N]:
-      - b:        INT8 quantized values, shape [K, N]
-      - b_scale:  per-output-channel scales, shape [K] or [K, 1]
-
-    Returns:
-      Dequantized float32 tensor of shape [K, N].
-    """
-    if b_scale is None:
-        return b.to(torch.float32)
-
-    b_scale_f = b_scale.to(torch.float32)
-
-    if b_scale_f.dim() == 1:
-        b_scale_f = b_scale_f.unsqueeze(-1)  # [K] -> [K, 1] for broadcasting
-    # b.to(float32) handles the int8 -> float conversion,
-    # then multiply by per-channel scale.
-    return (b.to(torch.float32) * b_scale_f)
-
-
-def _deepseek_v4_unquantized_einsum_torch(
-    equation: str,
-    a: torch.Tensor,
-    b: torch.Tensor,
     out: torch.Tensor,
+    equation: str,
+    recipe: list[int],
 ) -> None:
-    result = torch.einsum(equation, a, b)
-    out.copy_(result.to(out.dtype))
+    int8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
 
 
-def deepseek_v4_unquantized_einsum(
+def deepseek_v4_int8_einsum_fake(
     a: torch.Tensor,
+    a_scale: torch.Tensor,
     b: torch.Tensor,
+    b_scale: torch.Tensor,
     out: torch.Tensor,
     equation: str,
-) -> None:
-    _deepseek_v4_unquantized_einsum_torch(equation, a, b, out)
-
-
-def deepseek_v4_unquantized_einsum_fake(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
+    recipe: list[int],
 ) -> None:
     return None
 
 
 direct_register_custom_op(
-    op_name="deepseek_v4_unquantized_einsum",
-    op_func=deepseek_v4_unquantized_einsum,
+    op_name="deepseek_v4_int8_einsum",
+    op_func=deepseek_v4_int8_einsum,
     mutates_args=["out"],
-    fake_impl=deepseek_v4_unquantized_einsum_fake,
+    fake_impl=deepseek_v4_int8_einsum_fake,
+)
+
+
+def deepseek_v4_fp8_channel_einsum(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+    recipe: list[int],
+) -> None:
+    fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
+
+
+def deepseek_v4_fp8_channel_einsum_fake(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out: torch.Tensor,
+    equation: str,
+    recipe: list[int],
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="deepseek_v4_fp8_channel_einsum",
+    op_func=deepseek_v4_fp8_channel_einsum,
+    mutates_args=["out"],
+    fake_impl=deepseek_v4_fp8_channel_einsum_fake,
 )
