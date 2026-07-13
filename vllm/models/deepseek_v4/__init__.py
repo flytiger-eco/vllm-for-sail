@@ -27,11 +27,12 @@ elif current_platform.is_xpu():
 
     DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 elif current_platform.is_ppu():
+    # NOTE: ppu reuse nvidia dspark
+    from .nvidia.dspark import (  # type: ignore[assignment]
+        DSparkDeepseekV4ForCausalLM,
+    )
     from .ppu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .ppu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
-
-    # Disable DSpark on PPU temporarily.
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,
