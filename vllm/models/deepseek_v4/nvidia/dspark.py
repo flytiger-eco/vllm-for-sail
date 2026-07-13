@@ -359,11 +359,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 ckpt_up_proj_name="w3",
                 num_experts=self.config.n_routed_experts,
             )
-        expert_scale_suffix = (
-            ".weight_scale"
-            if getattr(self.config, "expert_dtype", "fp4") == "fp4"
-            else ".weight_scale_inv"
-        )
+        # Expert scale suffix: FP4/INT8/INT4 experts use .weight_scale;
+        # FP8 experts use .weight_scale_inv.
+        expert_dtype = getattr(self.config, "expert_dtype", "fp4")
+        if expert_dtype == "fp8":
+            expert_scale_suffix = ".weight_scale_inv"
+        else:
+            expert_scale_suffix = ".weight_scale"
 
         # (param_name, ckpt_shard_name, shard_id) for non-expert stacked params.
         stacked_params_mapping = [
@@ -375,6 +377,21 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+
+        # Detect non-expert scale suffix from actual model parameters.
+        # INT8/FP8 channelwise quant registers .weight_scale; FP8 block
+        # quant registers .weight_scale_inv.
+        non_expert_scale_suffix = ".weight_scale_inv"
+        for param_key in params_dict:
+            if ".experts." not in param_key and (
+                param_key.endswith(".weight_scale")
+                or param_key.endswith(".weight_scale_inv")
+            ):
+                non_expert_scale_suffix = (
+                    ".weight_scale" if param_key.endswith(".weight_scale")
+                    else ".weight_scale_inv"
+                )
+                break
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -393,7 +410,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
-                    else ".weight_scale_inv"
+                    else non_expert_scale_suffix
                 )
                 name = name.removesuffix(".scale") + suffix
 
