@@ -686,7 +686,7 @@ def fused_inv_rope_fp8_quant(
         d,
         scale_inner,
     )
-    return fp8_buf.transpose(0, 1), scale_buf.transpose(0, 1)
+    return fp8_buf.transpose(0, 1).contiguous(), scale_buf.transpose(0, 1).contiguous()
 
 
 def _fused_inv_rope_fp8_quant_kernel_impl(
@@ -722,7 +722,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
     use_gdc = current_platform.is_arch_support_pdl()
-    pdl_kwargs = {"launch_pdl": True} if use_gdc else {}
+    pdl_kwargs = {"launch_pdl": use_gdc}
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
         positions,
