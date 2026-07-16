@@ -160,21 +160,21 @@ def backend_to_kernel_cls(
             PPUDeepGemmExperts,
         )
 
-        return [PPUDeepGemmExperts]
+        return PPUDeepGemmExperts
 
     elif backend == UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM:
         from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
             PPUBatchedDeepGemmExperts,
         )
 
-        return [PPUBatchedDeepGemmExperts]
+        return PPUBatchedDeepGemmExperts
 
     elif backend == UnquantizedMoeBackend.ACEXT:
         from vllm.model_executor.layers.fused_moe.experts.acext import (
             AcextExperts,
         )
 
-        return [AcextExperts]
+        return AcextExperts
 
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
