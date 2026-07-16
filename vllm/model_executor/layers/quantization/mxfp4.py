@@ -148,6 +148,8 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+            if current_platform.is_ppu():
+                return Mxfp4MoEMethod(layer.moe_config)
             return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             logger.debug_once(
@@ -466,7 +468,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w2_scale = layer.w2_weight_scale
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
-        swiglu_limit = getattr(layer, "swiglu_limit", None)
 
         if self.mxfp4_backend in TRITON_BACKENDS:
             assert self.w13_precision_config is not None
@@ -482,7 +483,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             gemm1_alpha=1.702,
             gemm1_beta=1.0,
-            swiglu_limit=swiglu_limit,
+            swiglu_limit=7.0,
             layer=layer,
         )
 
@@ -548,7 +549,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
+        if current_platform.is_ppu():
+            if not current_platform.is_device_capability((8, 0)):
+                # NOTE(kai): W4A4, PPU USE MXFP4 Weights + MXFP4 Activations
+                # Only on sm90+ (e.g. 890P); sm80 (e.g. 810E) falls back to
+                # w4a16 (BF16 activation) with Marlin backend.
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                    moe, activation_key=kMxfp4Dynamic)
+            else:
+                # sm80 (810E) → W4A16
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        else:
+            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
 
@@ -814,6 +826,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             w1_bias=w1_bias,
             w2_bias=w2_bias,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
             swiglu_limit=swiglu_limit,
             layer=layer,
         )
