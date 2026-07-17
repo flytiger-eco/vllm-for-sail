@@ -82,6 +82,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
@@ -794,12 +795,23 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # int4-aligned for build_k2q_csr's vectorised int4 loads.
             max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             padded_num_tokens = (max_num_batched_tokens + 3) // 4 * 4
-            self.topk_indices_buffer = torch.empty(
-                padded_num_tokens,
-                num_index_heads,
-                sparse_cfg["sparse_topk_blocks"],
-                dtype=torch.int32,
-            )
+            # PPU (non-SM100) uses the Triton fallback path which expects
+            # head-major [H, T, MK]; the default token-major layout is for
+            # the MSA (SM100) path only.
+            if current_platform.is_ppu():
+                self.topk_indices_buffer = torch.empty(
+                    num_index_heads,
+                    padded_num_tokens,
+                    sparse_cfg["sparse_topk_blocks"],
+                    dtype=torch.int32,
+                )
+            else:
+                self.topk_indices_buffer = torch.empty(
+                    padded_num_tokens,
+                    num_index_heads,
+                    sparse_cfg["sparse_topk_blocks"],
+                    dtype=torch.int32,
+                )
         else:
             self.topk_indices_buffer = None
 
