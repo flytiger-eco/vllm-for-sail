@@ -319,11 +319,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
+        # Hook mode buys compute/comm overlap by deferring the receive, but
+        # not every backend supports the deferred receive; event mode keeps
+        # the dispatch fully async so those platforms still work, and serves
+        # as an overlap-free baseline for debugging.
+        use_recv_hook = envs.VLLM_DEEPEPLL_RECV_HOOK
         (
             expert_x,
             expert_num_tokens,
             handle,
-            _,
+            event,
             hook,
         ) = self.buffer.low_latency_dispatch(
             a1,
@@ -339,8 +344,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
                 else dict()
             ),
-            async_finish=False,
-            return_recv_hook=True,
+            async_finish=not use_recv_hook,
+            return_recv_hook=use_recv_hook,
             **(dict(use_int8=self.use_int8_dispatch) if current_platform.is_ppu() else dict()),
             **(dict(use_mxfp4=self.use_mxfp4_dispatch) if current_platform.is_ppu() else dict()),
             **(dict(mxfp4_scale_row_major=False) if (current_platform.is_ppu() and self.use_mxfp4_dispatch) else dict()),
@@ -357,7 +362,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.handles[a2a_idx] = handle
 
         return (
-            hook,
+            hook if use_recv_hook else event.current_stream_wait,
             lambda: self._receiver(
                 expert_x,
                 expert_num_tokens,
@@ -426,7 +431,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )
 
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled() or do_async
+        async_path = dbo_enabled() or do_async
+        do_recv_hook = async_path and envs.VLLM_DEEPEPLL_RECV_HOOK
         handle = self.handles[a2a_idx]
         assert handle is not None
 
@@ -438,16 +444,26 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(
+        # async_finish and return_recv_hook are mutually exclusive, so the
+        # async path must pick exactly one completion strategy. The
+        # synchronous path (do_async=False, no DBO) intentionally ignores the
+        # knob and stays fully synchronous: finalize() discards the returned
+        # handles, so an async event issued there would never be waited on.
+        _, event, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
             combine_topk_ids,
             combine_topk_weights,
             handle,
-            async_finish=False,
+            async_finish=async_path and not do_recv_hook,
             zero_copy=False,
             return_recv_hook=do_recv_hook,
             out=output,
         )
+        if not do_recv_hook and async_path:
+            # Without a hook the event is the only completion handle; hand its
+            # wait to the caller so the two-phase issue->wait contract (and
+            # DBO's deferred recv-hook mechanism) still holds.
+            recv_hook = event.current_stream_wait
 
         return recv_hook, lambda: None
 
