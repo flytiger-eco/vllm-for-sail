@@ -148,7 +148,12 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            if current_platform.is_ppu():
+            # PPU: non-GPT-OSS models use Mxfp4MoEMethod (reads SwiGLU
+            # params dynamically from layer attrs). GPT-OSS keeps
+            # GptOssMxfp4MoEMethod (hardcoded alpha/beta/limit +
+            # interleaved weight layout).
+            if current_platform.is_ppu() and not isinstance(
+                    self, GptOssMxfp4Config):
                 return Mxfp4MoEMethod(layer.moe_config)
             return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
