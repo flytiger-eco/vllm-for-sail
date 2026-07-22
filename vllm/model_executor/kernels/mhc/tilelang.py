@@ -330,6 +330,7 @@ def mhc_pre_broadcast_tilelang(
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
+    from vllm.platforms import current_platform
     from vllm.utils.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
@@ -358,7 +359,11 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    n_splits = (
+        1
+        if current_platform.is_ppu()
+        else compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    )
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
@@ -372,14 +377,26 @@ def mhc_pre_broadcast_tilelang(
     layer_input = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
-    gemm_out_mul = torch.empty(
-        n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
-    )
-    gemm_out_sqrsum = torch.empty(
-        n_splits, num_tokens, dtype=torch.float32, device=residual.device
-    )
-
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    if current_platform.is_ppu():
+        # NOTE(PPU): Need to use torch.zeros instead of torch.empty here
+        # to fix precision problem on PPU SM80 with DeepSeek V4 Pro W8A8
+        gemm_out_mul = torch.zeros(
+            n_splits, num_tokens, hc_mult3, dtype=torch.float32,
+            device=residual.device
+        )
+        gemm_out_sqrsum = torch.zeros(
+            n_splits, num_tokens, dtype=torch.float32, device=residual.device
+        )
+        from vllm.utils.ppu_deep_gemm import tf32_hc_prenorm_gemm
+    else:
+        gemm_out_mul = torch.empty(
+            n_splits, num_tokens, hc_mult3, dtype=torch.float32,
+            device=residual.device
+        )
+        gemm_out_sqrsum = torch.empty(
+            n_splits, num_tokens, dtype=torch.float32, device=residual.device
+        )
+        from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
 
     tf32_hc_prenorm_gemm(
         residual_flat,
