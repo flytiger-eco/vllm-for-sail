@@ -1,0 +1,8 @@
+vLLM-for-SAIL
+Copyright (c) 2026 Zhejiang Runhe Cloud Intelligence Technology Co., Ltd.
+
+This product includes software developed by the vLLM project
+(https://github.com/vllm-project/vllm), licensed under Apache License 2.0.
+
+Modifications for T-HEAD SAIL platform adaptation are Copyright (c) 2026
+Zhejiang Runhe Cloud Intelligence Technology Co., Ltd.
