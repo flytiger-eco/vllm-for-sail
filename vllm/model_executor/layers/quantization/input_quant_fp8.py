@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -77,6 +78,9 @@ class QuantFP8(CustomOp):
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
 
+        # Fused RMSNorm + quant context (set by model code)
+        self._fused_rmsnorm = None
+
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
             self.group_size = group_shape.col
@@ -88,6 +92,23 @@ class QuantFP8(CustomOp):
                     "non-group quantization."
                 )
 
+    def set_fused_rmsnorm(
+        self,
+        residual: torch.Tensor | None,
+        weight: torch.Tensor | None,
+        epsilon: float,
+    ) -> None:
+        """Set fused RMSNorm context for next forward_cuda call.
+
+        When set, forward_cuda will use the fused Triton kernel that
+        combines residual add + RMSNorm + per-token-group quant.
+        The context is consumed (cleared) after one use.
+        """
+        if residual is not None and weight is not None:
+            self._fused_rmsnorm = (residual, weight, epsilon)
+        else:
+            self._fused_rmsnorm = None
+
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -96,6 +117,28 @@ class QuantFP8(CustomOp):
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.quantization.utils import fp8_utils
+
+        # Check for fused RMSNorm + quant context
+        fused_ctx = self._fused_rmsnorm
+        self._fused_rmsnorm = None  # consume after use
+
+        if fused_ctx is not None and self.is_group_quant:
+            from vllm.model_executor.layers.quantization.utils import (
+                fused_add_rmsnorm_quant,
+            )
+
+            residual, weight, epsilon = fused_ctx
+            x_q, x_s, _ = (
+                fused_add_rmsnorm_quant.fused_add_rmsnorm_group_quant(
+                    x,
+                    residual,
+                    weight,
+                    epsilon,
+                    group_size=self.group_size,
+                    column_major_scales=self.column_major_scales,
+                )
+            )
+            return x_q, x_s
 
         if (
             self.is_group_quant
@@ -111,6 +154,16 @@ class QuantFP8(CustomOp):
 
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
+
+            if envs.VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT:
+                return fp8_utils.per_token_group_quant_fp8_ppu_opt(
+                    x,
+                    group_size=self.group_size,
+                    column_major_scales=self.column_major_scales,
+                    tma_aligned_scales=self.tma_aligned_scales,
+                    dtype=_FP8_DTYPE,
+                    use_ue8m0=self.use_ue8m0,
+                )
 
             return fp8_utils.per_token_group_quant_fp8(
                 x,

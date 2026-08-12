@@ -6,10 +6,12 @@
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
+#include <type_traits>
 
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
 #else
+  #include <cuda_bf16.h>
   #include <cuda_fp8.h>
 #endif
 
@@ -43,25 +45,70 @@ template <typename T, bool SCALE_UE8M0>
 __device__ __forceinline__ float ComputeGroupScale(
     const T* __restrict__ group_input, T* __restrict__ smem_group,
     const int group_size, const int lane_id, const int threads_per_group,
-    const float eps, const float max_8bit) {
+    const float eps, const float max_8bit, const bool ppu_opt) {
   float local_absmax = eps;
 
   constexpr int vec_size = 16 / sizeof(T);
 
-  // copy global -> shared & compute absmax
-  auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
-    float abs_v = fabsf(static_cast<float>(src));
-    local_absmax = fmaxf(local_absmax, abs_v);
-    dst = src;
-  };
+  bool fast_path_done = false;
 
-  vllm::vectorize_with_alignment<vec_size>(
-      group_input,        // in
-      smem_group,         // out (shared)
-      group_size,         // elements per group
-      lane_id,            // thread id
-      threads_per_group,  // stride in group
-      scalar_op_cache);   // scalar handler
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
+  if (ppu_opt && group_size % 4 == 0) {
+    if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    // SM89+ bf16 fast path: vec4 loads + abs.bf16x2 + max.bf16x2.
+    // Keep entire absmax reduction in bf16x2 domain, convert to
+    // float32 only at the end for warp shuffle compatibility.
+    // group_input is contiguous and group_size is a multiple of
+    // vec_size (4), so alignment is guaranteed.
+    using vec4_t = vllm::vec_n_t<__nv_bfloat16, 4>;
+    const int num_vec = group_size / 4;
+    const auto* v_in = reinterpret_cast<const vec4_t*>(group_input);
+    auto* v_out = reinterpret_cast<vec4_t*>(smem_group);
+
+    uint32_t local_max_bits = 0;  // two bf16 zeros packed
+
+    for (int i = lane_id; i < num_vec; i += threads_per_group) {
+      vec4_t src = v_in[i];
+      v_out[i] = src;  // cache to shared
+      // Process 2 bf16x2 pairs per vec4
+      for (int j = 0; j < 4; j += 2) {
+        uint32_t pair =
+            *reinterpret_cast<const uint32_t*>(&src.val[j]);
+        uint32_t abs_pair;
+        asm("abs.bf16x2 %0, %1;\n" : "=r"(abs_pair) : "r"(pair));
+        asm("max.bf16x2 %0, %1, %2;\n"
+            : "=r"(local_max_bits)
+            : "r"(local_max_bits), "r"(abs_pair));
+      }
+    }
+
+    // Convert bf16x2 absmax to float32 for warp shuffle reduce
+    __nv_bfloat162 max_bf2 =
+        *reinterpret_cast<__nv_bfloat162*>(&local_max_bits);
+    local_absmax = fmaxf(local_absmax,
+                         __bfloat162float(max_bf2.x));
+    local_absmax = fmaxf(local_absmax,
+                         __bfloat162float(max_bf2.y));
+    fast_path_done = true;
+    }  // if constexpr bf16
+  }    // if ppu_opt
+#endif
+  if (!fast_path_done) {
+    // General path: copy global -> shared & compute absmax
+    auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
+      float abs_v = fabsf(static_cast<float>(src));
+      local_absmax = fmaxf(local_absmax, abs_v);
+      dst = src;
+    };
+
+    vllm::vectorize_with_alignment<vec_size>(
+        group_input,        // in
+        smem_group,         // out (shared)
+        group_size,         // elements per group
+        lane_id,            // thread id
+        threads_per_group,  // stride in group
+        scalar_op_cache);   // scalar handler
+  }
 
   local_absmax = GroupReduceMax(local_absmax);
 
@@ -77,22 +124,71 @@ template <typename T, typename DST_DTYPE>
 __device__ __forceinline__ void QuantizeGroup(
     const T* __restrict__ smem_group, DST_DTYPE* __restrict__ group_output,
     const int group_size, const int lane_id, const int threads_per_group,
-    const float y_s, const float min_8bit, const float max_8bit) {
+    const float y_s, const float min_8bit, const float max_8bit,
+    const bool ppu_opt) {
   constexpr int vec_size = 16 / sizeof(T);
 
-  // quantize shared -> global 8-bit
-  auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
-    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
-    dst = DST_DTYPE(q);
-  };
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
+  if (ppu_opt && group_size % 4 == 0) {
+    if constexpr (std::is_same_v<T, __nv_bfloat16> &&
+                  std::is_same_v<DST_DTYPE, __nv_fp8_e4m3>) {
+    // SM89+ bf16 fast path: vec4 loads from smem + cvt.rn.satfinite.e4m3x2.f32
+    // for paired FP8 conversion (auto-saturate, no fminf/fmaxf needed).
+    using vec4_t = vllm::vec_n_t<__nv_bfloat16, 4>;
+    const int num_vec = group_size / 4;
+    const auto* v_in = reinterpret_cast<const vec4_t*>(smem_group);
+    auto* v_out = reinterpret_cast<uint32_t*>(group_output);
+    const float inv_y = 1.0f / y_s;
 
-  vllm::vectorize_with_alignment<vec_size>(
-      smem_group,         // in (shared)
-      group_output,       // out (global quant tensor)
-      group_size,         // elements
-      lane_id,            // tid
-      threads_per_group,  // stride
-      scalar_op_quant);   // scalar handler
+    for (int i = lane_id; i < num_vec; i += threads_per_group) {
+      vec4_t src = v_in[i];
+      uint32_t out_word = 0;
+
+      // Process 2 pairs of float32 → e4m3x2
+      for (int j = 0; j < 4; j += 2) {
+        float val_a = static_cast<float>(src.val[j]) * inv_y;
+        float val_b = static_cast<float>(src.val[j + 1]) * inv_y;
+
+        uint16_t packed;
+        if ((j & 2) == 0) {
+          // even pair (j=0): result[7:0]=cvt(val_a), [15:8]=cvt(val_b)
+          asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n"
+              : "=h"(packed) : "f"(val_b), "f"(val_a));
+        } else {
+          // odd pair (j=2): result[7:0]=cvt(val_b), [15:8]=cvt(val_a)
+          asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n"
+              : "=h"(packed) : "f"(val_a), "f"(val_b));
+        }
+
+        // Extract bytes and place in output word
+        uint32_t byte_lo = static_cast<uint32_t>(packed & 0xFF);
+        uint32_t byte_hi = static_cast<uint32_t>((packed >> 8) & 0xFF);
+        int base_shift = (j & 2) ? 16 : 0;
+        out_word |=
+            (byte_lo << base_shift) | (byte_hi << (base_shift + 8));
+      }
+
+      v_out[i] = out_word;
+    }
+      return;  // Fast path complete; skip the general path below.
+    }  // if constexpr bf16+fp8
+  }    // if ppu_opt
+#endif
+  {
+    // General path: quantize shared -> global 8-bit
+    auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
+      float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+      dst = DST_DTYPE(q);
+    };
+
+    vllm::vectorize_with_alignment<vec_size>(
+        smem_group,         // in (shared)
+        group_output,       // out (global quant tensor)
+        group_size,         // elements
+        lane_id,            // tid
+        threads_per_group,  // stride
+        scalar_op_quant);   // scalar handler
+  }
 }
 
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
@@ -101,7 +197,9 @@ __global__ void per_token_group_quant_8bit_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
     scale_packed_t* __restrict__ output_s, const int group_size,
     const int num_groups, const int groups_per_block, const float eps,
-    const float min_8bit, const float max_8bit, const int scale_num_rows = 0,
+    const float min_8bit, const float max_8bit,
+    const bool ppu_opt = false,
+    const int scale_num_rows = 0,
     const int scale_stride = 0) {
   const int threads_per_group = 16;
   const int64_t local_group_id = threadIdx.x / threads_per_group;
@@ -145,7 +243,7 @@ __global__ void per_token_group_quant_8bit_kernel(
 
   const float y_s = ComputeGroupScale<T, SCALE_UE8M0>(
       group_input, smem_group, group_size, lane_id, threads_per_group, eps,
-      max_8bit);
+      max_8bit, ppu_opt);
 
   scale_element_t y_s_quant = y_s;
 
@@ -156,7 +254,8 @@ __global__ void per_token_group_quant_8bit_kernel(
   __syncthreads();
 
   QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
-                              threads_per_group, y_s, min_8bit, max_8bit);
+                              threads_per_group, y_s, min_8bit, max_8bit,
+                              ppu_opt);
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   cudaTriggerProgrammaticLaunchCompletion();
@@ -194,7 +293,8 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
                                 torch::stable::Tensor& output_q,
                                 torch::stable::Tensor& output_s,
                                 int64_t group_size, double eps, double min_8bit,
-                                double max_8bit, bool scale_ue8m0) {
+                                double max_8bit, bool scale_ue8m0,
+                                bool ppu_opt) {
   STD_TORCH_CHECK(input.is_contiguous());
   STD_TORCH_CHECK(output_q.is_contiguous());
 
@@ -238,7 +338,7 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
           static_cast<T*>(input.data_ptr()), output_q.data_ptr(),            \
           static_cast<float*>(output_s.data_ptr()), group_size, num_groups,  \
           groups_per_block, (float)eps, (float)min_8bit, (float)max_8bit,    \
-          scale_num_rows, scale_stride);                                     \
+          ppu_opt, scale_num_rows, scale_stride);                            \
     } while (0)
 #else
   #define LAUNCH_KERNEL_INST(T, DST_DTYPE, COL_MAJOR, UE8M0, SMEM_BYTES)   \
@@ -248,7 +348,7 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
               static_cast<T*>(input.data_ptr()), output_q.data_ptr(),      \
               static_cast<float*>(output_s.data_ptr()), group_size,        \
               num_groups, groups_per_block, (float)eps, (float)min_8bit,   \
-              (float)max_8bit, scale_num_rows, scale_stride);              \
+              (float)max_8bit, ppu_opt, scale_num_rows, scale_stride);     \
     } while (0)
 #endif
 
@@ -618,5 +718,19 @@ void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                bool dummy_is_scale_transposed = false,
                                bool dummy_is_tma_aligned = false) {
   per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
-                             fp8_min, fp8_max, scale_ue8m0);
+                             fp8_min, fp8_max, scale_ue8m0,
+                             /*ppu_opt=*/false);
+}
+
+void per_token_group_quant_fp8_ppu_opt(
+    const torch::stable::Tensor& input,
+    torch::stable::Tensor& output_q,
+    torch::stable::Tensor& output_s,
+    int64_t group_size, double eps, double fp8_min,
+    double fp8_max, bool scale_ue8m0,
+    bool dummy_is_scale_transposed = false,
+    bool dummy_is_tma_aligned = false) {
+  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
+                             fp8_min, fp8_max, scale_ue8m0,
+                             /*ppu_opt=*/true);
 }

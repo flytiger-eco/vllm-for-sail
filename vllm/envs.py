@@ -87,6 +87,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_PPU_FUSED_RMSNORM_QUANT: bool = True
+    VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT: bool = True
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -618,6 +620,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Enable fused RMSNorm + per-token-group FP8 quantization kernel.
+    # When enabled, combines residual_add + RMSNorm + group_quant into
+    # a single Triton kernel, eliminating one kernel launch and one
+    # intermediate bf16 tensor round-trip.
+    "VLLM_PPU_FUSED_RMSNORM_QUANT": lambda: bool(
+        int(os.getenv("VLLM_PPU_FUSED_RMSNORM_QUANT", "0"))
+    ),
+    # Use the PPU-optimized per-token-group FP8 quantization kernel
+    # (per_token_group_quant_fp8_ppu_opt). When disabled, falls back to
+    # the generic per_token_group_quant_fp8 kernel. Enabled by default.
+    "VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT": lambda: (
+        os.environ.get("VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT", "").strip().lower() in ("1", "true")
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
