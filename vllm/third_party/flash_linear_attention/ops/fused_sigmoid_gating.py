@@ -11,6 +11,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .sail_cuda_pla import get_sail_cuda_pla_k_last
+
 
 @triton.heuristics(
     {
@@ -221,6 +223,66 @@ def fused_sigmoid_gating_delta_rule_update(
         scale = k.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
+
+    # PPU SAIL CUDA PLA fast path (VLLM_PPU_USE_PLA); see sail_cuda_pla.py
+    # for the gating conditions. The CUDA kernel requires a float32 ssm
+    # state pool, int32 state indices and K == V == 128.
+    #
+    # A single branch routes both decode modes to PLA:
+    # - Non-spec decode (1D indices, num_accepted_tokens is None): uses the
+    #   fast decode path (T=1) with direct state write-back
+    #   (disable_state_update=False).
+    # - Spec decode / MTP (2D indices, num_accepted_tokens is a tensor):
+    #   uses the MTP_VERIFY path with per-timestep state writes to the 2D
+    #   ssm_state_indices slots and disable_state_update=True to skip the
+    #   redundant final write-back (per-timestep writes already cover all
+    #   slots, matching the Triton kernel's INPLACE_FINAL_STATE behavior).
+    # Unsatisfied calls fall back to Triton.
+    cuda_k_last = get_sail_cuda_pla_k_last()
+    is_spec = num_accepted_tokens is not None
+    if (
+        cuda_k_last is not None
+        and inplace_final_state
+        and initial_state is not None
+        and initial_state.dtype == torch.float32
+        and ssm_state_indices is not None
+        and ssm_state_indices.dtype == torch.int32
+        and (not is_spec or (ssm_state_indices.ndim == 2 and num_accepted_tokens.dtype == torch.int32))
+        and (cu_seqlens is None or cu_seqlens.dtype == torch.int32)
+        and N > 0
+        and K == 128
+        and V == 128
+    ):
+        o_cuda = cuda_k_last(
+            A_log,
+            a.contiguous(),
+            dt_bias,
+            beta,
+            threshold,
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            b.contiguous(),
+            initial_state,
+            ssm_state_indices,
+            scale,
+            use_qk_l2norm_in_kernel,
+            cu_seqlens,
+            is_kda,
+            is_spec,  # disable_state_update: True for spec decode (per-timestep
+                       # writes to 2D slots already cover all state updates; skip
+                       # redundant final write-back), False for non-spec decode
+                       # (fast decode path writes state directly).
+            None,  # intermediate_states_buffer (vLLM uses main state pool)
+            None,  # intermediate_state_indices
+            num_accepted_tokens,  # cache_steps_or_num_accept: None for non-spec
+                                   # (no accepted tokens), tensor for spec decode
+            None,  # retrieve_parent_token (vLLM does not use eagle tree)
+            None,  # lower_bound (KDA-only)
+            False,  # is_sglang: vLLM reserves slot 0 (NULL_BLOCK_ID), unlike
+                   # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
+        )
+        return o_cuda, initial_state
 
     o = q.new_empty(NK, *v.shape)
     if inplace_final_state:

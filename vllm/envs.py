@@ -303,7 +303,7 @@ if TYPE_CHECKING:
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
-    VLLM_PPU_FUSED_GDN_DECODE: bool = True
+    VLLM_PPU_USE_PLA: bool = True
     VLLM_PPU_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_PPU_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_PPU_ENABLE_MOE_MARLIN: bool = False
@@ -2096,9 +2096,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "triton",
         ],
     ),
-    # Use fused GDN kernel like SGL
-    "VLLM_PPU_FUSED_GDN_DECODE": lambda: (
-        os.getenv("VLLM_PPU_FUSED_GDN_DECODE", "True").strip().lower() in ("true", "1")
+    # Use PPU SAIL CUDA PLA kernels (k_last / k_last_packed) for GDN decode
+    # instead of the community Triton kernels. Mirrors SGLang's
+    # SGLANG_SAIL_PLA_CUDA. Only effective on PPU with the `pla` package
+    # installed and a float32 GDN ssm state cache; otherwise the Triton
+    # kernels are used as fallback.
+    "VLLM_PPU_USE_PLA": lambda: (
+        os.getenv("VLLM_PPU_USE_PLA", "True").strip().lower()
+        in ("true", "1")
     ),
     # Disable MoE wna16 cuda kernel on PPU
     "VLLM_PPU_DISABLE_MOE_WNA16_CUDA": lambda: (
