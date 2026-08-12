@@ -30,6 +30,7 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -60,6 +61,32 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+def _setup_fused_rmsnorm_on_linear(
+    linear: nn.Module,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> bool:
+    """Set fused RMSNorm context on a linear layer's QuantFP8 op.
+
+    Traverses linear → quant_method → fp8_linear → quant_fp8 to find
+    and configure the QuantFP8 instance for fused operation.
+
+    Returns True if the context was set successfully.
+    """
+    quant_method = getattr(linear, "quant_method", None)
+    if quant_method is None:
+        return False
+    fp8_linear = getattr(quant_method, "fp8_linear", None)
+    if fp8_linear is None:
+        return False
+    quant_fp8 = getattr(fp8_linear, "quant_fp8", None)
+    if quant_fp8 is None:
+        return False
+    quant_fp8.set_fused_rmsnorm(residual, weight, epsilon)
+    return True
 
 
 class Qwen3Attention(nn.Module):
@@ -229,19 +256,62 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Fused RMSNorm+quant is only beneficial when we have a previous
+        # residual (i.e., not the first layer).
+        use_fused = (
+            envs.VLLM_PPU_FUSED_RMSNORM_QUANT and residual is not None
+        )
+
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        elif not use_fused:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual
+            )
+
+        if use_fused:
+            setup_ok = _setup_fused_rmsnorm_on_linear(
+                self.self_attn.qkv_proj,
+                residual,
+                self.input_layernorm.weight.data,
+                self.input_layernorm.variance_epsilon,
+            )
+            if not setup_ok:
+                # The linear does not support fused quant context
+                # (e.g. INT8 quant, unquantized). The skipped
+                # input_layernorm must be executed as fallback.
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual
+                )
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if use_fused:
+            setup_ok = _setup_fused_rmsnorm_on_linear(
+                self.mlp.gate_up_proj,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+            if not setup_ok:
+                # The linear does not support fused quant context
+                # (e.g. INT8 quant, unquantized). The skipped
+                # post_attention_layernorm must be executed as
+                # fallback to update residual and normalize.
+                hidden_states, residual = (
+                    self.post_attention_layernorm(hidden_states, residual)
+                )
+        else:
+            hidden_states, residual = (
+                self.post_attention_layernorm(hidden_states, residual)
+            )
+
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

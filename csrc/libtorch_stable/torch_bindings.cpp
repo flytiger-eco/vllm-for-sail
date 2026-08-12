@@ -14,8 +14,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
+      "scale_ue8m0, bool dummy_is_scale_transposed, "
+      "bool dummy_is_tma_aligned "
       ") -> ()");
+  // PPU-optimized variant with bf16x2 + e4m3x2 PTX instructions.
+  ops.def(
+      "per_token_group_fp8_quant_ppu_opt("
+      "    Tensor input, Tensor! output_q, Tensor! output_s,"
+      "    int group_size, float eps, float fp8_min, float fp8_max,"
+      "    bool scale_ue8m0, bool dummy_is_scale_transposed,"
+      "    bool dummy_is_tma_aligned) -> ()");
   // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
   // TMA-aligned scales for DeepGEMM.
   ops.def(
@@ -715,7 +723,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
 
   // Per-token group quantization
-  ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
+  ops.impl("per_token_group_fp8_quant",
+           TORCH_BOX(&per_token_group_quant_fp8));
+  ops.impl("per_token_group_fp8_quant_ppu_opt",
+           TORCH_BOX(&per_token_group_quant_fp8_ppu_opt));
   ops.impl("per_token_group_fp8_quant_packed",
            TORCH_BOX(&per_token_group_quant_8bit_packed));
   ops.impl("per_token_group_quant_int8",
