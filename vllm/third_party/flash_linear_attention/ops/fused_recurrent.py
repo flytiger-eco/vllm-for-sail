@@ -13,6 +13,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .op import exp, log
+from .sail_cuda_pla import get_sail_cuda_pla_k_last_packed
 
 
 @triton.heuristics(
@@ -453,6 +454,40 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     # CUDA limits grid Y/Z dimensions to 65535.
     split_batch_head_grid = B * HV > 65535
     grid = (NV, HV, B) if split_batch_head_grid else (NV, B * HV)
+
+    # PPU SAIL CUDA PLA fast path (VLLM_PPU_USE_PLA); see sail_cuda_pla.py
+    # for the gating conditions. The packed CUDA kernel requires a float32
+    # ssm state pool, int32 state indices and K == V == 128; unsatisfied
+    # calls fall back to Triton.
+    cuda_k_last_packed = get_sail_cuda_pla_k_last_packed()
+    if (
+        cuda_k_last_packed is not None
+        and initial_state.dtype == torch.float32
+        and ssm_state_indices.dtype == torch.int32
+        and B > 0
+        and K == 128
+        and V == 128
+    ):
+        out = cuda_k_last_packed(
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            1.0,  # softplus_beta, matching the Triton kernel
+            20.0,  # softplus_threshold, matching SOFTPLUS_THRESHOLD
+            scale,
+            initial_state,
+            ssm_state_indices,
+            out,
+            use_qk_l2norm_in_kernel,
+            torch.arange(B + 1, device=a.device, dtype=torch.int32),
+            False,  # is_kda
+            False,  # is_sglang: vLLM reserves slot 0 (NULL_BLOCK_ID), unlike
+                   # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
+        )
+        return out, initial_state
+
     fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,
         a=a,
@@ -623,289 +658,4 @@ def fused_recurrent_gated_delta_rule(
         num_accepted_tokens,
         use_qk_l2norm_in_kernel,
     )
-    return o, final_state
-
-
-# =============================================================================
-# Fused Sigmoid Gating + Delta Rule Kernel (decode-optimized)
-# =============================================================================
-# Ported from SGLang's fused_sigmoid_gating_delta_rule_update_kernel.
-# Key differences from fused_recurrent_gated_delta_rule_fwd_kernel:
-# - Grid: (NK, N*H) with inner loops over GVA heads and V-tiles
-# - Fuses sigmoid gating computation (A_log, a, dt_bias -> g) into kernel
-# - Optimized for decode (T=1)
-
-
-@triton.heuristics(
-    {
-        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
-        "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-    }
-)
-@triton.jit(do_not_specialize=["N", "T"])
-def fused_recurrent_gated_delta_rule_decode_kernel(
-    A_log,
-    a,
-    b,
-    dt_bias,
-    q,
-    k,
-    v,
-    o,
-    h0,
-    ht,
-    cu_seqlens,
-    ssm_state_indices,
-    num_accepted_tokens,
-    scale,
-    softplus_beta,
-    softplus_threshold,
-    N: tl.int64,
-    T: tl.int64,
-    B: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    stride_init_state_token: tl.constexpr,
-    stride_final_state_token: tl.constexpr,
-    stride_indices_seq: tl.constexpr,
-    stride_indices_tok: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,
-    INPLACE_FINAL_STATE: tl.constexpr,
-    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    IS_CONTINUOUS_BATCHING: tl.constexpr,
-    IS_SPEC_DECODING: tl.constexpr,
-):
-    """
-    Fused kernel combining sigmoid gating with recurrent delta rule update.
-    Optimized for decode (T=1). State layout: [HV, V, K].
-    Grid: (NK, N * H) - loops over GVA heads and V-tiles internally.
-    """
-    i_k, i_nh = tl.program_id(0), tl.program_id(1)
-    i_n, i_h = i_nh // H, i_nh % H
-    group_size = HV // H
-    i_hv = i_h * group_size
-    v_tiles = triton.cdiv(V, BV)
-
-    if IS_VARLEN:
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int64),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-        )
-        all = T
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        all = B * T
-
-    if T == 0:
-        return
-    tl.device_assert(T == 1)
-
-    o_k = i_k * BK + tl.arange(0, BK)
-    o_v = tl.arange(0, BV)
-    mask_k = o_k < K
-    mask_v = o_v < V
-    mask_h = mask_v[:, None] & mask_k[None, :]
-
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
-    b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
-
-    if USE_QK_L2NORM_IN_KERNEL:
-        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
-    b_q = b_q * scale
-
-    # State index for continuous batching
-    if IS_CONTINUOUS_BATCHING:
-        state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
-        if state_idx < 0:
-            return
-
-    # Initial state pointer (layout: [HV, V, K])
-    if USE_INITIAL_STATE:
-        if IS_CONTINUOUS_BATCHING:
-            p_h = h0 + state_idx * stride_init_state_token
-        else:
-            p_h = h0 + bos * HV * V * K
-        p_h = p_h + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-
-    # Final state pointer when not in-place
-    if not INPLACE_FINAL_STATE:
-        if IS_CONTINUOUS_BATCHING:
-            p_ht = ht + state_idx * stride_final_state_token
-        else:
-            p_ht = ht + bos * stride_final_state_token
-        p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-
-    # Per-token and per-head pointers
-    p_A_log = A_log + i_hv
-    p_dt_bias = dt_bias + i_hv
-    p_b = b + bos * HV + i_hv
-    p_a = a + bos * HV + i_hv
-    p_v = v + (bos * HV + i_hv) * V + o_v
-    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
-    for _ in tl.range(0, group_size, loop_unroll_factor=2):
-        # Sigmoid beta
-        b_b = tl.load(p_b).to(tl.float32)
-        b_beta = b_b.sigmoid()
-
-        # Fused gating: g = -exp(A_log) * softplus(a + dt_bias)
-        b_A_log = tl.load(p_A_log).to(tl.float32)
-        b_a = tl.load(p_a).to(tl.float32)
-        b_dt_bias = tl.load(p_dt_bias).to(tl.float32)
-        x = b_a + b_dt_bias
-        beta_x = softplus_beta * x
-        softplus_x = tl.where(
-            beta_x <= softplus_threshold,
-            (1.0 / softplus_beta) * tl.log(1.0 + tl.exp(beta_x)),
-            x,
-        )
-        b_g = -tl.exp(b_A_log) * softplus_x
-
-        for _ in tl.range(0, v_tiles, loop_unroll_factor=4):
-            b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-
-            if USE_INITIAL_STATE:
-                b_h = tl.load(p_h, mask=mask_h, other=0).to(tl.float32)
-            else:
-                b_h = tl.zeros([BV, BK], dtype=tl.float32)
-
-            # [BV, BK]
-            b_h *= tl.exp(b_g)
-            # [BV]
-            b_v -= tl.sum(b_h * b_k[None, :], 1)
-            b_v *= b_beta
-            # [BV, BK]
-            b_h = tl.fma(b_v[:, None], b_k[None, :], b_h)
-            # [BV]
-            b_o = tl.sum(b_h * b_q[None, :], 1)
-            tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
-
-            # Store state
-            if INPLACE_FINAL_STATE:
-                if USE_INITIAL_STATE:
-                    tl.store(
-                        p_h,
-                        b_h.to(p_h.dtype.element_ty),
-                        mask=mask_h,
-                    )
-                    p_h += BV * K
-            else:
-                tl.store(
-                    p_ht,
-                    b_h.to(p_ht.dtype.element_ty),
-                    mask=mask_h,
-                )
-                p_ht += BV * K
-                if USE_INITIAL_STATE:
-                    p_h += BV * K
-
-            p_v += BV
-            p_o += BV
-
-        # Advance to next GVA head
-        p_b += 1
-        p_A_log += 1
-        p_a += 1
-        p_dt_bias += 1
-
-
-def fused_recurrent_gated_delta_rule_decode(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    A_log: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    dt_bias: torch.Tensor,
-    scale: float | None,
-    initial_state: torch.Tensor,
-    inplace_final_state: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
-    ssm_state_indices: torch.Tensor | None = None,
-    num_accepted_tokens: torch.Tensor | None = None,
-    use_qk_l2norm_in_kernel: bool = False,
-    softplus_beta: float = 1.0,
-    softplus_threshold: float = 20.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Note(kai): this kernel do not support spec decoding
-
-    B, T, H, K, V = *k.shape, v.shape[-1]
-
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
-
-    HV = v.shape[2]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
-    NK = triton.cdiv(K, BK)
-    assert NK == 1, "NK > 1 is not supported yet"
-    assert V % BV == 0, f"V ({V}) must be a multiple of BV ({BV})"
-    num_stages = 3
-    num_warps = 4
-
-    o = q.new_empty(NK, *v.shape)
-    if inplace_final_state:
-        final_state = initial_state
-    else:
-        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
-
-    stride_init_state_token = initial_state.stride(0)
-    stride_final_state_token = final_state.stride(0)
-
-    if ssm_state_indices is None:
-        stride_indices_seq, stride_indices_tok = 1, 1
-    elif ssm_state_indices.ndim == 1:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
-    else:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
-
-    grid = (NK, N * H)
-    fused_recurrent_gated_delta_rule_decode_kernel[grid](
-        A_log=A_log,
-        a=a,
-        b=b,
-        dt_bias=dt_bias,
-        q=q,
-        k=k,
-        v=v,
-        o=o,
-        h0=initial_state,
-        ht=final_state,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        num_accepted_tokens=num_accepted_tokens,
-        scale=scale,
-        softplus_beta=softplus_beta,
-        softplus_threshold=softplus_threshold,
-        N=N,
-        T=T,
-        B=B,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
-        stride_indices_tok=stride_indices_tok,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        INPLACE_FINAL_STATE=inplace_final_state,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-    o = o.squeeze(0)
     return o, final_state
