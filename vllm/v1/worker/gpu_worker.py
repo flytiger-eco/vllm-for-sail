@@ -422,11 +422,13 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        # NOTE(PPU): PPU torch raises the CachingAllocator minimum for
+        # max_split_size_mb from 20 to 32. Upstream PyTorch still allows 20.
+        max_split = 32 if current_platform.is_ppu() else 20
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._scoped_allocator_max_split(max_split_size_mb=max_split),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
