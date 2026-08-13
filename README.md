@@ -3,25 +3,18 @@
 vLLM-for-SAIL Inference Engine
 </h3>
 
-
-<p align="center">
-<b>English</b> | <a href="./README_zh.md"><b>中文</b></a>
-</p>
-
 ---
 *Latest News* 🔥
 
-- [2026/08] vLLM-for-SAIL v0.25.0 has been officially released! You can start using vLLM-for-SAIL via the User Guide.
+- [2026/07] vLLM-for-SAIL v0.23.0 has been officially released! You can start using vLLM-for-SAIL via the [User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=129).
 
-- [2026/07] vLLM-for-SAIL v0.23.0 has been officially released! You can start using vLLM-for-SAIL via the User Guide.
-
-- [2026/06] vLLM-for-SAIL v0.20.1 has been officially released! You can start using vLLM-for-SAIL via the User Guide.
+- [2026/06] vLLM-for-SAIL v0.20.1 has been officially released! You can start using vLLM-for-SAIL via the [User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=128).
 
 ---
 
 ## Overview
 
-vLLM-for-SAIL is a customized and optimized version of the vLLM inference engine, deeply tailored for T-Head's self-developed AI accelerator chip (PPU). This engine builds upon the core scheduling mechanism and high-performance operators of the vLLM community, while deeply integrating PPU-specific high-performance operators (such as efficient GEMM quantization kernels, DeepEP, and DeepGEMM) to maximize the hardware advantages of PPU based on its architectural characteristics.
+vLLM-for-SAIL is a customized and optimized version of the [vLLM inference engine](https://github.com/vllm-project/vllm), deeply tailored for T-Head's self-developed AI accelerator chip (PPU). This engine builds upon the core scheduling mechanism and high-performance operators of the vLLM community, while deeply integrating PPU-specific high-performance operators (such as efficient GEMM quantization kernels, DeepEP, and DeepGEMM) to maximize the hardware advantages of PPU based on its architectural characteristics.
 
 ## Prerequisites
 
@@ -30,7 +23,35 @@ vLLM-for-SAIL is a customized and optimized version of the vLLM inference engine
 
 ## Usage Guide
 
-Please refer to the vLLM-for-SAIL User Guide
+### Build from Source
+
+If you need to build and install from source, please make sure to build inside the [vLLM-for-SAIL Docker image](https://www.flytiger-eco.com/download?businessType=DOCKER).
+
+```bash
+# 1. Download vLLM 0.23.0
+git clone -b v0.23.0 https://github.com/flytiger-eco/vllm-for-sail
+
+# 2. Build vLLM (the machine needs network access to GitHub)
+
+# 2.1 Set environment variables
+export HGGC_ENABLE_COMPRESS=1
+export NVCC_APPEND_FLAGS="-Xfatbin -compress-all"
+export VLLM_REQUIRE_RUST_FRONTEND=0
+
+# 2.2 Install build dependencies
+cd vllm-for-sail
+pip install -r requirements/build/ppu.txt
+pip install -r requirements/ppu.txt
+pip install numpy==1.26.0
+
+# 2.3 Build
+python setup.py bdist_wheel
+
+# 3. Install vLLM
+pip install dist/vllm*.whl
+```
+
+To use vLLM-for-SAIL directly via Docker or install it from PyPI, please refer to the [vLLM-for-SAIL User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=129).
 
 ### Environment Verification
 
@@ -67,7 +88,7 @@ curl -X POST http://0.0.0.0:8999/v1/chat/completions \
   }'
 ```
 ## More Information
-Please refer to the vLLM-for-SAIL User Guide for more information.
+Please refer to the [vLLM-for-SAIL User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=129) for more information.
 
 
 ## License
