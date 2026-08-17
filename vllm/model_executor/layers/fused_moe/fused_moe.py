@@ -1597,7 +1597,6 @@ def fused_experts_op(
             w2,
             topk_weights,
             topk_ids,
-            False,
             activation,
             apply_router_weight_on_input,
             use_fp8_w8a8,
