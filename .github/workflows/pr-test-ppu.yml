@@ -1,0 +1,176 @@
+# GitHub Actions port of the Aone CI pipeline `.aoneci/test-area-ppu-lora.yaml`
+# (which itself is generated from `.buildkite/test_areas/lora.yaml` +
+# `aone_ci/ppu_extras/lora.yaml` by `aone_ci.pipeline_generator`).
+#
+# Layout mirrors sglang-for-sail's `.github/workflows/pr-test-ppu.yml`:
+#   check-changes  — diff guard on PPU-relevant paths (Aone `diff-guard` equivalent)
+#   ppu-lora-test  — docker run on the self-hosted PPU runner, install deps +
+#                    run pytest via `scripts/ci/ppu/*.sh`
+#   ppu-test-finish — single aggregation point for branch protection
+#
+# Fully self-contained: no `aone_ci/` dependency. The test selection (pytest
+# files/`--ignore`s, migrated from `aone_ci/ppu_extras/lora.yaml`) lives in
+# `scripts/ci/ppu/run_lora_tests.sh`; models come from the /nas_aisw volume
+# (mounted below, sglang-style).
+name: LoRA Test (PPU)
+
+on:
+  push:
+    branches: [feat/gha-ppu-lora-test]
+  pull_request:
+    branches: [feat/gha-ppu-lora-test]
+  workflow_dispatch:
+    inputs:
+      run_all_tests:
+        description: "Run even when no relevant file changed (bypass diff guard)"
+        required: false
+        type: boolean
+        default: false
+      test_scope:
+        description: "quick = only tests/lora/test_utils.py (fast path validation)"
+        required: false
+        type: choice
+        options: [full, quick]
+        default: full
+      test_mode:
+        description: "single = 4-shard full set, multi = TP=2 distributed"
+        required: false
+        type: choice
+        options: [all, single, multi]
+        default: all
+
+concurrency:
+  group: pr-test-ppu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  # SAIL SDK v2.1.1 image with vLLM 0.23.0 preinstalled (PPU port baseline)
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+
+jobs:
+  # ==================== Check Changes (diff guard) ==================== #
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_exist: ${{ steps.filter.outputs.ppu_code == 'true'
+        || steps.run-mode.outputs.run_all_tests == 'true' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine run mode
+        id: run-mode
+        env:
+          RUN_ALL_TESTS: ${{ inputs.run_all_tests }}
+        run: |
+          if [[ "${RUN_ALL_TESTS}" == "true" ]]; then
+            echo "run_all_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_all_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        if: steps.run-mode.outputs.run_all_tests != 'true'
+        with:
+          filters: |
+            ppu_code:
+              - ".github/workflows/pr-test-ppu.yml"
+              - "scripts/ci/ppu/**"
+              - "tests/lora/**"
+              - "vllm/lora/**"
+
+  # ==================== PPU LoRA Test (4-PPU runner) ==================== #
+  ppu-lora-test:
+    needs: [check-changes]
+    if: needs.check-changes.outputs.changes_exist == 'true'
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 300
+    steps:
+      # Prior Docker runs leave root-owned files in the workspace that break
+      # the next checkout — clean them with the same image first (sglang lesson).
+      - name: Clean workspace (root-owned files from prior Docker runs)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run PPU LoRA tests
+        timeout-minutes: 290
+        env:
+          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          # push/PR 事件没有 inputs，走右侧默认值；bring-up 期默认 quick 先验证
+          # 通路，full 在 NAS 模型/LoRA adapter 齐备后改回 'full'
+          TEST_SCOPE: ${{ inputs.test_scope || 'quick' }}
+          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+        run: |
+          docker run --rm \
+            --privileged \
+            --network host \
+            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
+            --device=/dev/alixpu_ctl \
+            --device=/dev/alixpu \
+            --ipc=host \
+            --init \
+            --shm-size=8g \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /nas_aisw:/nas_aisw \
+            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
+            -e PPU_ARTIFACTORY_USER \
+            -e PPU_ARTIFACTORY_PASSWORD \
+            -e TEST_SCOPE \
+            -e TEST_MODE \
+            -e PPU_DEVICE_LABEL=OAM-810E \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "
+              cd /workspace && \
+              bash scripts/ci/ppu/ppu_install_dependency.sh && \
+              bash scripts/ci/ppu/run_lora_tests.sh
+            "
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-lora-test-results
+          path: |
+            test-results/
+          if-no-files-found: warn
+
+  # ==================== Finish (aggregation point) ==================== #
+  ppu-test-finish:
+    needs: [check-changes, ppu-lora-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              sep = ','
+              print(f'Failed jobs: {sep.join(failed)}')
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
