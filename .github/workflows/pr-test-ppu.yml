@@ -56,27 +56,21 @@ jobs:
   check-changes:
     runs-on: ubuntu-latest
     outputs:
-      changes_exist: ${{ steps.filter.outputs.ppu_code == 'true'
-        || steps.run-mode.outputs.run_all_tests == 'true' }}
+      changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Determine run mode
-        id: run-mode
-        env:
-          RUN_ALL_TESTS: ${{ inputs.run_all_tests }}
-        run: |
-          if [[ "${RUN_ALL_TESTS}" == "true" ]]; then
-            echo "run_all_tests=true" >> $GITHUB_OUTPUT
-          else
-            echo "run_all_tests=false" >> $GITHUB_OUTPUT
-          fi
-
+      # Path filtering only makes sense (and only works reliably) on
+      # pull_request events, where dorny/paths-filter uses the GitHub API and
+      # needs no git history. On push it falls back to a local git diff against
+      # the default branch (v0.20.1), which breaks for branches based on
+      # v0.23.0: no merge-base exists within shallow history and the deepen
+      # retry hits "fatal: shallow file has changed since we read it" (128).
       - name: Detect file changes
         id: filter
         uses: dorny/paths-filter@v3
-        if: steps.run-mode.outputs.run_all_tests != 'true'
+        if: github.event_name == 'pull_request'
         with:
           filters: |
             ppu_code:
@@ -84,6 +78,24 @@ jobs:
               - "scripts/ci/ppu/**"
               - "tests/lora/**"
               - "vllm/lora/**"
+
+      - name: Decide whether to run tests
+        id: decide
+        env:
+          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+          RUN_ALL_TESTS: ${{ inputs.run_all_tests }}
+        run: |
+          if [[ "${RUN_ALL_TESTS}" == "true" ]]; then
+            # manual dispatch: explicit bypass of the diff guard
+            echo "changes_exist=true" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # PR: honor the path filter result
+            echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
+          else
+            # push to the dedicated test branch / plain manual dispatch:
+            # always run — this branch exists to exercise the PPU pipeline
+            echo "changes_exist=true" >> $GITHUB_OUTPUT
+          fi
 
   # ==================== PPU LoRA Test (4-PPU runner) ==================== #
   ppu-lora-test:
