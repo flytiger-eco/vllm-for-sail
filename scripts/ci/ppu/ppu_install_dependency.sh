@@ -125,13 +125,41 @@ if [ -d "${SP_VLLM_DIR}.libs" ]; then
     echo "[cext] copied vllm.libs/"
     cext_copied=1
 fi
+# ------------------------------------------------------------------------------
+# [cext] vllm_flash_attn 目录：镜像版整体借用（PPU 适配）
+# ------------------------------------------------------------------------------
+# PPU 镜像未编译 CUDA 的 _vllm_fa2_C/_vllm_fa3_C 扩展（PPU 的 FA 走独立 pip
+# 包 flash_attn/flash_attn_3），而源码树上游版 vllm/vllm_flash_attn/__init__.py
+# 在这两个扩展都缺失时直接 raise ImportError；fa_utils.py 的 is_ppu() 分支
+# 顶层 import vllm.vllm_flash_attn → 测试收集即挂。镜像 site-packages 的同名
+# 目录若是 PPU 适配版（.py 探针逻辑不同），整目录借用（含 .py），保证与镜像
+# 行为一致。注意：借用会覆盖分支对该目录的改动——bring-up 期可接受（分支改动
+# 集中在 vllm/lora），切 wheel 构建流程后此段可删。
+FA_DIR_SRC="${SP_VLLM_DIR}/vllm_flash_attn"
+if [ ! -d "${FA_DIR_SRC}" ]; then
+    echo "[cext] ERROR: no vllm_flash_attn dir in image vllm package" >&2
+    exit 1
+fi
+echo "[cext] image vllm_flash_attn contents:"
+ls -l "${FA_DIR_SRC}"
+# .so 已由上面的 find 循环同步进源码树，此 diff 实际反映 .py 层面的差异
+if ! diff -rq --exclude=__pycache__ "${FA_DIR_SRC}" "${REPO_ROOT}/vllm/vllm_flash_attn" >/dev/null 2>&1; then
+    echo "[cext] image version differs from source tree — borrowing image copy:"
+    diff -rq --exclude=__pycache__ "${FA_DIR_SRC}" "${REPO_ROOT}/vllm/vllm_flash_attn" || true
+    cp -rf "${FA_DIR_SRC}/." "${REPO_ROOT}/vllm/vllm_flash_attn/"
+    rm -rf "${REPO_ROOT}/vllm/vllm_flash_attn/__pycache__"
+    echo "[cext] copied vllm/vllm_flash_attn/ (image version)"
+else
+    echo "[cext] image vllm_flash_attn identical to source tree — nothing to borrow;"
+    echo "[cext] upstream probe will raise without _vllm_fa2_C/_vllm_fa3_C (see verify step)"
+fi
 if [ "${cext_copied}" -eq 0 ]; then
     echo "[cext] ERROR: no compiled extensions found in ${SP_VLLM_DIR}" >&2
     exit 1
 fi
 # 对症验证：conftest 崩的是 vllm._C（cwd=REPO_ROOT，import 走源码树）
 python3 -c "import vllm._C as c; print('[cext] vllm._C OK from source tree:', c.__file__)"
-# 对症验证：本次挂的是 vllm.vllm_flash_attn（FA 扩展在子目录，顶层 glob 曾漏拷）
+# 对症验证：vllm_flash_attn 借用镜像 PPU 适配版后 import 不应再 raise
 python3 -c "import vllm.vllm_flash_attn as fa; print('[cext] vllm.vllm_flash_attn OK: FA2=%s FA3=%s' % (fa.FA2_AVAILABLE, fa.FA3_AVAILABLE))"
 
 echo "========== [verify] final stack =========="
