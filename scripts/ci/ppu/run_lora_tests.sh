@@ -68,8 +68,12 @@ LORA_SINGLE_ARGS=(
 
 # multi = 上游 "LoRA TP (Distributed)" job 的 PPU 版（当前仅 1 个文件，
 # TP=2；其余 TP 文件等模型 stage 到 /nas_aisw 后再放开）
+# -k 暂排除两个 TP 用例：PPU 上引擎初始化失败——TP worker rank1 在
+# 95.51 GiB free 时 20 MiB 分配报 CUDA OOM（虚假 OOM，平台问题，跟踪中）；
+# 平台修复后删除下方 -k 即恢复
 LORA_MULTI_ARGS=(
   tests/lora/test_qwen3_with_multi_loras.py
+  -k "not test_multi_loras_with_tp_sync and not test_multiple_lora_requests"
 )
 
 # ------------------------------------------------------------------------------
@@ -125,7 +129,13 @@ MODEL_MAP = {
     # base model：single/multi 主力（conftest、test_lora_functions、
     # test_qwen3_unembed、test_worker、test_llm_with_multi_loras）
     "Qwen/Qwen3-0.6B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
-    # TODO: 按 NAS 实际结构补充 lora adapter，例如：
+    # lora adapter（test_load_inplace_* 两用例）：假设已按下方结构 stage 到
+    # NAS；路径不存在时 [setup] 会打 MISS，相关用例失败且日志可见原因
+    "Jackmin108/Qwen3-0.6B-Meow-LoRA":
+        "/nas_aisw/datasets/checkpoints/LLM/lora/Jackmin108/Qwen3-0.6B-Meow-LoRA",
+    "Jackmin108/Qwen3-0.6B-Woof-LoRA":
+        "/nas_aisw/datasets/checkpoints/LLM/lora/Jackmin108/Qwen3-0.6B-Woof-LoRA",
+    # TODO: 按 NAS 实际结构补充其余 lora adapter，例如：
     # "charent/self_cognition_Alice":
     #     "/nas_aisw/datasets/checkpoints/LLM/lora/charent/self_cognition_Alice",
     # "charent/self_cognition_Bob":
