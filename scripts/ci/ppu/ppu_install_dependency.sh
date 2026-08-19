@@ -102,12 +102,23 @@ if [ ! -d "${SP_VLLM_DIR}" ]; then
     exit 1
 fi
 cext_copied=0
-for f in "${SP_VLLM_DIR}"/*.so "${SP_VLLM_DIR}"/_version.py; do
-    [ -f "$f" ] || continue
-    cp -f "$f" "${REPO_ROOT}/vllm/"
-    echo "[cext] copied $(basename "$f")"
+# 递归复制镜像 vllm 包内所有编译产物并保持相对路径：顶层 _C/_moe_C/... 之外，
+# vllm_flash_attn/ 子目录里还有 _vllm_fa2_C/_vllm_fa3_C（FA2/FA3 可用性探针，
+# vllm/vllm_flash_attn/__init__.py 缺少它们会直接 raise ImportError）。
+# 用 find 全量复制而非按文件名枚举：镜像增减扩展时本脚本无需同步改动。
+while IFS= read -r f; do
+    rel="${f#"${SP_VLLM_DIR}"/}"
+    dest="${REPO_ROOT}/vllm/${rel}"
+    mkdir -p "$(dirname "${dest}")"
+    cp -f "$f" "${dest}"
+    echo "[cext] copied vllm/${rel}"
     cext_copied=1
-done
+done < <(find "${SP_VLLM_DIR}" -maxdepth 3 -type f -name '*.so')
+if [ -f "${SP_VLLM_DIR}/_version.py" ]; then
+    cp -f "${SP_VLLM_DIR}/_version.py" "${REPO_ROOT}/vllm/"
+    echo "[cext] copied vllm/_version.py"
+    cext_copied=1
+fi
 # auditwheel 打包的 wheel 会把依赖库放 vllm.libs/，RPATH 指向 $ORIGIN/../vllm.libs
 if [ -d "${SP_VLLM_DIR}.libs" ]; then
     cp -rf "${SP_VLLM_DIR}.libs" "${REPO_ROOT}/"
@@ -118,8 +129,10 @@ if [ "${cext_copied}" -eq 0 ]; then
     echo "[cext] ERROR: no compiled extensions found in ${SP_VLLM_DIR}" >&2
     exit 1
 fi
-# 对症验证：conftest 崩的就是 vllm._C（cwd=REPO_ROOT，import 走源码树）
+# 对症验证：conftest 崩的是 vllm._C（cwd=REPO_ROOT，import 走源码树）
 python3 -c "import vllm._C as c; print('[cext] vllm._C OK from source tree:', c.__file__)"
+# 对症验证：本次挂的是 vllm.vllm_flash_attn（FA 扩展在子目录，顶层 glob 曾漏拷）
+python3 -c "import vllm.vllm_flash_attn as fa; print('[cext] vllm.vllm_flash_attn OK: FA2=%s FA3=%s' % (fa.FA2_AVAILABLE, fa.FA3_AVAILABLE))"
 
 echo "========== [verify] final stack =========="
 python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
