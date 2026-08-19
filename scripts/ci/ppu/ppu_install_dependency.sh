@@ -80,7 +80,50 @@ _ensure_pip_pkg "flash_attn" "2.7.4.post1" "--no-deps --force-reinstall"
 echo "========== [deps] pytest toolchain =========="
 ${PIP_INSTALL} pytest pytest-asyncio tblib pytest-shard pyyaml -i "${PPU_PIP_INDEX}"
 
+# ------------------------------------------------------------------------------
+# [cext] 源码树补齐编译产物：镜像预装 vllm 的 C 扩展 → REPO_ROOT/vllm
+# ------------------------------------------------------------------------------
+# pytest 以 REPO_ROOT 为 rootdir，tests 包（tests/__init__.py）使 REPO_ROOT 被
+# prepend 到 sys.path 最前 → import vllm 解析到源码树（纯 Python，无编译
+# 产物）而非 site-packages 里镜像的完整构建。vllm/platforms/ppu.py 继承
+# NvmlCudaPlatform，而 cuda.py 顶层 import vllm._C → conftest 一加载就
+# ModuleNotFoundError: No module named 'vllm._C'。
+# bring-up 期做法：把预装 wheel 的编译产物拷进源码树，形成“Python 层 =
+# 分支源码 + C 扩展 = 镜像构建”的混合形态。ABI 前提：分支未改 csrc/
+# Python 绑定接口（当前改动集中在 vllm/lora 纯 Python）。正式流程后续
+# 切换为 wheel 构建（对位 Aone .aoneci/build-wheel-ppu.yaml），届时未段可删。
+# 注：定位 site-packages 用 sysconfig 而非 import vllm —— cwd=REPO_ROOT 时
+# import vllm 走的就是源码树，拿到的是错误答案。
+echo "========== [cext] borrow compiled extensions from image vllm =========="
+SP_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+SP_VLLM_DIR="${SP_SITE}/vllm"
+if [ ! -d "${SP_VLLM_DIR}" ]; then
+    echo "[cext] ERROR: image vllm not found at ${SP_VLLM_DIR}" >&2
+    exit 1
+fi
+cext_copied=0
+for f in "${SP_VLLM_DIR}"/*.so "${SP_VLLM_DIR}"/_version.py; do
+    [ -f "$f" ] || continue
+    cp -f "$f" "${REPO_ROOT}/vllm/"
+    echo "[cext] copied $(basename "$f")"
+    cext_copied=1
+done
+# auditwheel 打包的 wheel 会把依赖库放 vllm.libs/，RPATH 指向 $ORIGIN/../vllm.libs
+if [ -d "${SP_VLLM_DIR}.libs" ]; then
+    cp -rf "${SP_VLLM_DIR}.libs" "${REPO_ROOT}/"
+    echo "[cext] copied vllm.libs/"
+    cext_copied=1
+fi
+if [ "${cext_copied}" -eq 0 ]; then
+    echo "[cext] ERROR: no compiled extensions found in ${SP_VLLM_DIR}" >&2
+    exit 1
+fi
+# 对症验证：conftest 崩的就是 vllm._C（cwd=REPO_ROOT，import 走源码树）
+python3 -c "import vllm._C as c; print('[cext] vllm._C OK from source tree:', c.__file__)"
+
 echo "========== [verify] final stack =========="
 python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
+# 混合形态下 __version__ 来自镜像 wheel 的 _version.py（0.23.0+v0.2.0.ppu2.1.1），
+# 不再是源码树的 'dev' fallback —— 这本身就是 [cext] 生效的信号
 python3 -c "import vllm; print('vllm', vllm.__version__)"
 echo "[deps] done"
