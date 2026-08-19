@@ -10,7 +10,6 @@
 #
 # 环境变量：
 #   TEST_MODE   all(默认) | single | multi   — 对应上游两个 lora 测试 job
-#   TEST_SCOPE  full(默认) | quick           — quick 仅跑 test_utils.py 验证通路
 #
 # 机制移植自 aone_ci/scripts/test_area_ppu_lora.sh（该文件 AUTO-GENERATED 不可
 # 手改，故在此复刻）：
@@ -25,7 +24,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${REPO_ROOT}"
 
 MODE="${TEST_MODE:-all}"
-SCOPE="${TEST_SCOPE:-full}"
 case "${MODE}" in
   single|multi|all) ;;
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
@@ -262,10 +260,7 @@ _run_step() {
   fi
 }
 
-if [ "${SCOPE}" = "quick" ]; then
-  # 通路验证：docker/设备/pip/vllm import/pytest/junit 全链路，不加载模型
-  _run_step "quick_test_utils" 1 "tests/lora/test_utils.py"
-elif [ "${MODE}" = "single" ]; then
+if [ "${MODE}" = "single" ]; then
   _run_step "lora_full" 4 "${LORA_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   _run_step "test_llm_with_multi_loras" 1 "${LORA_MULTI_ARGS[@]}"

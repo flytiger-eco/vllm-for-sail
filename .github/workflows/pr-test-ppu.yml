@@ -19,25 +19,8 @@ on:
     branches: [feat/gha-ppu-lora-test]
   pull_request:
     branches: [feat/gha-ppu-lora-test]
+  # No inputs: manual dispatch runs the same full LoRA suite as push/PR.
   workflow_dispatch:
-    inputs:
-      run_all_tests:
-        description: "Run even when no relevant file changed (bypass diff guard)"
-        required: false
-        type: boolean
-        default: false
-      test_scope:
-        description: "quick = only tests/lora/test_utils.py (fast path validation)"
-        required: false
-        type: choice
-        options: [full, quick]
-        default: full
-      test_mode:
-        description: "single = 4-shard full set, multi = TP=2 distributed"
-        required: false
-        type: choice
-        options: [all, single, multi]
-        default: all
 
 concurrency:
   group: pr-test-ppu-${{ github.ref }}
@@ -83,16 +66,12 @@ jobs:
         id: decide
         env:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
-          RUN_ALL_TESTS: ${{ inputs.run_all_tests }}
         run: |
-          if [[ "${RUN_ALL_TESTS}" == "true" ]]; then
-            # manual dispatch: explicit bypass of the diff guard
-            echo "changes_exist=true" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             # PR: honor the path filter result
             echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
           else
-            # push to the dedicated test branch / plain manual dispatch:
+            # push to the dedicated test branch / manual dispatch:
             # always run — this branch exists to exercise the PPU pipeline
             echo "changes_exist=true" >> $GITHUB_OUTPUT
           fi
@@ -121,10 +100,6 @@ jobs:
         env:
           PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
           PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
-          # push/PR 事件没有 inputs，走右侧默认值；bring-up 期默认 quick 先验证
-          # 通路，full 在 NAS 模型/LoRA adapter 齐备后改回 'full'
-          TEST_SCOPE: ${{ inputs.test_scope || 'quick' }}
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
         run: |
           docker run --rm \
             --privileged \
@@ -142,8 +117,6 @@ jobs:
             -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
             -e PPU_ARTIFACTORY_USER \
             -e PPU_ARTIFACTORY_PASSWORD \
-            -e TEST_SCOPE \
-            -e TEST_MODE \
             -e PPU_DEVICE_LABEL=OAM-810E \
             ${{ env.PPU_BASE_IMAGE }} \
             bash -c "
