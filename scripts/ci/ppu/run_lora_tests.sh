@@ -238,7 +238,10 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      [ "${rc}" -ne 0 ] && rc_total=1
+      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
+      # 表达式返回 1，若它是函数/分支的最后一条命令，函数返回码变成 1，
+      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
+      if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done
     echo "[step] ${label} aggregate rc=${rc_total}"
@@ -246,7 +249,7 @@ _run_step() {
       echo "----- ${label}-shard${shard}.log (tail) -----"
       tail -20 "${TMP_JUNIT}/${label}-shard${shard}.log" 2>/dev/null || echo "(no log)"
     done
-    [ "${rc_total}" -ne 0 ] && TOTAL_RC=1
+    if [ "${rc_total}" -ne 0 ]; then TOTAL_RC=1; fi
   else
     echo "========== [step] ${label} =========="
     local out_xml="${TMP_JUNIT}/${label}.xml"
@@ -255,7 +258,7 @@ _run_step() {
     local rc=$?
     set -e
     echo "[step] ${label} rc=${rc}"
-    [ "${rc}" -ne 0 ] && TOTAL_RC=1
+    if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
   fi
 }
 
