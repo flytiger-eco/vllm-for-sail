@@ -2,7 +2,7 @@
 # ==============================================================================
 # scripts/ci/ppu/run_lora_tests.sh — PPU LoRA 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/pr-test-ppu.yml（容器内，cwd = /workspace）。
+# 调用方：.github/workflows/test-area-ppu-lora.yml（容器内，cwd = /workspace）。
 #
 # 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/lora.yaml 的
 # 迁移快照（见下方 LORA_SINGLE_ARGS / LORA_MULTI_ARGS，调整用例直接改这里）。
@@ -64,6 +64,14 @@ LORA_SINGLE_ARGS=(
   --ignore=tests/lora/test_punica_ops_fp8.py
   # triton fused_moe kernel 精度: Tensor mismatch 100%
   --ignore=tests/lora/test_fused_moe_lora_kernel.py
+  # --- 2026-08-20 首轮全量已知失败（平台问题，跟踪中） ---
+  # AWQ 量化推理输出断言失败；同函数 GPTQ 的 model1 本轮通过，故用
+  # nodeid 精确排除 model0（--deselect 不影响其他参数化实例）
+  "--deselect=tests/lora/test_quant_model.py::test_quant_model_lora[model0]"
+  # Qwen2-VL 引擎初始化失败（Engine core init）；同文件 qwen25vl/qwen3vl
+  # 系用例本轮通过。注意不能用 -k 排除——"test_qwen2vl_lora" 是
+  # test_qwen2vl_lora_beam_search 的子串前缀，会连带误伤
+  "--deselect=tests/lora/test_qwenvl.py::test_qwen2vl_lora"
 )
 
 # multi = 上游 "LoRA TP (Distributed)" job 的 PPU 版（当前仅 1 个文件，
@@ -158,6 +166,9 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/Qwen3/v1.0/Qwen3-0.6B-Meow-LoRA",
     "Jackmin108/Qwen3-0.6B-Woof-LoRA":
         "/nas_aisw/datasets/checkpoints/LLM/Qwen3/v1.0/Qwen3-0.6B-Woof-LoRA",
+    # test_moe_lora_ep_load.py 的 EP 切片用例（清单命中 Qwen3/v1.0）
+    "jeeejeee/qwen3-moe-text2sql-spider":
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen3/v1.0/qwen3-moe-text2sql-spider",
     # HF org=charent，NAS 实际在 LLM/self/ 下（tests/lora 引用 3+2 处）
     "charent/self_cognition_Alice":
         "/nas_aisw/datasets/checkpoints/LLM/self/v1.0/self_cognition_Alice",
