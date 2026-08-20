@@ -1,0 +1,212 @@
+[
+  {
+    "id": 1574,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/cortexso/v1.6/llava-v1.6",
+    "data_size": 30,
+    "description": "modelscope https://www.modelscope.cn/models/cortexso/llava-v1.6",
+    "ms_name": "cortexso/llava-v1.6",
+    "object_name": "checkpoints/LLM/llava-v1.6/v1.6/llava-v1.6",
+    "name": "llava-v1.6"
+  },
+  {
+    "id": 1576,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/HuggingFaceTB/v1.7/SmolLM-1.7B",
+    "data_size": 24,
+    "description": "modelscope https://modelscope.cn/models/HuggingFaceTB/SmolLM-1.7B",
+    "ms_name": "HuggingFaceTB/SmolLM-1.7B",
+    "object_name": "checkpoints/LLM/SmolLM-1.7B/v1.7/SmolLM-1.7B",
+    "name": "SmolLM-1.7B"
+  },
+  {
+    "id": 1572,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/unsloth/v1.0/SmolLM-135M-Instruct",
+    "data_size": 1,
+    "description": "modelscope https://www.modelscope.cn/models/unsloth/SmolLM-135M-Instruct",
+    "ms_name": "unsloth/SmolLM-135M-Instruct",
+    "object_name": "checkpoints/LLM/SmolLM-135M-Instruct/v1.0/SmolLM-135M-Instruct",
+    "name": "SmolLM-135M-Instruct"
+  },
+  {
+    "id": 1577,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Qwen/v1.0/Qwen3-30B-A3B-Thinking-2507",
+    "data_size": 57,
+    "description": "modelscope https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Thinking-2507",
+    "ms_name": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+    "object_name": "checkpoints/LLM/Qwen3-30B-A3B-Thinking-2507/v1.0/Qwen3-30B-A3B-Thinking-2507",
+    "name": "Qwen3-30B-A3B-Thinking-2507"
+  },
+  {
+    "id": 1578,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Qwen/v1.0/Qwen3-4B-Instruct-2507-FP8",
+    "data_size": 5,
+    "description": "modelscope https://modelscope.cn/models/Qwen/Qwen3-4B-Instruct-2507-FP8",
+    "ms_name": "Qwen/Qwen3-4B-Instruct-2507-FP8",
+    "object_name": "checkpoints/LLM/Qwen3-4B-Instruct-2507-FP8/v1.0/Qwen3-4B-Instruct-2507-FP8",
+    "name": "Qwen3-4B-Instruct-2507-FP8"
+  },
+  {
+    "id": 1579,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Qwen/v1.0/Qwen3-VL-2B-Thinking",
+    "data_size": 4,
+    "description": "modelscope https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Thinking",
+    "ms_name": "Qwen/Qwen3-VL-2B-Thinking",
+    "object_name": "checkpoints/LLM/Qwen3-VL-2B-Thinking/v1.0/Qwen3-VL-2B-Thinking",
+    "name": "Qwen3-VL-2B-Thinking"
+  },
+  {
+    "id": 1580,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/AI-ModelScope/v3.1/Skywork-Reward-Llama-3.1-8B-v0.2",
+    "data_size": 14,
+    "description": "modelscope https://modelscope.cn/models/AI-ModelScope/Skywork-Reward-Llama-3.1-8B-v0.2",
+    "ms_name": "AI-ModelScope/Skywork-Reward-Llama-3.1-8B-v0.2",
+    "object_name": "checkpoints/LLM/Skywork-Reward-Llama-3.1-8B-v0.2/v3.1/Skywork-Reward-Llama-3.1-8B-v0.2",
+    "name": "Skywork-Reward-Llama-3.1-8B-v0.2"
+  },
+  {
+    "id": 238,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/DeepSeek/v2/DeepSeek-Coder-V2-Lite-Instruct",
+    "data_size": 30,
+    "description": "https://www.modelscope.cn/models/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+    "ms_name": "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+    "object_name": "checkpoints/LLM/DeepSeek-V3.1-Base/v3.1/DeepSeek-V3.1-Base",
+    "name": "DeepSeek-Coder-V2-Lite-Instruct"
+  },
+  {
+    "id": 436,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/deepseek/v3.1/DeepSeek-V3.1-Base",
+    "data_size": 644,
+    "description": "https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1-Base ",
+    "ms_name": "deepseek-ai/DeepSeek-V3.1-Base",
+    "object_name": "checkpoints/LLM/DeepSeek-V3.1-Base/v3.1/DeepSeek-V3.1-Base",
+    "name": "DeepSeek-V3.1-Base"
+  },
+  {
+    "id": 255,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/gemma/v1/gemma-2-27b-it",
+    "data_size": 51,
+    "description": "https://www.modelscope.cn/models/LLM-Research/gemma-2-27b-it  ",
+    "ms_name": "LLM-Research/gemma-2-27b-it",
+    "object_name": "checkpoints/LLM/gemma-2-27b-it/v1/gemma-2-27b-it",
+    "name": "gemma-2-27b-it"
+  },
+  {
+    "id": 431,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Llama/v3.1/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+    "data_size": 6,
+    "description": "https://www.modelscope.cn/models/LLM-Research/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+    "ms_name": "LLM-Research/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+    "object_name": "checkpoints/LLM/Meta-Llama-3.1-8B-Instruct-AWQ-INT4/v3.1/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+    "name": "Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
+  },
+  {
+    "id": 427,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/gpt/v1/gpt-oss-120b-BF16",
+    "data_size": 219,
+    "description": "https://www.modelscope.cn/models/unsloth/gpt-oss-120b-BF16   ",
+    "ms_name": "unsloth/gpt-oss-120b-BF16",
+    "object_name": "checkpoints/LLM/gpt-oss-120b-BF16/v1/gpt-oss-120b-BF16",
+    "name": "gpt-oss-120b-BF16"
+  },
+  {
+    "id": 283,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Llama/v3.1/Meta-Llama-3.1-70B-Instruct-FP8",
+    "data_size": 68,
+    "description": "https://www.modelscope.cn/models/neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8",
+    "ms_name": "neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8",
+    "object_name": "checkpoints/LLM/Meta-Llama-3.1-70B-Instruct-FP8/v3.1/Meta-Llama-3.1-70B-Instruct-FP8",
+    "name": "Meta-Llama-3.1-70B-Instruct-FP8"
+  },
+  {
+    "id": 287,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/Llama/v3.1/Meta-Llama-3.1-8B-Instruct-FP8",
+    "data_size": 9,
+    "description": " Llama v3.1 models for 8B params with FP8 ",
+    "ms_name": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+    "object_name": "checkpoints/LLM/Meta-Llama-3.1-8B-Instruct-FP8/v3.1/Meta-Llama-3.1-8B-Instruct-FP8",
+    "name": "Meta-Llama-3.1-8B-Instruct-FP8"
+  },
+  {
+    "id": 1581,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/nv-community/v3/DeepSeek-V3-0324-FP4",
+    "data_size": 395,
+    "description": "modelscope https://modelscope.cn/models/nv-community/DeepSeek-V3-0324-FP4",
+    "ms_name": "nv-community/DeepSeek-V3-0324-FP4",
+    "object_name": "checkpoints/LLM/DeepSeek-V3-0324-FP4/v3/DeepSeek-V3-0324-FP4",
+    "name": "DeepSeek-V3-0324-FP4"
+  },
+  {
+    "id": 1582,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/nv-community/v3/Qwen3-30B-A3B-FP4",
+    "data_size": 17,
+    "description": "modelscope https://modelscope.cn/models/nv-community/Qwen3-30B-A3B-FP4",
+    "ms_name": "nv-community/Qwen3-30B-A3B-FP4",
+    "object_name": "checkpoints/LLM/Qwen3-30B-A3B-FP4/v3/Qwen3-30B-A3B-FP4",
+    "name": "Qwen3-30B-A3B-FP4"
+  },
+  {
+    "id": 1464,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/stabilityai/v1.0/stablelm-2-1_6b",
+    "data_size": 4,
+    "description": "Stable LM 2 1.6B 是一个仅解码器的语言模型，预训练在包含多语言和代码数据集的2万亿个令牌上进行了两轮训练。\nhttps://modelscope.cn/models/stabilityai/stablelm-2-1_6b",
+    "ms_name": "stabilityai/stablelm-2-1_6b",
+    "object_name": "checkpoints/LLM/stablelm-2-1_6b/v1.0/stablelm-2-1_6b",
+    "name": "stablelm-2-1_6b"
+  },
+  {
+    "id": 1465,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/upstage/v1.0/SOLAR-10.7B-Instruct-v1.0",
+    "data_size": 20,
+    "description": "SOLAR-10.7B 具有出色的性能。它超越了参数高达 30B 的模型，甚至超过了最近的 Mixtral 8X7B 模型。有关详细信息，请参阅实验表格。 Solar 10.7B 是微调的理想选择。SOLAR-10.7B 为您的微调需求提供了强大的鲁棒性和适应性。使用 SOLAR-10.7B 预训练模型进行简单的指令微调可以显著提高性能。\nhttps://modelscope.cn/models/upstage/SOLAR-10.7B-Instruct-v1.0",
+    "ms_name": "upstage/SOLAR-10.7B-Instruct-v1.0",
+    "object_name": "checkpoints/LLM/SOLAR-10.7B-Instruct-v1.0/v1.0/SOLAR-10.7B-Instruct-v1.0",
+    "name": "SOLAR-10.7B-Instruct-v1.0"
+  },
+  {
+    "id": 1575,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/mlx-community/v3/Qwen3-4B-Instruct-2507-mxfp8",
+    "data_size": 4,
+    "description": "modelscope https://modelscope.cn/models/mlx-community/Qwen3-4B-Instruct-2507-mxfp8",
+    "ms_name": "mlx-community/Qwen3-4B-Instruct-2507-mxfp8",
+    "object_name": "checkpoints/LLM/Qwen3-4B-Instruct-2507-mxfp8/v3/Qwen3-4B-Instruct-2507-mxfp8",
+    "name": "Qwen3-4B-Instruct-2507-mxfp8"
+  },
+  {
+    "id": 1583,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/sgl-npu/v3.2/DeepSeek-V3.2-W8A8",
+    "data_size": 647,
+    "description": "modelscope https://modelscope.cn/models/sgl-npu/DeepSeek-V3.2-W8A8",
+    "ms_name": "sgl-npu/DeepSeek-V3.2-W8A8",
+    "object_name": "checkpoints/LLM/DeepSeek-V3.2-W8A8/v3.2/DeepSeek-V3.2-W8A8",
+    "name": "DeepSeek-V3.2-W8A8"
+  },
+  {
+    "id": 1465,
+    "checkpoint": true,
+    "path": "checkpoints/LLM/thoughtworks/v3/Qwen3-32B-Eagle3",
+    "data_size": 0,
+    "description": "https://huggingface.co/thoughtworks/Qwen3-32B-Eagle3",
+    "ms_name": "thoughtworks/Qwen3-32B-Eagle3",
+    "object_name": "checkpoints/LLM/Qwen3-32B-Eagle3/v3/Qwen3-32B-Eagle3",
+    "name": "Qwen3-32B-Eagle3"
+  }
+]
