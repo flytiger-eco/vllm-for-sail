@@ -23,7 +23,7 @@ on:
     # this area. ppu_install_dependency.sh is shared by all PPU areas and
     # listed in each area workflow's paths, so editing it runs every area.
     paths:
-      - ".github/workflows/pr-test-ppu-basic-correctness.yml"
+      - ".github/workflows/test-area-ppu-basic-correctness.yml"
       - "scripts/ci/ppu/ppu_install_dependency.sh"
       - "scripts/ci/ppu/run_basic_correctness_tests.sh"
       - "tests/basic_correctness/**"
@@ -39,7 +39,7 @@ on:
 # gpu_memory_utilization×VRAM, so a second engine OOMs at its first
 # allocation. Same group name => cross-workflow serialization.
 concurrency:
-  group: ppu-device-${{ github.ref }}
+  group: test-area-ppu-basic_correctness-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -75,7 +75,7 @@ jobs:
         with:
           filters: |
             ppu_code:
-              - ".github/workflows/pr-test-ppu-basic-correctness.yml"
+              - ".github/workflows/test-area-ppu-basic-correctness.yml"
               - "scripts/ci/ppu/ppu_install_dependency.sh"
               - "scripts/ci/ppu/run_basic_correctness_tests.sh"
               - "tests/basic_correctness/**"

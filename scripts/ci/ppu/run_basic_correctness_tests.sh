@@ -2,7 +2,7 @@
 # ==============================================================================
 # scripts/ci/ppu/run_basic_correctness_tests.sh — PPU Basic Correctness 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/pr-test-ppu-basic-correctness.yml（容器内，cwd = /workspace）。
+# 调用方：.github/workflows/test-area-ppu-basic-correctness.yml（容器内，cwd = /workspace）。
 #
 # 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/basic_correctness.yaml 的
 # 迁移快照（见下方 BC_SINGLE_* / BC_MULTI_ARGS，调整用例直接改这里）。
