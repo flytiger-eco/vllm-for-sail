@@ -2,7 +2,8 @@
 # ==============================================================================
 # scripts/ci/ppu/ppu_install_dependency.sh — PPU CI 依赖安装（GitHub Actions）
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/pr-test-ppu.yml，在 PPU 基础镜像容器内执行：
+# 调用方：.github/workflows/test-area-ppu-lora.yml 与
+#   test-area-ppu-basic-correctness.yml（共用），在 PPU 基础镜像容器内执行：
 #   pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-...-vllm0.23.0-py312
 #
 # 对位：

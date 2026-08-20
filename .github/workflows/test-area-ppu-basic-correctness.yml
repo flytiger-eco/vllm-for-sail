@@ -2,7 +2,7 @@
 # (which itself is generated from `.buildkite/test_areas/basic_correctness.yaml` +
 # `aone_ci/ppu_extras/basic_correctness.yaml` by `aone_ci.pipeline_generator`).
 #
-# Layout mirrors the lora port (`.github/workflows/pr-test-ppu.yml`):
+# Layout mirrors the lora port (`.github/workflows/test-area-ppu-lora.yml`):
 #   check-changes  — diff guard on PPU-relevant paths (Aone `diff-guard` equivalent)
 #   ppu-basic-correctness-test — docker run on the self-hosted PPU runner,
 #                    install deps + run pytest via `scripts/ci/ppu/*.sh`
