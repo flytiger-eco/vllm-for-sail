@@ -33,8 +33,13 @@ on:
   # No inputs: manual dispatch runs the same full LoRA suite as push/PR.
   workflow_dispatch:
 
+# Shared across ALL PPU area workflows: the self-hosted runner's devices are
+# a mutually exclusive resource — concurrent jobs in separate containers both
+# pin CUDA_VISIBLE_DEVICES=0+ and each vLLM engine grabs
+# gpu_memory_utilization×VRAM, so a second engine OOMs at its first
+# allocation. Same group name => cross-workflow serialization.
 concurrency:
-  group: pr-test-ppu-${{ github.ref }}
+  group: ppu-device-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

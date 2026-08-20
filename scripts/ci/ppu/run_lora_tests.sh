@@ -69,8 +69,9 @@ LORA_SINGLE_ARGS=(
 # multi = 上游 "LoRA TP (Distributed)" job 的 PPU 版（当前仅 1 个文件，
 # TP=2；其余 TP 文件等模型 stage 到 /nas_aisw 后再放开）
 # -k 暂排除两个 TP 用例：PPU 上引擎初始化失败——TP worker rank1 在
-# 95.51 GiB free 时 20 MiB 分配报 CUDA OOM（虚假 OOM，平台问题，跟踪中）；
-# 平台修复后删除下方 -k 即恢复
+# 95.51 GiB free 时 20 MiB 分配报 CUDA OOM（虚假 OOM）。已禁用
+# expandable_segments（见下方 [env] 段，疑似元凶：bc single uni 段同症状，
+# Aone 不设该 env 且全绿）；重跑验证虚假 OOM 消失后删除下方 -k 即恢复
 LORA_MULTI_ARGS=(
   tests/lora/test_qwen3_with_multi_loras.py
   -k "not test_multi_loras_with_tp_sync and not test_multiple_lora_requests"
@@ -82,8 +83,11 @@ LORA_MULTI_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 上游 .buildkite/test_areas/lora.yaml TP 段的 OOM workaround，PPU 上无害
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# （上游 .buildkite/test_areas/lora.yaml TP 段的 CUDA VMM workaround）——
+# PPU 兼容层疑不支持 VMM API，是虚假 OOM 头号嫌疑（详见 run_basic_
+# correctness_tests.sh 同段注释与 reference.md 踩坑清单第 11 条；Aone 侧
+# 从不设它且全绿，DEC-0013 当时明确决定不引入）
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -126,20 +130,79 @@ python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
-    # base model：single/multi 主力（conftest、test_lora_functions、
-    # test_qwen3_unembed、test_worker、test_llm_with_multi_loras）
+    # ---- base models ----
+    # single/multi 主力（conftest、test_lora_functions、test_qwen3_unembed、
+    # test_worker、test_llm_with_multi_loras）
+    # 清单命中：checkpoints_cleaned.json path=checkpoints/LLM/qwen/v3/Qwen3-0.6B
     "Qwen/Qwen3-0.6B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
-    # lora adapter（test_load_inplace_* 两用例）：假设已按下方结构 stage 到
-    # NAS；路径不存在时 [setup] 会打 MISS，相关用例失败且日志可见原因
+    # test_mixtral.py 的 MoE base（清单命中 LLM/Mistral/v1）
+    "mistralai/Mixtral-8x7B-Instruct-v0.1":
+        "/nas_aisw/datasets/checkpoints/LLM/Mistral/v1/Mixtral-8x7B-Instruct-v0.1",
+    # test_qwenvl.py 的三个 VL base（清单命中 LLM/qwen/{v2.0,v2.5,v3.0}）
+    "Qwen/Qwen2-VL-2B-Instruct":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.0/Qwen2-VL-2B-Instruct",
+    "Qwen/Qwen2.5-VL-3B-Instruct":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/Qwen2.5-VL-3B-Instruct",
+    "Qwen/Qwen3-VL-4B-Instruct":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-VL-4B-Instruct",
+    # ---- lora adapters ----
+    # 路径取自 scripts/model_list/lora_adapters.json（runner 实测 find
+    # adapter_config.json）；MISS 时 [setup] 打 WARN 跳过，相关用例失败
+    # 且日志可见原因
     "Jackmin108/Qwen3-0.6B-Meow-LoRA":
-        "/nas_aisw/datasets/checkpoints/LLM/lora/Jackmin108/Qwen3-0.6B-Meow-LoRA",
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen3/v1.0/Qwen3-0.6B-Meow-LoRA",
     "Jackmin108/Qwen3-0.6B-Woof-LoRA":
-        "/nas_aisw/datasets/checkpoints/LLM/lora/Jackmin108/Qwen3-0.6B-Woof-LoRA",
-    # TODO: 按 NAS 实际结构补充其余 lora adapter，例如：
-    # "charent/self_cognition_Alice":
-    #     "/nas_aisw/datasets/checkpoints/LLM/lora/charent/self_cognition_Alice",
-    # "charent/self_cognition_Bob":
-    #     "/nas_aisw/datasets/checkpoints/LLM/lora/charent/self_cognition_Bob",
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen3/v1.0/Qwen3-0.6B-Woof-LoRA",
+    # HF org=charent，NAS 实际在 LLM/self/ 下（tests/lora 引用 3+2 处）
+    "charent/self_cognition_Alice":
+        "/nas_aisw/datasets/checkpoints/LLM/self/v1.0/self_cognition_Alice",
+    "charent/self_cognition_Bob":
+        "/nas_aisw/datasets/checkpoints/LLM/self/v1.0/self_cognition_Bob",
+    # test_mixtral.py / test_quant_model.py / test_transformers_model.py
+    "SangBinCho/mixtral-lora":
+        "/nas_aisw/datasets/checkpoints/LLM/mixtral/v1.0/mixtral-lora",
+    "jashing/tinyllama-colorist-lora":
+        "/nas_aisw/datasets/checkpoints/LLM/tinyllama/v1.0/tinyllama-colorist-lora",
+    "jeeejeee/ilama-text2sql-spider":
+        "/nas_aisw/datasets/checkpoints/LLM/ilama/v1.0/ilama-text2sql-spider",
+    # test_lora_checkpoints.py / test_lora_huggingface.py /
+    # test_peft_helper.py：CPU 上加载 checkpoint，只需 adapter 本体，无需 base
+    "jeeejeee/baichuan7b-text2sql-spider":
+        "/nas_aisw/datasets/checkpoints/LLM/baichuan7b/v1.0/baichuan7b-text2sql-spider",
+    "jeeejeee/baichuan7b-zero-init":
+        "/nas_aisw/datasets/checkpoints/LLM/baichuan7b/v1.0/baichuan7b-zero-init",
+    "jeeejeee/baichuan-7b-lora-zero-regex":
+        "/nas_aisw/datasets/checkpoints/LLM/baichuan/v1.0/baichuan-7b-lora-zero-regex",
+    "jeeejeee/chatglm3-text2sql-spider":
+        "/nas_aisw/datasets/checkpoints/LLM/chatglm3/v1.0/chatglm3-text2sql-spider",
+    "jeeejeee/llama32-3b-text2sql-spider":
+        "/nas_aisw/datasets/checkpoints/LLM/llama32/v1.0/llama32-3b-text2sql-spider",
+    # test_qwenvl.py 的 VL adapters
+    "jeeejeee/qwen2-vl-lora-pokemon":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.0/qwen2-vl-lora-pokemon",
+    "jeeejeee/qwen25-vl-lora-pokemon":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/qwen25-vl-lora-pokemon",
+    # NAS 无独立 tower 目录，与 tower-connector 共用同一份
+    # （Aone aliases 同此映射，非笔误）
+    "prashanth058/qwen2vl-flickr-lora-tower":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen2vl/v1.0/qwen2vl-flickr-lora-tower-connector",
+    "prashanth058/qwen2vl-flickr-lora-tower-connector":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen2vl/v1.0/qwen2vl-flickr-lora-tower-connector",
+    "prashanth058/qwen2vl-flickr-lora-language":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen2vl/v1.0/qwen2vl-flickr-lora-language",
+    "EpochEcho/qwen2.5-3b-vl-lora-vision-connector":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/qwen2.5-3b-vl-lora-vision-connector",
+    "EpochEcho/qwen3-4b-vl-lora-vision-connector":
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/qwen3-4b-vl-lora-vision-connector",
+    # ---- 清单未收录：按 Aone /ppusw→/nas_aisw 同构路径推测，首跑看 MISS ----
+    # test_quant_model.py 的量化 base（清单只有 v1.0 非量化版）
+    "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ":
+        "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v0.3/TinyLlama-1.1B-Chat-v0.3-AWQ",
+    "TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ":
+        "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v0.3/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+    # test_transformers_model.py 的 base
+    "hmellor/Ilama-3.2-1B":
+        "/nas_aisw/datasets/checkpoints/LLM/Ilama/v3.2/Ilama-3.2-1B",
 }
 
 HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(
