@@ -16,9 +16,9 @@ name: LoRA Test (PPU)
 
 on:
   push:
-    branches: [feat/gha-ppu-lora-test]
+    branches: [feat/gha-ppu-test]
   pull_request:
-    branches: [feat/gha-ppu-lora-test]
+    branches: [feat/gha-ppu-test]
   # No inputs: manual dispatch runs the same full LoRA suite as push/PR.
   workflow_dispatch:
 
