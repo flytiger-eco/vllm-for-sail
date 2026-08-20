@@ -145,6 +145,11 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen3-VL-4B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-VL-4B-Instruct",
+    # test_qwen35_densemodel_lora.py 的 base（清单命中 id 669
+    # checkpoints/LLM/Qwen/v1.0/Qwen3.5-4B——注意大写 Qwen 目录，
+    # 与上面 VL 系的小写 qwen 不同，NAS 目录大小写混用，照抄清单 path）
+    "Qwen/Qwen3.5-4B":
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen3.5-4B",
     # ---- lora adapters ----
     # 路径取自 scripts/model_list/lora_adapters.json（runner 实测 find
     # adapter_config.json）；MISS 时 [setup] 打 WARN 跳过，相关用例失败
