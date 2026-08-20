@@ -51,11 +51,12 @@ fi
 # [tests] 用例选集（快照自 aone_ci/ppu_extras/basic_correctness.yaml single/multi 段）
 # ------------------------------------------------------------------------------
 # single = Aone "basic-correctness single" job（1-PPU pod）：
-#   - test_cumem.py 全量
+#   - test_mem.py 全量（上游 #37149 已将 test_cumem.py 重命名为 test_mem.py，
+#     本分支基线 v0.23.0 含该提交；用例内容不变）
 #   - test_basic_correctness.py 全量（12 个 multi_gpu_test 在 1 卡下自动 skip；
 #     本脚本 single 段统一 CUDA_VISIBLE_DEVICES=0 保持该语义）
 BC_SINGLE_CUMEM_ARGS=(
-  tests/basic_correctness/test_cumem.py
+  tests/basic_correctness/test_mem.py
   # test_deep_sleep_fp8_kvcache 显式 skip 并标注：其所需 Qwen/Qwen2-0.5B
   # 未入库红区（scripts/model_list 清单与 Aone aliases 均无）；且
   # requires_fp8 在 OAM-810E（SM 8.0，需 SM≥8.9）上本就 skip——-k 排除使
@@ -129,7 +130,7 @@ python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
-    # test_cumem.py::test_end_to_end（pytorch checkpoint 组）+
+    # test_mem.py::test_end_to_end（pytorch checkpoint 组）+
     # test_basic_correctness.py::test_failed_model_execution / distributed 组
     # 清单命中：checkpoints_cleaned.json path=checkpoints/LLM/misc/v1.0/opt-125m
     "facebook/opt-125m": "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
@@ -139,15 +140,15 @@ MODEL_MAP = {
     # 以红区清单的 v3.2 为准）
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
-    # test_cumem.py（safetensors 组 / deep_sleep 组）+ test_vllm_gc_ed +
-    # test_basic_correctness.py distributed 组
+    # test_mem.py（safetensors 组 / deep_sleep 组）+
+    # test_basic_correctness.py::test_vllm_gc_ed / distributed 组
     # 清单未收录，已在 runner 上 ls 确认存在（tiny/v1.0/ 共 4 个 tiny 模型）
     "hmellor/tiny-random-LlamaForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
     # test_basic_correctness.py MODELS；同上，已 ls 确认
     "hmellor/tiny-random-Gemma2ForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-Gemma2ForCausalLM",
-    # Qwen/Qwen2-0.5B：仅 test_cumem.py::test_deep_sleep_fp8_kvcache 使用，
+    # Qwen/Qwen2-0.5B：仅 test_mem.py::test_deep_sleep_fp8_kvcache 使用，
     # 未入库红区 → 该用例已在 BC_SINGLE_CUMEM_ARGS 用 -k 显式 skip（见上）；
     # 未来入库后移除该 -k 并在此补路径：
     # "Qwen/Qwen2-0.5B": "<NAS path 待入库后补>",
@@ -283,12 +284,12 @@ _run_step() {
 
 if [ "${MODE}" = "single" ]; then
   # Aone single 是 1-PPU pod：限 1 卡使 multi_gpu_test 自动 skip，语义对齐
-  CUDA_VISIBLE_DEVICES=0 _run_step "test_cumem" 1 "${BC_SINGLE_CUMEM_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_mem" 1 "${BC_SINGLE_CUMEM_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "test_basic_correctness" 1 "${BC_SINGLE_BASIC_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   _run_step "test_basic_correctness_distributed" 1 "${BC_MULTI_ARGS[@]}"
 else  # all
-  CUDA_VISIBLE_DEVICES=0 _run_step "test_cumem" 1 "${BC_SINGLE_CUMEM_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_mem" 1 "${BC_SINGLE_CUMEM_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "test_basic_correctness" 1 "${BC_SINGLE_BASIC_ARGS[@]}"
   _run_step "test_basic_correctness_distributed" 1 "${BC_MULTI_ARGS[@]}"
 fi
