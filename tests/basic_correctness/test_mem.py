@@ -15,16 +15,6 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
 
-# On PPU the only attention backend is FlexAttention, whose metadata builder
-# allocates [max_num_seqs, num_gpu_blocks] int64 inverse block tables. Tiny
-# models turn the KV cache into tens of millions of blocks (46M on a 96 GiB
-# card for tiny-random-Llama), so those tables alone need 175+ GiB and engine
-# init OOMs during CUDA graph capture. Capping the KV cache size bounds
-# num_gpu_blocks; 256 MiB keeps the tables under ~1.5 GiB so the sleep-mode
-# memory assertions below still hold. None keeps the default behavior on
-# other platforms.
-KV_CACHE_MEMORY_BYTES = (1 << 28) if current_platform.is_ppu() else None
-
 
 @create_new_process_for_each_test(
     "fork" if current_platform.is_cuda() and not current_platform.is_ppu() else "spawn"
@@ -152,11 +142,7 @@ def test_cumem_with_cudagraph():
 def test_end_to_end(model: str):
     free, total = current_platform.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(
-        model,
-        enable_sleep_mode=True,
-        kv_cache_memory_bytes=KV_CACHE_MEMORY_BYTES,
-    )
+    llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
@@ -205,11 +191,7 @@ def test_deep_sleep():
     model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = current_platform.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(
-        model,
-        enable_sleep_mode=True,
-        kv_cache_memory_bytes=KV_CACHE_MEMORY_BYTES,
-    )
+    llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
@@ -244,7 +226,6 @@ def test_deep_sleep_async():
         engine_args = AsyncEngineArgs(
             model=model,
             enable_sleep_mode=True,
-            kv_cache_memory_bytes=KV_CACHE_MEMORY_BYTES,
         )
 
         llm = AsyncLLMEngine.from_engine_args(engine_args)
@@ -280,14 +261,7 @@ def test_deep_sleep_fp8_kvcache():
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
-    # Needs a larger cap than KV_CACHE_MEMORY_BYTES: Qwen2-0.5B's max seq
-    # len (131072) requires >= ~768 MiB of fp8 KV cache to fit at all.
-    llm = LLM(
-        model,
-        enable_sleep_mode=True,
-        kv_cache_dtype="fp8",
-        kv_cache_memory_bytes=(1 << 30) if current_platform.is_ppu() else None,
-    )
+    llm = LLM(model, enable_sleep_mode=True, kv_cache_dtype="fp8")
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)

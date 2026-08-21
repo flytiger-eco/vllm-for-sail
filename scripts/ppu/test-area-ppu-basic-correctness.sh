@@ -51,10 +51,10 @@ fi
 # [tests] 用例选集（快照自 aone_ci/ppu_extras/basic_correctness.yaml single/multi 段）
 # ------------------------------------------------------------------------------
 # single = Aone "basic-correctness single" job（1-PPU pod）：
-#   - test_mem.py 全量（上游 3bb46975b "[XPU] transparent sleep mode support"
+#   - test_mem.py（上游 3bb46975b "[XPU] transparent sleep mode support"
 #     由 test_cumem.py 重命名而来，R085 并改为平台无关写法；旧基线分支仍叫
 #     test_cumem.py，回退基线时此处改回）
-#   - test_basic_correctness.py 全量（12 个 multi_gpu_test 在 1 卡下自动 skip；
+#   - test_basic_correctness.py（12 个 multi_gpu_test 在 1 卡下自动 skip；
 #     本脚本 single 段统一 CUDA_VISIBLE_DEVICES=0 保持该语义）
 BC_SINGLE_MEM_ARGS=(
   tests/basic_correctness/test_mem.py
@@ -63,9 +63,15 @@ BC_SINGLE_MEM_ARGS=(
   # requires_fp8 在 OAM-810E（SM 8.0，需 SM≥8.9）上本就 skip——-k 排除使
   # 该 skip 成为显式行为，不依赖平台能力检测；用例名以当前分支 test_mem.py 为准
   -k "not test_deep_sleep_fp8_kvcache"
+  # PPU flex_attention 不支持 head_dim<16 且用例传kv_cache_memory_bytes 限 KV
+  --deselect=tests/basic_correctness/test_mem.py::test_end_to_end[hmellor/tiny-random-LlamaForCausalLM]
+  --deselect=tests/basic_correctness/test_mem.py::test_deep_sleep
+  --deselect=tests/basic_correctness/test_mem.py::test_deep_sleep_async
 )
 BC_SINGLE_BASIC_ARGS=(
   tests/basic_correctness/test_basic_correctness.py
+  # 同上
+  --deselect=tests/basic_correctness/test_basic_correctness.py::test_vllm_gc_ed
 )
 # test_cpu_offload.py 禁用（快照自原 yaml 注释段）：
 #   OAM-810E 上 hmellor/tiny-random-LlamaForCausalLM（head_dim=4）触发 inductor
