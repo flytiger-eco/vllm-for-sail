@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# scripts/ppu/run_lora_tests.sh — PPU LoRA 测试执行（GitHub Actions）
+# scripts/ppu/test-area-ppu-lora.sh — PPU LoRA 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
 # 调用方：.github/workflows/test-area-ppu-lora.yml（容器内，cwd = /workspace）。
 #

@@ -77,7 +77,7 @@ _ensure_pip_pkg "flash_attn" "2.7.4.post1" "--no-deps --force-reinstall"
 # pytest-asyncio: tests/conftest.py asyncio fixture 需要
 # tblib: pytest 跨进程 traceback 序列化（spawn worker 报错时）
 # pytest-shard: single 模式 --shard-id/--num-shards 需要
-# pyyaml: 备用通用依赖（用例选集已内联在 run_lora_tests.sh，不解析 yaml）
+# pyyaml: 备用通用依赖（用例选集已内联在 test-area-ppu-lora.sh，不解析 yaml）
 echo "========== [deps] pytest toolchain =========="
 ${PIP_INSTALL} pytest pytest-asyncio tblib pytest-shard pyyaml -i "${PPU_PIP_INDEX}"
 

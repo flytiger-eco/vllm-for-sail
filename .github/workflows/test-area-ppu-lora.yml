@@ -1,43 +1,35 @@
-# GitHub Actions port of the Aone CI pipeline `.aoneci/test-area-ppu-lora.yaml`
-# (which itself is generated from `.buildkite/test_areas/lora.yaml` +
-# `aone_ci/ppu_extras/lora.yaml` by `aone_ci.pipeline_generator`).
+# Aone CI `.aoneci/test-area-ppu-lora.yaml` 的 GitHub Actions 移植版
+# （源自 `.buildkite/test_areas/lora.yaml` + `aone_ci/ppu_extras/lora.yaml`）。
 #
-# Layout mirrors sglang-for-sail's `.github/workflows/pr-test-ppu.yml`:
-#   check-changes  — diff guard on PPU-relevant paths (Aone `diff-guard` equivalent)
-#   ppu-lora-test  — docker run on the self-hosted PPU runner, install deps +
-#                    run pytest via `scripts/ppu/*.sh`
-#   ppu-test-finish — single aggregation point for branch protection
+# 结构（仿 sglang-for-sail 的 `.github/workflows/pr-test-ppu.yml`）：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-lora-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-test-finish — 分支保护聚合点
 #
-# Fully self-contained: no `aone_ci/` dependency. The test selection (pytest
-# files/`--ignore`s, migrated from `aone_ci/ppu_extras/lora.yaml`) lives in
-# `scripts/ppu/run_lora_tests.sh`; models come from the /nas_aisw volume
-# (mounted below, sglang-style).
+# 自包含，无 aone_ci 依赖；测试选集（pytest 文件与 --ignore）见
+# scripts/ppu/test-area-ppu-lora.sh，模型来自挂载的 /nas_aisw 卷。
 name: LoRA Test (PPU)
 
 on:
   push:
     branches: [feat/gha-ppu-test]
-    # Trigger-level path filter: server-side on the pushed commits, immune to
-    # the shallow-history issue that breaks dorny/paths-filter on push (see
-    # check-changes comment). Only LoRA-relevant changes trigger this area.
-    # ppu_install_dependency.sh is shared by all PPU areas and listed in each
-    # area workflow's paths, so editing it runs every area.
+    # 触发级路径过滤：服务端判定，规避浅克隆下 dorny 在 push 失效的问题
+    # （见 check-changes 注释）。ppu_install_dependency.sh 为各 PPU area
+    # 共享、列在每个 area 的 paths 里，改它会触发所有 area。
     paths:
       - ".github/workflows/test-area-ppu-lora.yml"
       - "scripts/ppu/ppu_install_dependency.sh"
-      - "scripts/ppu/run_lora_tests.sh"
+      - "scripts/ppu/test-area-ppu-lora.sh"
       - "tests/lora/**"
       - "vllm/lora/**"
   pull_request:
     branches: [feat/gha-ppu-test]
-  # No inputs: manual dispatch runs the same full LoRA suite as push/PR.
+  # 无 inputs：手动触发跑与 push/PR 相同的全量 LoRA 测试。
   workflow_dispatch:
 
-# Shared across ALL PPU area workflows: the self-hosted runner's devices are
-# a mutually exclusive resource — concurrent jobs in separate containers both
-# pin CUDA_VISIBLE_DEVICES=0+ and each vLLM engine grabs
-# gpu_memory_utilization×VRAM, so a second engine OOMs at its first
-# allocation. Same group name => cross-workflow serialization.
+# 所有 PPU area workflow 共用同名 group：自托管 runner 的 PPU 设备互斥
+# （并发 job 争抢 CUDA_VISIBLE_DEVICES 与显存会 OOM），同名 group 实现
+# 跨 workflow 串行。
 concurrency:
   group: test-area-ppu-lora-${{ github.ref }}
   cancel-in-progress: true
@@ -47,11 +39,11 @@ permissions:
   pull-requests: read
 
 env:
-  # SAIL SDK v2.1.1 image with vLLM 0.23.0 preinstalled (PPU port baseline)
+  # SAIL SDK v2.1.1 镜像，预装 vLLM 0.23.0（PPU 移植基线）
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
 
 jobs:
-  # ==================== Check Changes (diff guard) ==================== #
+  # ==================== 变更检查（diff 门禁） ==================== #
   check-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -60,14 +52,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Path filtering here is PR-only: on pull_request, dorny/paths-filter
-      # uses the GitHub API and needs no git history. On push it would fall
-      # back to a local git diff against the default branch (v0.20.1), which
-      # breaks for branches based on v0.23.0: no merge-base exists within
-      # shallow history and the deepen retry hits "fatal: shallow file has
-      # changed since we read it" (128). Push filtering is instead done at
-      # the trigger level via on.push.paths (above), so this step only ever
-      # needs to handle the PR case. Keep this list in sync with on.push.paths.
+      # 仅 PR 用 dorny/paths-filter（走 GitHub API，不依赖 git 历史）。
+      # push 不用它：浅克隆下与默认分支（v0.20.1）无 merge-base，deepen
+      # 重试报 "fatal: shallow file has changed"（128）。push 已由
+      # on.push.paths 触发级过滤；本列表须与 on.push.paths 保持同步。
       - name: Detect file changes
         id: filter
         uses: dorny/paths-filter@v3
@@ -77,7 +65,7 @@ jobs:
             ppu_code:
               - ".github/workflows/test-area-ppu-lora.yml"
               - "scripts/ppu/ppu_install_dependency.sh"
-              - "scripts/ppu/run_lora_tests.sh"
+              - "scripts/ppu/test-area-ppu-lora.sh"
               - "tests/lora/**"
               - "vllm/lora/**"
 
@@ -87,24 +75,21 @@ jobs:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR: honor the path filter result
+            # PR：按路径过滤结果决定
             echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
           else
-            # push / manual dispatch: always run — on.push.paths already
-            # filtered push events at the trigger level, so reaching here
-            # means this area's paths were touched (or a human dispatched)
+            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
             echo "changes_exist=true" >> $GITHUB_OUTPUT
           fi
 
-  # ==================== PPU LoRA Test (4-PPU runner) ==================== #
+  # ==================== PPU LoRA 测试（PPU runner） ==================== #
   ppu-lora-test:
     needs: [check-changes]
     if: needs.check-changes.outputs.changes_exist == 'true'
     runs-on: [self-hosted, ppu]
     timeout-minutes: 300
     steps:
-      # Prior Docker runs leave root-owned files in the workspace that break
-      # the next checkout — clean them with the same image first (sglang lesson).
+      # 清理上次 docker 运行残留的 root 属主文件，否则 checkout 失败（sglang 经验）。
       - name: Clean workspace (root-owned files from prior Docker runs)
         run: |
           docker run --rm \
@@ -142,13 +127,12 @@ jobs:
             bash -c "
               cd /workspace && \
               bash scripts/ppu/ppu_install_dependency.sh && \
-              bash scripts/ppu/run_lora_tests.sh
+              bash scripts/ppu/test-area-ppu-lora.sh
             "
 
-      # 容器内 EXIT trap 会把分 shard 统计表写到 test-results/summary.md
-      # （经 /workspace 卷落到宿主 workspace）。GITHUB_STEP_SUMMARY 只有
-      # 宿主 step 进程可见（容器内拿不到），在此接力 cat 到 run 的
-      # Summary 页渲染；脚本早崩无 summary 时给出可读的兜底说明
+      # 容器内 EXIT trap 已把分 shard 统计写入 test-results/summary.md（经卷
+      # 落到宿主 workspace；容器内拿不到 GITHUB_STEP_SUMMARY），此处接力
+      # cat 到 run 的 Summary 页渲染；脚本早崩无 summary 时给兜底说明。
       - name: Publish test summary
         if: always()
         run: |
@@ -173,7 +157,7 @@ jobs:
             test-results/
           if-no-files-found: warn
 
-  # ==================== Finish (aggregation point) ==================== #
+  # ==================== 聚合点（分支保护） ==================== #
   ppu-test-finish:
     needs: [check-changes, ppu-lora-test]
     if: always()

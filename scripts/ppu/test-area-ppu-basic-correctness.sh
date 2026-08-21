@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# scripts/ppu/run_basic_correctness_tests.sh — PPU Basic Correctness 测试执行（GitHub Actions）
+# scripts/ppu/test-area-ppu-basic-correctness.sh — PPU Basic Correctness 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
 # 调用方：.github/workflows/test-area-ppu-basic-correctness.yml（容器内，cwd = /workspace）。
 #
