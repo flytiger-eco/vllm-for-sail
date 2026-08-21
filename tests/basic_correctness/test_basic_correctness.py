@@ -34,7 +34,12 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
+    # On PPU, cap the KV cache to bound FlexAttention's inverse block tables
+    # (see KV_CACHE_MEMORY_BYTES in tests/basic_correctness/test_mem.py).
+    llm = LLM(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        kv_cache_memory_bytes=(1 << 28) if current_platform.is_ppu() else None,
+    )
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails

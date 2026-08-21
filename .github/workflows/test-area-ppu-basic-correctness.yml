@@ -31,7 +31,7 @@ on:
 # （并发 job 争抢 CUDA_VISIBLE_DEVICES 与显存会 OOM），同名 group 实现
 # 跨 workflow 串行。
 concurrency:
-  group: test-area-ppu-basic_correctness-${{ github.ref }}
+  group: test-area-ppu-basic-correctness-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
