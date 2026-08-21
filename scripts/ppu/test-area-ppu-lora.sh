@@ -100,8 +100,8 @@ export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 # 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # （上游 .buildkite/test_areas/lora.yaml TP 段的 CUDA VMM workaround）——
-# PPU 兼容层疑不支持 VMM API，是虚假 OOM 头号嫌疑（详见 run_basic_
-# correctness_tests.sh 同段注释与 reference.md 踩坑清单第 11 条；Aone 侧
+# PPU 兼容层疑不支持 VMM API，是虚假 OOM 头号嫌疑（详见 test-area-ppu-
+# basic-correctness.sh 同段注释与 reference.md 踩坑清单第 11 条；Aone 侧
 # 从不设它且全绿，DEC-0013 当时明确决定不引入）
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1

@@ -8,7 +8,7 @@
 # k8s-runner-group-flytiger-ppu{1,2,4,8,16}（两组织共享节点池）；container.image
 # 必填且须字面量（该位置不支持 env 上下文）；PPU 设备由 pod template 透传，
 # 每 job 全新 pod——无需 docker run / 设备参数 / clean workspace。
-# 本 area 卡数依据：single 4-shard（每 shard 一卡）+ multi TP=4，均吃满 4 卡。
+# 本 area 卡数依据：single 4-shard（每 shard 一卡，峰值 4 卡）；multi TP=2 串行其后。
 #
 # 用例选集在 scripts/ppu/test-area-ppu-lora.sh（快照自 ppu_extras，运行时零依赖
 # aone_ci）；模型走 /nas_aisw 卷——novolume 模式业务侧不能挂卷，依赖 pod
@@ -19,6 +19,8 @@ on:
   push:
     branches: [feat/gha-ppu-test]
     # push路径过滤（服务端判定）：push 的过滤只能在这里做——check-changes
+    # 里的 paths-filter 在 push 上受浅克隆历史限制会失败，仅用于 PR。
+    # 此列表与下方 filters 保持一致。
     paths:
       - ".github/workflows/test-area-ppu-lora.yml"
       - "scripts/ppu/ppu_install_dependency.sh"
