@@ -5,12 +5,12 @@
 # Layout mirrors the lora port (`.github/workflows/test-area-ppu-lora.yml`):
 #   check-changes  — diff guard on PPU-relevant paths (Aone `diff-guard` equivalent)
 #   ppu-basic-correctness-test — docker run on the self-hosted PPU runner,
-#                    install deps + run pytest via `scripts/ci/ppu/*.sh`
+#                    install deps + run pytest via `scripts/ppu/*.sh`
 #   ppu-test-finish — single aggregation point for branch protection
 #
 # Fully self-contained: no `aone_ci/` dependency. The test selection (pytest
 # files, migrated from `aone_ci/ppu_extras/basic_correctness.yaml`) lives in
-# `scripts/ci/ppu/run_basic_correctness_tests.sh`; models come from the
+# `scripts/ppu/run_basic_correctness_tests.sh`; models come from the
 # /nas_aisw volume (mounted below, sglang-style).
 name: Basic Correctness Test (PPU)
 
@@ -24,8 +24,8 @@ on:
     # listed in each area workflow's paths, so editing it runs every area.
     paths:
       - ".github/workflows/test-area-ppu-basic-correctness.yml"
-      - "scripts/ci/ppu/ppu_install_dependency.sh"
-      - "scripts/ci/ppu/run_basic_correctness_tests.sh"
+      - "scripts/ppu/ppu_install_dependency.sh"
+      - "scripts/ppu/run_basic_correctness_tests.sh"
       - "tests/basic_correctness/**"
       - "vllm/*"
   pull_request:
@@ -76,8 +76,8 @@ jobs:
           filters: |
             ppu_code:
               - ".github/workflows/test-area-ppu-basic-correctness.yml"
-              - "scripts/ci/ppu/ppu_install_dependency.sh"
-              - "scripts/ci/ppu/run_basic_correctness_tests.sh"
+              - "scripts/ppu/ppu_install_dependency.sh"
+              - "scripts/ppu/run_basic_correctness_tests.sh"
               - "tests/basic_correctness/**"
               - "vllm/*"
 
@@ -141,9 +141,29 @@ jobs:
             ${{ env.PPU_BASE_IMAGE }} \
             bash -c "
               cd /workspace && \
-              bash scripts/ci/ppu/ppu_install_dependency.sh && \
-              bash scripts/ci/ppu/run_basic_correctness_tests.sh
+              bash scripts/ppu/ppu_install_dependency.sh && \
+              bash scripts/ppu/run_basic_correctness_tests.sh
             "
+
+      # 容器内 EXIT trap 会把分 shard 统计表写到 test-results/summary.md
+      # （经 /workspace 卷落到宿主 workspace）。GITHUB_STEP_SUMMARY 只有
+      # 宿主 step 进程可见（容器内拿不到），在此接力 cat 到 run 的
+      # Summary 页渲染；脚本早崩无 summary 时给出可读的兜底说明
+      - name: Publish test summary
+        if: always()
+        run: |
+          f="test-results/summary.md"
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Basic Correctness Test (PPU)"
+              echo ""
+              echo "summary.md not produced — the in-container script exited"
+              echo "before its EXIT trap fired (see 'Run PPU basic correctness"
+              echo "tests' log)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload test results
         if: always()
