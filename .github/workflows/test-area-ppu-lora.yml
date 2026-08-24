@@ -39,10 +39,6 @@ permissions:
   contents: read
   pull-requests: read
 
-# runner externals 缺 node24（ARC hook 挂载的 /__e/node24 不存在，actions/checkout
-# 等 JS action 报 exit 127）——强制回退 node20 执行；DevOps 补齐 node24 后可删
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   # ==================== check-changes ==================== #

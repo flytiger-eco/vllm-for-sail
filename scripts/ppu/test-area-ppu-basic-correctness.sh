@@ -63,17 +63,9 @@ BC_SINGLE_MEM_ARGS=(
   # requires_fp8 在 OAM-810E（SM 8.0，需 SM≥8.9）上本就 skip——-k 排除使
   # 该 skip 成为显式行为，不依赖平台能力检测；用例名以当前分支 test_mem.py 为准
   -k "not test_deep_sleep_fp8_kvcache"
-  # PPU flex_attention 不支持 head_dim<16 且用例传kv_cache_memory_bytes 限 KV
-  --deselect=tests/basic_correctness/test_mem.py::test_end_to_end[hmellor/tiny-random-LlamaForCausalLM]
-  --deselect=tests/basic_correctness/test_mem.py::test_deep_sleep
-  --deselect=tests/basic_correctness/test_mem.py::test_deep_sleep_async
-  --deselect=tests/basic_correctness/test_mem.py::test_end_to_end
 )
 BC_SINGLE_BASIC_ARGS=(
   tests/basic_correctness/test_basic_correctness.py
-  # 同上
-  --deselect=tests/basic_correctness/test_basic_correctness.py::test_vllm_gc_ed
-  --deselect=tests/basic_correctness/test_basic_correctness.py::test_models
 )
 # test_cpu_offload.py 禁用（快照自原 yaml 注释段）：
 #   OAM-810E 上 hmellor/tiny-random-LlamaForCausalLM（head_dim=4）触发 inductor
