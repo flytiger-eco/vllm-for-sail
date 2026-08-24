@@ -215,7 +215,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.ppu import (
     PPUDeepGemmFp8BlockScaledMMKernel,
     PPUCutlassFp8BlockScaledMMKernel,
     PPUCutlassFP8ScaledMMLinearKernel,
-    PPUFP8ScaledMMLinearKernel,
     PPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
@@ -419,7 +418,6 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.PPU: [
         PPUDeepGemmFP8ScaledMMLinearKernel,
         PPUCutlassFP8ScaledMMLinearKernel,
-        PPUFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -1223,7 +1221,6 @@ __all__ = [
     "PPUDeepGemmFp8BlockScaledMMKernel",
     "PPUCutlassFp8BlockScaledMMKernel",
     "PPUCutlassFP8ScaledMMLinearKernel",
-    "PPUFP8ScaledMMLinearKernel",
     "PPUInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
     "ChannelWiseTorchFP8ScaledMMLinearKernel",

@@ -33,8 +33,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.ppu import (
     PPUInt8ScaledMMLinearKernel,
     PPUCutlassFP8ScaledMMLinearKernel,
     PPUCutlassFp8BlockScaledMMKernel,
+    PPUDeepGemmFP8ScaledMMLinearKernel,
     PPUDeepGemmFp8BlockScaledMMKernel,
-    PPUFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -73,7 +73,7 @@ __all__ = [
     "PPUDeepGemmFp8BlockScaledMMKernel",
     "PPUCutlassFp8BlockScaledMMKernel",
     "PPUCutlassFP8ScaledMMLinearKernel",
-    "PPUFP8ScaledMMLinearKernel",
+    "PPUDeepGemmFP8ScaledMMLinearKernel",
     "PPUInt8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
     "ZentorchInt8ScaledMMLinearKernel",
