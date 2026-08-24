@@ -215,7 +215,12 @@ class FlashAttentionBackend(AttentionBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
-            return "sink not supported on compute capability < 9.0"
+            # PPU FA3 takes s_aux (sinks) through flash_attn_3.fwd; FA2 does not.
+            fa_version = get_flash_attn_version(
+                head_size=head_size, head_size_v=head_size, has_sinks=has_sink
+            )
+            if not (current_platform.is_ppu() and fa_version == 3):
+                return "sink not supported on compute capability < 9.0"
         if (
             kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
