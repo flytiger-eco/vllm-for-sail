@@ -1093,6 +1093,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_sm80(
     TOKEN_STRIDE: tl.constexpr,  # 576 for DeepseekV4
     SCALE_DIM: tl.constexpr,  # 8 for DeepseekV4 (7 real + 1 pad)
     KV_BLOCK_STRIDE: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
 ):
     """SM80 variant of the sparse-attn compressor kernel (head=512).
 
@@ -1205,7 +1206,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_sm80(
 
     scale_idx = tl.arange(0, N_QUANT_BLOCKS)
     encoded = exponents + 127.0
-    encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
+    max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
+    encoded = tl.maximum(tl.minimum(encoded, max_encoded), 0.0)
     tl.store(
         scale_ptr + scale_idx,
         encoded.to(tl.uint8),
@@ -1233,6 +1235,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_sm80(
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     result = tl.interleave(new_even, new_odd)  # [TRITON_BLOCK_SIZE] fp32
+    if SANITIZE_CACHE_NANS:
+        result = tl.where(result == result, result, 0.0)
 
     # Store rotated rope portion as bf16 into the cache's bf16 area.
     bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
