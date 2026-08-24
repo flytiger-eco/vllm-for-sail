@@ -1,31 +1,21 @@
-# Aone CI `.aoneci/test-area-ppu-basic-correctness.yaml` 的 GitHub Actions 移植
-# （Aone 侧由 .buildkite/test_areas/basic_correctness.yaml +
-# aone_ci/ppu_extras/basic_correctness.yaml 生成）。
+# Aone CI `.aoneci/test-area-ppu-basic-correctness.yaml` 的 GitHub Actions 移植版
+# （源自 `.buildkite/test_areas/basic_correctness.yaml` + `aone_ci/ppu_extras/basic_correctness.yaml`）。
 #
-# 结构：check-changes（路径过滤门卫）→ 两个并行测试 job → ppu-test-finish（聚合点）。
+# 结构（与 test-area-ppu-lora.yml 相同）：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-basic-correctness-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-test-finish — 分支保护聚合点
 #
-# Runner（DevOps ARC k8s 集群，flytiger-eco 组织）：runs-on 按实际用卡数选规格
-# k8s-runner-group-flytiger-ppu{1,2,4,8,16}（两组织共享节点池）；container.image
-# 必填且须字面量（该位置不支持 env 上下文）；PPU 设备由 pod template 透传，
-# 每 job 全新 pod——无需 docker run / 设备参数 / clean workspace。
-#
-# 卡数按实际用量，与 Aone 两个 ptg-ai-test job 一一对应：
-#   ppu-basic-correctness-single = Aone `ppu: 1` job（TEST_MODE=single：test_mem +
-#     test_basic_correctness 全集，1 卡 pod 使 multi_gpu_test 自动 skip）→ ppu1
-#   ppu-basic-correctness-multi  = Aone `ppu: 2` job（TEST_MODE=multi：-m distributed
-#     子集，测试内部 TP=2）→ ppu2
-#
-# 用例选集在 scripts/ppu/test-area-ppu-basic-correctness.sh（快照自 ppu_extras，
-# 运行时零依赖 aone_ci）；模型走 /nas_aisw 卷——novolume 模式业务侧不能挂卷，
-# 依赖 pod template 预挂 NAS（HF_HUB_CACHE 路径不存在时找 DevOps 确认）。
+# 自包含，无 aone_ci 依赖；测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh，
+# 模型来自挂载的 /nas_aisw 卷。
 name: Basic Correctness Test (PPU)
 
 on:
   push:
     branches: [feat/gha-ppu-test]
-    # push路径过滤（服务端判定）：push 的过滤只能在这里做——check-changes
-    # 里的 paths-filter 在 push 上受浅克隆历史限制会失败，仅用于 PR。
-    # 此列表与下方 filters 保持一致。
+    # 触发级路径过滤：服务端判定，规避浅克隆下 dorny 在 push 失效的问题
+    # （见 check-changes 注释）。ppu_install_dependency.sh 为各 PPU area
+    # 共享、列在每个 area 的 paths 里，改它会触发所有 area。
     paths:
       - ".github/workflows/test-area-ppu-basic-correctness.yml"
       - "scripts/ppu/ppu_install_dependency.sh"
@@ -34,8 +24,12 @@ on:
       - "vllm/*"
   pull_request:
     branches: [feat/gha-ppu-test]
+  # 无 inputs：手动触发跑与 push/PR 相同的全量测试。
   workflow_dispatch:
 
+# 所有 PPU area workflow 共用同名 group：自托管 runner 的 PPU 设备互斥
+# （并发 job 争抢 CUDA_VISIBLE_DEVICES 与显存会 OOM），同名 group 实现
+# 跨 workflow 串行。
 concurrency:
   group: test-area-ppu-basic-correctness-${{ github.ref }}
   cancel-in-progress: true
@@ -44,8 +38,12 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  # SAIL SDK v2.1.1 镜像，预装 vLLM 0.23.0（PPU 移植基线）
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+
 jobs:
-  # ==================== check-changes ==================== #
+  # ==================== 变更检查（diff 门禁） ==================== #
   check-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -54,8 +52,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 仅 PR 使用：paths-filter 走 GitHub API、不依赖 git 历史；push 场景在
-      # 浅克隆下找不到 merge-base 会失败，已由 on.push.paths 在触发级过滤。
+      # 仅 PR 用 dorny/paths-filter（走 GitHub API，不依赖 git 历史）。
+      # push 不用它：浅克隆下与默认分支（v0.20.1）无 merge-base，deepen
+      # 重试报 "fatal: shallow file has changed"（128）。push 已由
+      # on.push.paths 触发级过滤；本列表须与 on.push.paths 保持同步。
       - name: Detect file changes
         id: filter
         uses: dorny/paths-filter@v3
@@ -75,41 +75,64 @@ jobs:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR：按路径过滤结果决定是否跑
+            # PR：按路径过滤结果决定
             echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
           else
-            # push/手动：直接放行（push 已被触发级过滤，手动 = 无条件全量）
+            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
             echo "changes_exist=true" >> $GITHUB_OUTPUT
           fi
 
-  # ==================== single 段（1 卡 ARC pod，对位 Aone ppu:1） ============ #
-  ppu-basic-correctness-single:
+  # ==================== PPU Basic Correctness 测试（PPU runner） ==================== #
+  ppu-basic-correctness-test:
     needs: [check-changes]
     if: needs.check-changes.outputs.changes_exist == 'true'
-    runs-on: k8s-runner-group-flytiger-ppu1
-    container:
-      # SAIL SDK v2.1.1 镜像（预装 vLLM 0.23.0，PPU 基线）
-      image: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
-    timeout-minutes: 100
-    env:
-      # job 级 env 自动注入容器（等效原 docker run -e 透传）
-      TEST_MODE: single
-      HF_HUB_CACHE: /nas_aisw/datasets/hf_cache/hub
-      PPU_DEVICE_LABEL: OAM-810E
-      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
-      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 300
     steps:
+      # 清理上次 docker 运行残留的 root 属主文件，否则 checkout 失败（sglang 经验）。
+      - name: Clean workspace (root-owned files from prior Docker runs)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run PPU basic correctness tests (single)
-        timeout-minutes: 80
+      - name: Run PPU basic correctness tests
+        timeout-minutes: 290
+        env:
+          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
         run: |
-          bash scripts/ppu/ppu_install_dependency.sh
-          bash scripts/ppu/test-area-ppu-basic-correctness.sh
+          docker run --rm \
+            --privileged \
+            --network host \
+            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
+            --device=/dev/alixpu_ctl \
+            --device=/dev/alixpu \
+            --ipc=host \
+            --init \
+            --shm-size=8g \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /nas_aisw:/nas_aisw \
+            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
+            -e PPU_ARTIFACTORY_USER \
+            -e PPU_ARTIFACTORY_PASSWORD \
+            -e PPU_DEVICE_LABEL=OAM-810E \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "
+              cd /workspace && \
+              bash scripts/ppu/ppu_install_dependency.sh && \
+              bash scripts/ppu/test-area-ppu-basic-correctness.sh
+            "
 
-      # 脚本 EXIT trap 产出 test-results/summary.md，此处接力到 Summary 页；
-      # 脚本早崩无文件时给兜底说明
+      # 容器内 EXIT trap 已把分 shard 统计写入 test-results/summary.md（经卷
+      # 落到宿主 workspace；容器内拿不到 GITHUB_STEP_SUMMARY），此处接力
+      # cat 到 run 的 Summary 页渲染；脚本早崩无 summary 时给兜底说明。
       - name: Publish test summary
         if: always()
         run: |
@@ -118,10 +141,11 @@ jobs:
             cat "$f" >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "### Basic Correctness single (PPU)"
+              echo "### Basic Correctness Test (PPU)"
               echo ""
-              echo "summary.md not produced — the test script exited"
-              echo "before its EXIT trap fired (see test step log)."
+              echo "summary.md not produced — the in-container script exited"
+              echo "before its EXIT trap fired (see 'Run PPU basic correctness"
+              echo "tests' log)."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -129,62 +153,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-basic-correctness-single-results
+          name: ppu-basic-correctness-test-results
           path: |
             test-results/
           if-no-files-found: warn
 
-  # ==================== multi 段（2 卡 ARC pod，对位 Aone ppu:2） ============= #
-  ppu-basic-correctness-multi:
-    needs: [check-changes]
-    if: needs.check-changes.outputs.changes_exist == 'true'
-    runs-on: k8s-runner-group-flytiger-ppu2
-    container:
-      image: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
-    timeout-minutes: 100
-    env:
-      TEST_MODE: multi
-      HF_HUB_CACHE: /nas_aisw/datasets/hf_cache/hub
-      PPU_DEVICE_LABEL: OAM-810E
-      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
-      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run PPU basic correctness tests (multi)
-        timeout-minutes: 80
-        run: |
-          bash scripts/ppu/ppu_install_dependency.sh
-          bash scripts/ppu/test-area-ppu-basic-correctness.sh
-
-      - name: Publish test summary
-        if: always()
-        run: |
-          f="test-results/summary.md"
-          if [ -f "$f" ]; then
-            cat "$f" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### Basic Correctness multi (PPU)"
-              echo ""
-              echo "summary.md not produced — the test script exited"
-              echo "before its EXIT trap fired (see test step log)."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ppu-basic-correctness-multi-results
-          path: |
-            test-results/
-          if-no-files-found: warn
-
-  # ==================== finish（聚合点） ==================== #
+  # ==================== 聚合点（分支保护） ==================== #
   ppu-test-finish:
-    needs: [check-changes, ppu-basic-correctness-single, ppu-basic-correctness-multi]
+    needs: [check-changes, ppu-basic-correctness-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
