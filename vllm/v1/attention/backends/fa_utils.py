@@ -323,6 +323,9 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
+    if current_platform.is_ppu():
+        # PPU FA3 takes q/k/v descales; sm_80 has no FP8 tensor support.
+        return fa_version == 3 and current_platform.supports_fp8()
     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
     )
