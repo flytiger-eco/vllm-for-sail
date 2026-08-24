@@ -1192,13 +1192,12 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
                 device=workspace1.device,
             )
 
+            # clamp_limit/alpha/beta are carried by self.activation_config
+            # (v0.28.0 activation() contract), same as upstream deep_gemm_moe.py.
             self.activation(
                 activation,
                 act_out_2d,
                 workspace1.view(E * max_num_tokens, N),
-                clamp_limit=self.gemm1_clamp_limit,
-                alpha=self.gemm1_alpha,
-                beta=self.gemm1_beta,
             )
             act_out = act_out_2d.view(E, max_num_tokens, activation_out_dim)
             a2q, a2q_scale = downcast_to_mxfp4(act_out, axis=-1)

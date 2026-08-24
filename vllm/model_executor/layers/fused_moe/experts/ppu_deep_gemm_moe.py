@@ -253,14 +253,9 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
             )
-            self.activation(
-                activation,
-                act_out,
-                input,
-                clamp_limit=self.gemm1_clamp_limit,
-                alpha=self.gemm1_alpha,
-                beta=self.gemm1_beta,
-            )
+            # clamp_limit/alpha/beta are carried by self.activation_config
+            # (v0.28.0 activation() contract), same as upstream deep_gemm_moe.py.
+            self.activation(activation, act_out, input)
             a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 act_out,
                 block_k,
@@ -290,14 +285,9 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             )
         else:
             # Assign act path
-            self.activation(
-                activation,
-                act_out,
-                input,
-                clamp_limit=self.gemm1_clamp_limit,
-                alpha=self.gemm1_alpha,
-                beta=self.gemm1_beta,
-            )
+            # clamp_limit/alpha/beta are carried by self.activation_config
+            # (v0.28.0 activation() contract), same as upstream deep_gemm_moe.py.
+            self.activation(activation, act_out, input)
         if output.dtype == torch.float8_e4m3fn:
             block_k = (
                 self.block_shape[1] if self.block_shape else activation_out_dim
@@ -593,14 +583,9 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
-        self.activation(
-            activation,
-            act_out,
-            input,
-            clamp_limit=self.gemm1_clamp_limit,
-            alpha=self.gemm1_alpha,
-            beta=self.gemm1_beta,
-        )
+        # clamp_limit/alpha/beta are carried by self.activation_config
+        # (v0.28.0 activation() contract), same as upstream deep_gemm_moe.py.
+        self.activation(activation, act_out, input)
         a_q, a_scale = downcast_to_mxfp4(act_out, axis=1)
         return a_q, a_scale
 
