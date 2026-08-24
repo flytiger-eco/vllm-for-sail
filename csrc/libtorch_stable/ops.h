@@ -400,7 +400,9 @@ void fused_kda_decode(
     torch::stable::Tensor& out, std::optional<double> lower_bound,
     std::optional<torch::stable::Tensor> output_gate,
     std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
+#endif
 
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
 void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
@@ -411,7 +413,6 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
     double scale, double norm_eps);
-
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
