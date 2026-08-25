@@ -278,7 +278,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             prefix=layer_name,
             ignored_layers=self.fp8_channelwise_layers,
             fused_mapping=self.packed_modules_mapping,
-            skip_with_substr=True,
+            match_mode="substring",
         )
 
     @classmethod
