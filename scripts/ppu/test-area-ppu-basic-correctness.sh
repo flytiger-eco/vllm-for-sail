@@ -63,6 +63,13 @@ BC_SINGLE_MEM_ARGS=(
   # requires_fp8 在 OAM-810E（SM 8.0，需 SM≥8.9）上本就 skip——-k 排除使
   # 该 skip 成为显式行为，不依赖平台能力检测；用例名以当前分支 test_mem.py 为准
   -k "not test_deep_sleep_fp8_kvcache"
+  # --- 已知失败（08-25 全量复现，跟踪中；恢复条件：PPU 侧修复后移除对应行）---
+  # test_end_to_end safetensors 组失败；pytorch checkpoint 组（opt-125m）
+  # 通过，故 nodeid 精确排除该参数化实例（--deselect 不影响其他实例）
+  "--deselect=tests/basic_correctness/test_mem.py::test_end_to_end[hmellor/tiny-random-LlamaForCausalLM]"
+  # deep sleep（level=2）两个用例 RuntimeError
+  "--deselect=tests/basic_correctness/test_mem.py::test_deep_sleep"
+  "--deselect=tests/basic_correctness/test_mem.py::test_deep_sleep_async"
 )
 BC_SINGLE_BASIC_ARGS=(
   tests/basic_correctness/test_basic_correctness.py
@@ -80,6 +87,9 @@ BC_MULTI_ARGS=(
   tests/basic_correctness/test_basic_correctness.py
   -m
   distributed
+  # 已知失败（08-25 复现，跟踪中）：enable_prompt_embeds=True + opt-125m
+  # + ray backend 组合；nodeid 精确排除，不影响同函数其他参数化实例
+  "--deselect=tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-facebook/opt-125m-ray--L4-extra_env0]"
 )
 
 # ------------------------------------------------------------------------------

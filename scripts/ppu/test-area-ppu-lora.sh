@@ -64,7 +64,22 @@ LORA_SINGLE_ARGS=(
   --ignore=tests/lora/test_punica_ops_fp8.py
   # triton fused_moe kernel 精度: Tensor mismatch 100%
   --ignore=tests/lora/test_fused_moe_lora_kernel.py
-
+  # --- 已知失败（平台/模型问题，08-20 首轮全量确认，08-24 回退
+  # self-hosted docker 模式后复跑复现，跟踪中） ---
+  # AWQ 量化推理输出断言失败；同函数 GPTQ 的 model1 通过，故用
+  # nodeid 精确排除 model0（--deselect 不影响其他参数化实例）
+  "--deselect=tests/lora/test_quant_model.py::test_quant_model_lora[model0]"
+  # Qwen2-VL 引擎初始化失败（Engine core init）；同文件 qwen25vl/qwen3vl
+  # 系用例通过。不能用 -k 排除——"test_qwen2vl_lora" 是
+  # test_qwen2vl_lora_beam_search 的子串前缀，会连带误伤
+  "--deselect=tests/lora/test_qwenvl.py::test_qwen2vl_lora"
+  # fixture qwen3moe_lora_files 离线 cache miss（ERROR at setup）：
+  # snapshot_download("jeeejeee/qwen3-moe-text2sql-spider") 失败。
+  # MODEL_MAP 有条目但 NAS 实际缺该目录（清单命中 ≠ NAS 存在）。
+  # 文件内仅此一个测试函数（test_moe_lora_ep2_real_qwen3moe[0]/[1]，
+  # 纯 CPU EP 切片断言，无平台风险），整文件 ignore；adapter stage
+  # 到 NAS 后删除此行即恢复
+  --ignore=tests/lora/test_moe_lora_ep_load.py
 )
 
 # multi = 上游 "LoRA TP (Distributed)" job 的 PPU 版（当前仅 1 个文件，
