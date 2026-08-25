@@ -27,8 +27,11 @@ elif current_platform.is_xpu():
 
     DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 elif current_platform.is_ppu():
-    # NOTE: ppu reuse nvidia dspark
-    from .nvidia.dspark import (  # type: ignore[assignment]
+    # NOTE: PPU subclasses the NVIDIA DSpark draft to expose the quant
+    # mapping attributes (packed_modules_mapping / hf_to_vllm_mapper) that
+    # the draft's fresh quant config needs for the mixed-precision recipe
+    # (mxfp4 MoE + fp8 channel-wise dense).
+    from .ppu.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,
     )
     from .ppu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
