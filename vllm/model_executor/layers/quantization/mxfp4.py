@@ -45,7 +45,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_utils import WeightsMapper
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -556,8 +556,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
 
         self.weight_dtype = "mxfp4"
-        self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
-        self.experts_cls: type[mk.FusedMoEExperts] | None
         if current_platform.is_ppu():
             if not current_platform.is_device_capability((8, 0)):
                 # NOTE(kai): W4A4, PPU USE MXFP4 Weights + MXFP4 Activations
@@ -568,10 +566,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             else:
                 # sm80 (810E) → W4A16
                 self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
-        elif self.is_k3_situ_aiter:
-            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
