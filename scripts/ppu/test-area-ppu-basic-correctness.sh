@@ -73,6 +73,11 @@ BC_SINGLE_MEM_ARGS=(
 )
 BC_SINGLE_BASIC_ARGS=(
   tests/basic_correctness/test_basic_correctness.py
+  # 已知失败（08-25 复现，跟踪中）：test_vllm_gc_ed 用 tiny-random-Llama
+  # （head_dim=4），默认非 eager 撞 inductor flex_attention head_dim>=16
+  # NYI——与上方 test_cpu_offload.py 禁用同根因（平台硬限制）。
+  # 恢复条件：PPU flex_attention 支持 head_dim<16
+  "--deselect=tests/basic_correctness/test_basic_correctness.py::test_vllm_gc_ed"
 )
 # test_cpu_offload.py 禁用（快照自原 yaml 注释段）：
 #   OAM-810E 上 hmellor/tiny-random-LlamaForCausalLM（head_dim=4）触发 inductor
