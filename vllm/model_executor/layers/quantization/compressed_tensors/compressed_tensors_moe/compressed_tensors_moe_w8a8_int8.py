@@ -163,7 +163,9 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        swiglu_limit = getattr(layer, 'swiglu_limit', None)
+        # SwiGLU-OAI gate params (e.g. MiniMax-M3) must reach the fused
+        # activation kernel; dropping alpha/beta here silently degrades to
+        # plain silu and corrupts the output.
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
             w1_scale=layer.w13_weight_scale,
@@ -172,7 +174,9 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             a2_scale=layer.w2_input_scale,
             per_act_token_quant=True,
             layer=layer,
-            swiglu_limit=swiglu_limit,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply(
