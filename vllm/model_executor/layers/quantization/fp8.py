@@ -535,8 +535,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if refine >= 32:
                 self.weight_scale_refine = (block_n // refine, block_k // refine)
                 self.moe_block_shape = [refine, refine]
-                self.fp8_backend = Fp8MoeBackend.TRITON
-                self.experts_cls = backend_to_kernel_cls(Fp8MoeBackend.TRITON)[0]
+                # Refined blocks only fit kernels that take the block shape
+                # as a runtime argument (Triton family). Keep the batched
+                # variant when the deployment uses batched activation
+                # (DeepEP/DP-EP), so expert construction stays consistent
+                # with the batched prepare/finalize ops.
+                refine_backend = (
+                    Fp8MoeBackend.BATCHED_TRITON
+                    if self.moe.moe_parallel_config.use_batched_activation_format
+                    else Fp8MoeBackend.TRITON
+                )
+                self.fp8_backend = refine_backend
+                self.experts_cls = backend_to_kernel_cls(refine_backend)[0]
                 logger.info_once(
                     "FP8 MoE block scales refined from %s to [%d, %d] to fit "
                     "the TP-sharded intermediate size %d; using Triton "
