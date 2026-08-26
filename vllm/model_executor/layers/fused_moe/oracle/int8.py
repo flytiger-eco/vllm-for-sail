@@ -262,6 +262,8 @@ def make_int8_moe_quant_config(
     per_act_token_quant: bool = False,
     layer: torch.nn.Module | None = None,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
         a1_scale is not None and a2_scale is not None
@@ -274,6 +276,8 @@ def make_int8_moe_quant_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             per_act_token_quant=per_act_token_quant,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
 
@@ -295,6 +299,9 @@ def make_int8_moe_quant_config(
             w2_zp=None,
             w1_bias=w1_bias,
             w2_bias=w2_bias,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     return int8_w8a8_moe_quant_config(
@@ -305,6 +312,9 @@ def make_int8_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 
