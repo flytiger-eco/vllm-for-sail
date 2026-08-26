@@ -64,7 +64,12 @@ def _is_fa3_supported() -> tuple[bool, str | None]:
         return False, f"FA3 is unavailable due to: {FA3_UNAVAILABLE_REASON}"
     from vllm.platforms import current_platform
 
-    if not current_platform.is_device_capability_family(90):
+    # PPU reports capability (8, 9) but ships its own FA3 port
+    # (vllm/vllm_flash_attn/ppu), so the 9.x family gate must not exclude it.
+    if (
+        not current_platform.is_ppu()
+        and not current_platform.is_device_capability_family(90)
+    ):
         return False, "FA3 is only supported on devices with compute capability 9.x"
     return True, None
 
