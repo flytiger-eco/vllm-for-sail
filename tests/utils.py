@@ -153,14 +153,7 @@ ROCM_ENGINE_KWARGS: dict = (
 
 def requires_spawn_multiprocessing() -> bool:
     """Whether this platform requires spawn instead of fork for test processes."""
-    # PPU: CUDA-compatible API, but a forked child inherits a poisoned device
-    # state from the parent ("all HGGC-capable devices are busy or
-    # unavailable") — same constraint as ROCm/XPU.
-    return (
-        current_platform.is_rocm()
-        or current_platform.is_xpu()
-        or current_platform.is_ppu()
-    )
+    return current_platform.is_rocm() or current_platform.is_xpu()
 
 
 def _run_in_new_process_group(

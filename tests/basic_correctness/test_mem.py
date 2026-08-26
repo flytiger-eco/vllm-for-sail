@@ -16,9 +16,7 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 DEVICE_TYPE = current_platform.device_type
 
 
-@create_new_process_for_each_test(
-    "fork" if current_platform.is_cuda() and not current_platform.is_ppu() else "spawn"
-)
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_python_error():
     """
     Test if Python error occurs when there's low-level
@@ -44,9 +42,7 @@ def test_python_error():
         allocator.wake_up()
 
 
-@create_new_process_for_each_test(
-    "fork" if current_platform.is_cuda() and not current_platform.is_ppu() else "spawn"
-)
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -79,9 +75,7 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
-@create_new_process_for_each_test(
-    "fork" if current_platform.is_cuda() and not current_platform.is_ppu() else "spawn"
-)
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA graph not supported on XPU")
 def test_cumem_with_cudagraph():
     allocator = get_mem_allocator_instance()
@@ -127,9 +121,7 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
-@create_new_process_for_each_test(
-    "fork" if current_platform.is_cuda() and not current_platform.is_ppu() else "spawn"
-)
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.parametrize(
     "model",
     [
