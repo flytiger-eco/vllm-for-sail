@@ -1,0 +1,167 @@
+# Aone CI `.aoneci/test-area-ppu-attention.yaml` 的 GitHub Actions 移植版
+# 结构：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-attention-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-test-finish — 分支保护聚合点
+#
+# 测试选集见 scripts/ppu/test-area-ppu-attention.sh。
+name: Attention Test (PPU)
+
+on:
+  push:
+    branches: [feat/gha-ppu-test]
+    paths:
+      - ".github/workflows/test-area-ppu-attention.yml"
+      - "scripts/ppu/ppu_install_dependency.sh"
+      - "scripts/ppu/test-area-ppu-attention.sh"
+      - "tests/v1/attention/**"
+      - "vllm/v1/attention/**"
+  pull_request:
+    branches: [feat/gha-ppu-test]
+  workflow_dispatch:
+
+concurrency:
+  group: test-area-ppu-attention-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+
+jobs:
+  # ==================== 变更检查 ==================== #
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_exist: ${{ steps.decide.outputs.changes_exist }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 仅 PR 用 dorny/paths-filter
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            ppu_code:
+              - ".github/workflows/test-area-ppu-attention.yml"
+              - "scripts/ppu/ppu_install_dependency.sh"
+              - "scripts/ppu/test-area-ppu-attention.sh"
+              - "tests/v1/attention/**"
+              - "vllm/v1/attention/**"
+
+      - name: Decide whether to run tests
+        id: decide
+        env:
+          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # PR：按路径过滤结果决定
+            echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
+          else
+            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
+            echo "changes_exist=true" >> $GITHUB_OUTPUT
+          fi
+
+  # ==================== PPU Attention ==================== #
+  ppu-attention-test:
+    needs: [check-changes]
+    if: needs.check-changes.outputs.changes_exist == 'true'
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 180
+    steps:
+      - name: Clean workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run PPU attention tests
+        timeout-minutes: 170
+        env:
+          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+        run: |
+          docker run --rm \
+            --privileged \
+            --network host \
+            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
+            --device=/dev/alixpu_ctl \
+            --device=/dev/alixpu \
+            --ipc=host \
+            --init \
+            --shm-size=8g \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /nas_aisw:/nas_aisw \
+            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
+            -e PPU_ARTIFACTORY_USER \
+            -e PPU_ARTIFACTORY_PASSWORD \
+            -e PPU_DEVICE_LABEL=OAM-810E \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "
+              cd /workspace && \
+              bash scripts/ppu/ppu_install_dependency.sh && \
+              bash scripts/ppu/test-area-ppu-attention.sh
+            "
+
+      - name: Publish test summary
+        if: always()
+        run: |
+          f="test-results/summary.md"
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Attention Test (PPU)"
+              echo ""
+              echo "summary.md not produced — the in-container script exited"
+              echo "before its EXIT trap fired (see 'Run PPU attention tests'"
+              echo "log)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-attention-test-results
+          path: |
+            test-results/
+          if-no-files-found: warn
+
+  # ==================== 聚合点 ==================== #
+  ppu-test-finish:
+    needs: [check-changes, ppu-attention-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              sep = ','
+              print(f'Failed jobs: {sep.join(failed)}')
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
