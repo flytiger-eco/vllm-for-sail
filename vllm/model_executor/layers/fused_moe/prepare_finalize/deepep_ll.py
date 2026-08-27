@@ -59,7 +59,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     # specific hidden sizes.
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
     # on it.
-    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192]
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192]
 
     @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int) -> int:
