@@ -60,6 +60,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.nvtx_iter_prof import (
+    NVTX_PROFILE,
+    prof_iter,
+    sche_mark,
+    th_nvtx_range_pop,
+    th_nvtx_range_push,
+)
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -276,6 +283,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.step_timing = StepTimingCollector()
+
+        # NVTX iteration profiling: tracks the iteration index for
+        # [prof_range] labels and whether a range is currently open
+        # (pushed in execute_model, closed in sample_tokens or on
+        # non-last-PP early return).
+        self._nvtx_iteration = 0
+        self._nvtx_range_open = False
 
         # General request states.
         self.req_states = RequestState(
@@ -1360,7 +1374,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
+        if NVTX_PROFILE:
+            th_nvtx_range_push(
+                f"[FW_GEMM] op:compute_logits,"
+                f"hidden_states:{sample_hidden_states.shape}"
+            )
         logits = self.model.compute_logits(sample_hidden_states)
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1370,6 +1391,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
+
+        if NVTX_PROFILE:
+            logits_shape = getattr(logits, "shape", None)
+            th_nvtx_range_push(f"[FW_NATIVE] op:sampler,logits:{logits_shape}")
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
@@ -1384,6 +1409,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
             )
+
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
@@ -1492,6 +1520,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+
+        # NVTX profiling: push [prof_range] after all early-return checks
+        # so that every push has a matching pop. For real runs, also emit
+        # scheduler marks (new requests, token counts, finished requests).
+        # The range spans execute_model + sample_tokens; closed in
+        # sample_tokens for last-PP-rank, or here for non-last-PP-rank.
+        if NVTX_PROFILE:
+            if not dummy_run:
+                sche_mark(scheduler_output)
+            prof_iter(self._nvtx_iteration)
+            th_nvtx_range_push(f"[prof_range]: iter {self._nvtx_iteration}")
+            self._nvtx_iteration += 1
+            self._nvtx_range_open = True
 
         if not dummy_run:
             # Common case.
@@ -1643,6 +1684,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Update the EPLB meta.
         self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
 
+        # NVTX: push batch-size range around model forward.
+        if NVTX_PROFILE:
+            _total_bs = batch_desc.num_reqs
+            _spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+            _p_bs = sum(
+                1
+                for rid, n in scheduler_output.num_scheduled_tokens.items()
+                if n - len(_spec_tokens.get(rid, ())) > 1
+            )
+            th_nvtx_range_push(f"total bs={_total_bs}, P bs={_p_bs}")
+
         self.step_timing.record_batch(
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
         )
@@ -1688,6 +1740,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
+        # NVTX: pop batch-size range.
+        if NVTX_PROFILE:
+            th_nvtx_range_pop()
+
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)
@@ -1722,6 +1778,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
+            # Close the [prof_range] here since sample_tokens will not
+            # produce a pop for this rank.
+            if NVTX_PROFILE and self._nvtx_range_open:
+                th_nvtx_range_pop()
+                self._nvtx_range_open = False
             return output_intermediate_tensors
         return None
 
@@ -1880,6 +1941,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
+
+        # NVTX: close the [prof_range] opened in execute_model.
+        if NVTX_PROFILE and self._nvtx_range_open:
+            th_nvtx_range_pop()
+            self._nvtx_range_open = False
 
         return async_output
 
