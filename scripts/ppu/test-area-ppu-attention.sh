@@ -1,24 +1,12 @@
 #!/bin/bash
 # ==============================================================================
 # scripts/ppu/test-area-ppu-attention.sh — PPU Attention 测试执行（GitHub Actions）
-# ------------------------------------------------------------------------------
-# 调用方：.github/workflows/test-area-ppu-attention.yml（容器内，cwd = /workspace）。
-#
-# 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/attention.yaml 的
-# 迁移快照（见下方 ATTN_SINGLE_ARGS，调整用例直接改这里）。
-#
-# 环境变量：
-#   TEST_MODE   all(默认) | single   — 本 area 无 multi 段（grep 确认
-#                                      tests/v1/attention/ 无 @multi_gpu_test）
-#
-# 机制移植自 aone_ci/scripts/test_area_ppu_attention.sh（AUTO-GENERATED 不可
-# 手改，故在此复刻）：单进程单 step，junit EXIT trap 合并 + 崩溃补 error case。
-#
-# 模型依赖：无 —— 上游 landmine 审计 CLEAN（用例用 mock + dummy weights，不
-# 下载真模型）；真实模型引用（Llama-3-8B/Phi-tiny-MoE/embeddinggemma-300m/
-# DeepSeek-V2-Lite-Chat/DeepSeek-R1）全部位于被 -k "not _correctness" 排除的
-# 用例内；test_trtllm_attention_integration.py 的 Qwen2.5-0.5B 在 PPU 上因
-# 模块级 skipif（需 SM100）整文件 skip。故本脚本无 MODEL_MAP/symlink 段。
+# 调用方：.github/workflows/test-area-ppu-attention.yml（容器内，cwd=/workspace）
+# 完全自包含（机制复刻自 aone_ci 的 AUTO-GENERATED 脚本）：单进程单 step，
+# junit EXIT trap 合并 + 崩溃兜底；用例选集见下方 ATTN_SINGLE_ARGS。
+# 环境变量：TEST_MODE=all(默认)|single（本 area 无 multi 用例）
+# 模型：无真模型；唯 test_indexer_deepseek_v4_slot_mapping.py 需解析
+#   Llama-3-8B 的 HF config，由下方 [stub] 段本地满足。
 # ==============================================================================
 
 set -euo pipefail
@@ -39,24 +27,19 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # ------------------------------------------------------------------------------
 # [tests] 用例选集（快照自 aone_ci/ppu_extras/attention.yaml single 段）
 # ------------------------------------------------------------------------------
-# attention_default = 上游 "V1 attention (H100)"/"(B200)" 两个 step 的 PPU 合并
-# 版（同一条 pytest 命令，1 卡）：
-#   -k "not _correctness ..."（原 yaml 注释）：排除所有 model-dep correctness
-#   用例（Llama-3-8B / Phi-tiny-MoE / embeddinggemma-300m / DeepSeek-V3/R1 等
-#   未 staged 到红区，跑了全是 LocalEntryNotFoundError）。
-#   恢复条件：F1 模型 stage 到 /nas_aisw 后删除该 -k，并在本脚本补 MODEL_MAP。
-#   注意 -k 子串语义：`_backend_correctness` 不 match
-#   `test_sparse_backend_decode_correctness`（中间多 decode），故用
-#   `not _correctness` 统一覆盖。
-#   另排除 test_gdn_metadata_builder.py 2 个用例（root cause TBD，原 yaml
-#   follow-up F2 跟踪）：
+# attention_default = 上游 "V1 attention (H100)"/"(B200)" 两 step 的合并版：
+#   -k "not _correctness"：排除所有依赖真模型的 correctness 用例（模型未
+#   stage 到红区，离线必挂）。恢复条件：模型 stage 到 /nas_aisw 后删除该
+#   -k 并补 MODEL_MAP。注意 -k 是子串匹配，`not _backend_correctness`
+#   盖不住 `test_sparse_backend_decode_correctness`，故用 `not _correctness`。
+#   另排除 test_gdn_metadata_builder.py 2 用例（root cause TBD，F2 跟踪）。
 ATTN_SINGLE_ARGS=(
   tests/v1/attention/
   -k
   'not _correctness and not test_gdn_build_classification and not test_has_initial_state_after_reclassification'
 )
 
-# multi：无（tests/v1/attention/ 无 @multi_gpu_test，全 single-PPU）
+# multi：无（tests/v1/attention/ 无 @multi_gpu_test）
 
 # ------------------------------------------------------------------------------
 # [env] 离线 + 运行时配置
@@ -64,20 +47,16 @@ ATTN_SINGLE_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True（上游
-# TP 场景的 CUDA VMM workaround）——PPU 兼容层疑不支持 VMM API，是虚假
-# OOM 头号嫌疑（详见 test-area-ppu-basic-correctness.sh 同段注释；
-# Aone 侧从不设它且全绿）
+# 禁止 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True：PPU 兼容层疑不支持
+# VMM API，是虚假 OOM 头号嫌疑（Aone 侧从不设它且全绿）
 
-# 默认离线；需要在线下载时设 PPU_TEST_ONLINE=1（本 area 无模型下载需求，
-# 保留开关仅为与其他 area 行为一致）
+# 默认离线；PPU_TEST_ONLINE=1 可放开（本 area 无下载需求，仅为行为一致）
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
   export HF_HUB_OFFLINE=1
   export TRANSFORMERS_OFFLINE=1
 fi
 
-# HF 缓存：workflow 已注入 HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub；
-# 未注入时（本地调试）探测 /nas_aisw 下的候选路径
+# HF 缓存：优先用 workflow 注入值，未注入时（本地调试）探测常见路径
 if [ -z "${HF_HUB_CACHE:-}" ]; then
   for _cand in /nas_aisw/datasets/hf_cache/hub "$HOME/.cache/huggingface/hub"; do
     if [ -d "${_cand}" ]; then
@@ -88,8 +67,54 @@ if [ -z "${HF_HUB_CACHE:-}" ]; then
 fi
 echo "[env] HF_HUB_CACHE=${HF_HUB_CACHE:-<unset>}"
 
-# PPU SDK: Triton/Inductor 编译需要 cuda.h + ptxas + libcuda（缺失时
-# torch.compile 类测试 BackendCompilerFailed）
+# ------------------------------------------------------------------------------
+# [stub] config-only 用例的离线模型 stub（VLLM_MODEL_REDIRECT_PATH）
+# ------------------------------------------------------------------------------
+# test_indexer_deepseek_v4_slot_mapping.py 等用例经 create_vllm_config() 构造
+# ModelConfig(model="meta-llama/Meta-Llama-3-8B")，只解析 HF config；但该
+# gated 仓库不在 NAS 缓存，HF_HUB_OFFLINE=1 下直接 ValidationError。
+# 此处用官方 VLLM_MODEL_REDIRECT_PATH 把 repo id 重定向到本地 stub（仅
+# config.json，真实参数），不改上游测试文件（zero-diff）。
+# 恢复条件：Meta-Llama-3-8B stage 到 /nas_aisw HF 缓存后删除本段。
+STUB_ROOT="/tmp/ppu-attention-stubs"
+STUB_MODEL_DIR="${STUB_ROOT}/Meta-Llama-3-8B"
+mkdir -p "${STUB_MODEL_DIR}"
+# Meta-Llama-3-8B 公开 config（仅供 config 解析，无权重/tokenizer）
+cat > "${STUB_MODEL_DIR}/config.json" <<'STUB_CONFIG_EOF'
+{
+  "architectures": ["LlamaForCausalLM"],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 128000,
+  "eos_token_id": 128001,
+  "head_dim": 128,
+  "hidden_act": "silu",
+  "hidden_size": 4096,
+  "initializer_range": 0.02,
+  "intermediate_size": 14336,
+  "max_position_embeddings": 8192,
+  "mlp_bias": false,
+  "model_type": "llama",
+  "num_attention_heads": 32,
+  "num_hidden_layers": 32,
+  "num_key_value_heads": 8,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 500000.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "use_cache": true,
+  "vocab_size": 128256
+}
+STUB_CONFIG_EOF
+printf '{"meta-llama/Meta-Llama-3-8B": "%s"}\n' "${STUB_MODEL_DIR}" \
+  > "${STUB_ROOT}/model_redirect.json"
+export VLLM_MODEL_REDIRECT_PATH="${STUB_ROOT}/model_redirect.json"
+echo "[stub] VLLM_MODEL_REDIRECT_PATH -> meta-llama/Meta-Llama-3-8B = ${STUB_MODEL_DIR}"
+
+# PPU SDK: Triton/Inductor 编译需要 cuda.h + ptxas + libcuda
+# （缺失时 torch.compile 类测试 BackendCompilerFailed）
 PPU_SDK_DIR="/usr/local/PPU_SDK/CUDA_SDK"
 if [ -d "${PPU_SDK_DIR}" ]; then
   export C_INCLUDE_PATH="${PPU_SDK_DIR}/include:${C_INCLUDE_PATH:-}"
@@ -142,10 +167,9 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）。合并 test.xml 的
-# testsuite name 已被改写为 label（丢失 shard 维度），故此处从原始
-# shard xml 提取。宿主 workflow 把本文件 cat 进 GITHUB_STEP_SUMMARY，
-# 在 run 的 Summary 页直接渲染（容器内拿不到该 env，需 workflow 接力）
+# ---- step summary（markdown 表）：合并 test.xml 已把 testsuite name 改写为
+# label（丢失 shard 维度），故从原始 shard xml 统计；宿主 workflow 把本文件
+# cat 进 GITHUB_STEP_SUMMARY（容器内拿不到该 env，需 workflow 接力）
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
@@ -231,9 +255,8 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
-      # 表达式返回 1，若它是函数/分支的最后一条命令，函数返回码变成 1，
-      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
+      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1`——条件为假时表达式整体
+      # 返回 1，顶层 set -e 会误杀脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done
