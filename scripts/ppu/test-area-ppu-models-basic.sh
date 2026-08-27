@@ -38,12 +38,12 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # [deps] area 特有 pip 依赖（先 import 探测再补装；镜像预装则跳过）
 # 出处：ppu_extras/models_basic.yaml extra_pip_install —— tests/models/
 # registry.py 的引用链在 collection 阶段 module-level import 触发缺包
-# （terratorch/einops/timm/regex）；4 个均为纯 Python 包，临时 pip install
-# 安全（原 yaml 注释）。镜像 rebake 预装后本段可删。
+# （einops/timm/regex）；均为纯 Python 包，临时 pip install 安全（原 yaml
+# 注释）。镜像 rebake 预装后本段可删。
 # ------------------------------------------------------------------------------
 PIP_INSTALL="python3 -m pip install --no-cache-dir"
 PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
-for pkg in terratorch einops timm regex; do
+for pkg in einops timm regex; do
   if python3 -c "import ${pkg}" 2>/dev/null; then
     echo "[deps] ${pkg} already importable — skip"
   else
