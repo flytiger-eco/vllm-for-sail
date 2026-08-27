@@ -674,6 +674,8 @@ def make_fp8_moe_quant_config(
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
