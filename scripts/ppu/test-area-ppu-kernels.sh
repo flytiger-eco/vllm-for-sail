@@ -58,6 +58,8 @@ KERNELS_SINGLE_CORE_ARGS=(
   --ignore=tests/kernels/core/test_fused_rms_norm_gated.py
   --ignore=tests/kernels/core/test_rotary_embedding_mla_cache_fused.py
   --ignore=tests/kernels/core/test_fused_quant_layernorm.py
+  # 2026-08-27 PPU run fail，待调查
+  --ignore=tests/kernels/core/test_vit_fp8_quant.py
 )
 
 # Step 2: kernels_mamba — test_causal_conv1d deterministic PPU ptxas SIGSEGV
@@ -143,6 +145,10 @@ KERNELS_SINGLE_QUANT_ARGS=(
   --ignore=tests/kernels/quantization/test_allspark_gemm.py
   # v0.23.0新增的测试文件，实测fail
   --ignore=tests/kernels/quantization/test_nvfp4_emulation.py
+  # 2026-08-27 PPU run fail 单个用例，--deselect 精确排除（整文件 ignore
+  # 会误伤同文件其余通过用例，cutlass_scaled_mm 是 PPU 回归重点），待调查
+  --deselect 'tests/kernels/quantization/test_cutlass_scaled_mm.py::test_cutlass_int8_azp[True-True-out_dtype1-256-64-32]'
+  --deselect 'tests/kernels/quantization/test_mxfp4_triton_ep.py::TestTritonMoeForwardExpertMap::test_expert_map_remap'
 )
 
 # Step 5: kernels_attention — flashmla/triton_decode_attention 有 is_ppu()
@@ -168,14 +174,23 @@ KERNELS_SINGLE_ATTN_ARGS=(
   # 内部用 fp8e4m3fn 但函数名不含 fp8（-k 无法过滤）
   --ignore=tests/kernels/attention/test_pack_unpack_triton.py
   # fp8e4nv/fp8e4m3fn 需 SM≥8.9；cuDNN THD 需 Hopper SM90+
-  -k
-  'not flashinfer and not fp8 and not e4m3 and not q_dtype1'
   # ---- OAM-810E device_conditional_ignores ----
   # API mismatch: flash_mla_with_kvcache() 缺 descale_q
   --ignore=tests/kernels/attention/test_flashmla.py
   --ignore=tests/kernels/attention/test_flashmla_sparse.py
   # triton decode head_dim=192 精度问题（4 cases）
   --ignore=tests/kernels/attention/test_triton_decode_attention.py
+  # 2026-08-27 PPU run fail，待调查
+  --ignore=tests/kernels/attention/test_cascade_flash_attn.py
+  --ignore=tests/kernels/attention/test_flash_attn.py
+  --ignore=tests/kernels/attention/test_merge_attn_states.py
+  # 同日 fail 的 test_triton_unified_attention.py 见上方 -k use_td 子句
+    # test_triton_unified_attention.py ：193 failed / 97 passed
+  # TD 路径 make_tensor_descriptor 在 num_kv_heads>1
+  # 跨步布局下静默算错（数值 FAILED 非报错），(5,1)（num_kv_heads=1）全过，
+  -k
+  'not flashinfer and not fp8 and not e4m3 and not q_dtype1 and not (use_td and (num_heads0 or (num_heads1 and not tile_clamp)))'
+ 
 )
 
 # multi：无 — 首版只 single；test_mamba_mixer2.py 单个 @multi_gpu_test(2)

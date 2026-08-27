@@ -1,6 +1,6 @@
 # PPU CI Area 迁移进度追踪（Aone CI → GitHub Actions）
 
-> 更新时间：2026-08-26。每完成一个 area 的 GHA 迁移，就把状态列的 `⬜` 改为 `✅`。
+> 更新时间：2026-08-27。每完成一个 area 的 GHA 迁移，就把状态列的 `⬜` 改为 `✅`。
 > 迁移方法见 skill：`migrate-aoneci-ppu-area-to-gha`。
 
 ## 进度总览
@@ -18,12 +18,13 @@
   - `.github/workflows/test-area-ppu-models-basic.yml` + `scripts/ppu/test-area-ppu-models-basic.sh`
   - `.github/workflows/test-area-ppu-kernels.yml` + `scripts/ppu/test-area-ppu-kernels.sh`
 
-## 批次 1：核心链路与用户入口（P0，8 个）
+## 批次 1：核心链路与用户入口（P0，10 个）
 
-目标：调度 → 执行 → 注意力 → 采样 → 入口 → 模型冒烟全链路覆盖，形成 PR 门禁最小闭环。
+目标：冒烟 → 调度 → 执行 → 注意力 → 采样 → 入口 → 模型冒烟 → LoRA 全链路覆盖，形成 PR 门禁最小闭环。
 
 | 状态 | Area | 规模（组/文件） | 单/多卡 | 说明 |
 |---|---|---|---|---|
+| ✅ | basic-correctness | 4 / 3 | 单+多卡 | 冒烟底线（首轮先行落地） |
 | ✅ | engine | 3 / 11 | 单卡 | 引擎核心：调度器、KV cache、异步 LLM |
 | ✅ | attention | 1 / — | 单卡 | 注意力后端，PPU 核心适配点 |
 | ✅ | model-executor | 1 / 8 | 单卡 | 模型执行器，连接引擎与模型层 |
@@ -32,6 +33,7 @@
 | ✅ | entrypoints-llm | 4 / 3 | 单+多卡 | offline LLM 类接口 |
 | ✅ | models-basic | 1 / 7 | 单卡 | 核心模型冒烟底线 |
 | ✅ | kernels | 6 / 51 | 单卡 | 算子层最大用例集，可单独排期 |
+| ✅ | lora | 6 / 13 | 单+多卡 | LoRA 适配器（首轮先行落地） |
 
 ## 批次 2：特性、模型族与精度回归（P1/P2，12 个）
 
@@ -64,18 +66,9 @@
 | ⬜ | benchmarks | 1 / 2 | 单卡 | 常规性能基准，非阻塞 |
 | ⬜ | perf-bench | 两段式 | 4 卡 | build-wheel + benchmark nightly 流水线，结构特殊且依赖内部仓库编译，最后单独处理 |
 
-## 已完成（10 个）
-
-首轮落地的 basic-correctness / lora，加上批次 1 的 8 个（状态见上表）。
-
-| 状态 | Area | 规模（组/文件） | 单/多卡 | 说明 |
-|---|---|---|---|---|
-| ✅ | basic-correctness | 4 / 3 | 单+多卡 | 冒烟底线 |
-| ✅ | lora | 6 / 13 | 单+多卡 | LoRA 适配器 |
-
 ## 覆盖完整性说明
 
-- 批次 1 已完成（连同 basic-correctness、lora，共 10 个 area），覆盖：**冒烟 → 引擎 → 算子 → 采样 → API 入口 → 模型冒烟 → LoRA**，功能维度覆盖完整，可作为 PR 门禁最小全集（待首跑验证转绿后启用）。
+- 批次 1（含首轮先行落地的 basic-correctness、lora，共 10 个 area）已全部完成，覆盖：**冒烟 → 引擎 → 算子 → 采样 → API 入口 → 模型冒烟 → LoRA**，功能维度覆盖完整，可作为 PR 门禁最小全集（待首跑验证转绿后启用）。
 - 批次 2 补齐量化/分布式/加速特性与模型族/精度回归；批次 3 为兼容性杂项与 nightly 性能回归。
 
 ## Workflow 体验优化方向（参考其他仓库 CI 设计）
