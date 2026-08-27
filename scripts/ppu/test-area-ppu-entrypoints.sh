@@ -6,8 +6,8 @@
 # cwd = /workspace）。
 #
 # 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/entrypoints.yaml
-# 的迁移快照（见下方 EP_SINGLE_UNIT_ARGS / EP_SINGLE_V1_ARGS，调整用例直接
-# 改这里）。模型走 /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw +
+# 的迁移快照并按 v0.23 上游目录布局修正（见下方 EP_SINGLE_UNIT_ARGS，调整
+# 用例直接改这里）。模型走 /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw +
 # HF_HUB_CACHE）。
 #
 # 环境变量：
@@ -15,7 +15,7 @@
 #                                      无 multi-GPU step）
 #
 # 机制移植自 aone_ci/scripts/test_area_ppu_entrypoints.sh（AUTO-GENERATED 不可
-# 手改，故在此复刻）：单进程 × 2 step，junit EXIT trap 合并 + 崩溃补 error case。
+# 手改，故在此复刻）：单进程单 step，junit EXIT trap 合并 + 崩溃补 error case。
 # ==============================================================================
 
 set -euo pipefail
@@ -41,36 +41,39 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 #   scope 决策（原 yaml 注释）：API Server 1/2（重度 model 依赖 + server
 #   startup）、Pooling、Responses API、OpenAI API Correctness 首版 defer；
 #   LLM 相关归独立 area entrypoints_llm，此处不重复覆盖。
+#
+#   ignore 集对齐上游 .buildkite/test_areas/entrypoints.yaml unit step：
+#   上游忽略 llm/openai/serve/test_chat_utils.py/pooling/speech_to_text/
+#   generate；PPU 另忽略 weight_transfer。原快照的 rpc/instrumentator/
+#   offline_mode/sagemaker 四条 ignore 在 v0.23 布局下均为死路径
+#   （instrumentator、sagemaker 已迁至 serve/ 子目录，被 serve ignore 覆盖；
+#   rpc、offline_mode 目录不存在），已删除。
 EP_SINGLE_UNIT_ARGS=(
   tests/entrypoints/openai/tool_parsers
   tests/entrypoints/
   --ignore=tests/entrypoints/llm
-  --ignore=tests/entrypoints/rpc
-  # 注：原快照含 --ignore=tests/entrypoints/sleep，该目录在当前分支（v0.23）
-  # 不存在（上游已移除），以当前分支为准删除该行
-  --ignore=tests/entrypoints/instrumentator
   --ignore=tests/entrypoints/openai
-  --ignore=tests/entrypoints/offline_mode
   --ignore=tests/entrypoints/test_chat_utils.py
   --ignore=tests/entrypoints/pooling
-  # 上游 0.23 新增目录，Aone scope 未评估，首版 ignore：
-  # sagemaker — server startup + SmolLM2/LoRA 模型依赖（对齐 API Server defer 决策）
-  --ignore=tests/entrypoints/sagemaker
+  # serve — 上游归独立 "API Server 2" step（server startup 重度 model 依赖，
+  # 对齐 API Server defer 决策）；v0.23 起 instrumentator/sagemaker 等
+  # 均迁入该子树
+  --ignore=tests/entrypoints/serve
+  # speech_to_text — 上游归独立 "Speech to Text" step；whisper 在 PPU 支持
+  # 未验证（同 test-area-ppu-lora.sh 对 test_whisper.py 的处理），且
+  # correctness 文件有模块级 get_tokenizer(whisper-large-v3)（离线 collection
+  # 即炸）+ 需 HF 数据集/evaluate wer metric，离线成本过高，首版 defer
+  --ignore=tests/entrypoints/speech_to_text
+  # generate — 上游归 "API Server openai Part 2" step（对齐 defer 决策）
+  --ignore=tests/entrypoints/generate
   # weight_transfer — LLM(NCCL weight transfer)，PPU 上未验证
   --ignore=tests/entrypoints/weight_transfer
 )
 
-# Step 2: v1_entrypoints — 上游 "Entrypoints V1" 的 PPU 版：
-EP_SINGLE_V1_ARGS=(
-  tests/v1/entrypoints/
-  # PPU flex_attention head_dim<16 限制 — tiny-random-Llama head_dim=4
-  # （原 yaml 注释；与 basic_correctness area 禁用 test_cpu_offload 同根因）
-  --ignore=tests/v1/entrypoints/openai/test_multi_api_servers.py
-  # EAGLE speculative decoding device-side assert（原 yaml 注释，
-  # ppu-team-issue-list.md Issue 7；PPU CUDA kernel assertion failure）
-  -k
-  'not speculative_config'
-)
+# 注：原快照 Step 2（v1_entrypoints，跑 tests/v1/entrypoints/）已删除——
+# v0.23 上游移除该目录（用例迁入 tests/entrypoints/openai/，归 defer 的
+# API Server scope；上游 entrypoints.yaml 亦无 "Entrypoints V1" step），
+# 保留必挂（pytest exit 4: file or directory not found）。
 
 # multi：无 — 上游 entrypoints 无 multi-GPU step
 
@@ -121,9 +124,11 @@ fi
 # ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时
 # WARN 并跳过（该模型的用例会失败，日志里可见原因）。
 #
-# 注：tests/v1/entrypoints/openai/test_completion_with_image_embeds.py:18 有
-# 模块级 AutoConfig.from_pretrained（llava-1.5-7b-hf）——symlink 后离线可读，
-# 不构成 collection landmine；若该模型 NAS 缺失须整文件 ignore。
+# 注：原快照为 v1/entrypoints 准备的 symlink（opt-125m、llava-1.5-7b、
+# DeepSeek-R1-Distill、Meta-Llama-3.1-8B、Ministral、Qwen2.5-1.5B、
+# Qwen3-1.7B、Qwen2.5-VL-3B、tiny-random-Llama）已随 Step 2 一并移除——
+# 其消费用例均在已 ignore 的 openai/serve 子树内，当前 scope 无消费者；
+# 后续放开 API Server scope 时按 git 历史加回即可。
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -141,37 +146,9 @@ MODEL_MAP = {
     # test_hermes_tool_parser.py LoRA tokenizer；清单 MISS，Aone 同构路径
     "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci":
         "/nas_aisw/datasets/checkpoints/LLM/LoRA/v1.0/LoRA-Llama-3.2-1B-tool-vllm-ci",
-    # ---- v1/entrypoints（引擎级） ----
-    # test_completion.py；清单命中 misc/v1.0
-    "facebook/opt-125m": "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
-    # test_struct_output_generate.py；清单 MISS，Aone 同构路径
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B":
-        "/nas_aisw/datasets/checkpoints/LLM/deepseek/R1/DeepSeek-R1-Distill-Qwen-1.5B",
-    # test_struct_output_generate.py；清单命中 Meta/v1.0
-    "meta-llama/Meta-Llama-3.1-8B-Instruct":
-        "/nas_aisw/datasets/checkpoints/LLM/Meta/v1.0/Meta-Llama-3.1-8B-Instruct",
-    # test_struct_output_generate.py；清单 MISS，Aone 同构路径
-    "mistralai/Ministral-8B-Instruct-2410":
-        "/nas_aisw/datasets/checkpoints/LLM/Ministral/v1.0/Ministral-8B-Instruct-2410",
-    # test_struct_output_generate.py + test_chat_completion.py；清单命中 qwen/v2.5
-    "Qwen/Qwen2.5-1.5B-Instruct":
-        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/Qwen2.5-1.5B-Instruct",
-    # test_struct_output_generate.py + serving_responses conftest/
-    # test_function_call.py；清单 MISS，Aone 同构路径
-    "Qwen/Qwen3-1.7B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-1.7B",
-    # serving_responses/test_image.py；清单命中 qwen/v2.5
-    "Qwen/Qwen2.5-VL-3B-Instruct":
-        "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/Qwen2.5-VL-3B-Instruct",
-    # test_completion_with_image_embeds.py（模块级 AutoConfig，需 symlink 兜底）；
-    # 清单命中 llava-hf/v1.5
-    "llava-hf/llava-1.5-7b-hf":
-        "/nas_aisw/datasets/checkpoints/LLM/llava-hf/v1.5/llava-1.5-7b-hf",
-    # test_multi_api_servers.py（当前 ignore：flex_attention head_dim<16）；
-    # 放开后即用；与 basic-correctness 同源（runner 已 ls 确认存在）
-    "hmellor/tiny-random-LlamaForCausalLM":
-        "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
-    # yuhuili/EAGLE-LLaMA3.1-Instruct-8B：仅 -k "not speculative_config"
-    # 排除的用例使用，不建 symlink
+    # ---- anthropic（引擎级，RemoteOpenAIServer） ----
+    # anthropic/test_messages.py；清单命中 qwen/v3
+    "Qwen/Qwen3-0.6B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
 }
 
 HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(
@@ -359,17 +336,14 @@ _run_step() {
   fi
 }
 
-if [ "${MODE}" = "single" ]; then
-  # Step 1 纯 CPU 单测（不起引擎）；Step 2 需 1 卡。统一限 1 卡对齐
-  # Aone 1-PPU pod 语义
-  CUDA_VISIBLE_DEVICES=0 _run_step "entrypoints_unit" 1 "${EP_SINGLE_UNIT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "v1_entrypoints" 1 "${EP_SINGLE_V1_ARGS[@]}"
-elif [ "${MODE}" = "multi" ]; then
+if [ "${MODE}" = "multi" ]; then
   echo "[mode] ERROR: area entrypoints has no multi-mode steps configured" >&2
   exit 2
-else  # all
+else
+  # single / all：Step 1 纯 CPU 单测为主（tool_parsers + 轻量 entrypoints），
+  # anthropic 用例起 1 个 Qwen3-0.6B server；统一限 1 卡对齐 Aone 1-PPU
+  # pod 语义
   CUDA_VISIBLE_DEVICES=0 _run_step "entrypoints_unit" 1 "${EP_SINGLE_UNIT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "v1_entrypoints" 1 "${EP_SINGLE_V1_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------
