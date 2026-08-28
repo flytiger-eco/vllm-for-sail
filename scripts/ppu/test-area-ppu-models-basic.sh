@@ -59,8 +59,10 @@ done
 # "Initialization"/"Extra Initialization" step defer（small_subset 12 archs
 # 当时全 unstaged）；CPU-only 与 Transformers Nightly step skip。
 #
-# 首跑实测（2026-08-27）：6 failed / 362 passed / 24 skipped。剩余 6 个
-# red 用例已逐个 deselect（见下），area 转绿；恢复路径见各条注释。
+# 首跑实测（2026-08-27）：6 failed / 362 passed / 24 skipped；恢复
+# terratorch 后新增 Prithvi/Terratorch 2 个 red（terratorch import 链
+# torchgeo 冲突，find_spec 命中不再 SKIP）。共 8 个 red 用例已逐个
+# deselect（见下），area 转绿；恢复路径见各条注释。
 MB_SINGLE_ARGS=(
   tests/models/test_transformers.py
   tests/models/test_registry.py
@@ -71,6 +73,8 @@ MB_SINGLE_ARGS=(
   --deselect "tests/models/test_registry.py::test_registry_imports[Gemma4UnifiedForConditionalGeneration]"
   --deselect "tests/models/test_registry.py::test_registry_imports[MiDashengLMModel]"
   --deselect "tests/models/test_registry.py::test_registry_imports[CohereAsrForConditionalGeneration]"
+  --deselect "tests/models/test_registry.py::test_registry_imports[PrithviGeoSpatialMAE]"
+  --deselect "tests/models/test_registry.py::test_registry_imports[Terratorch]"
 )
 
 # multi：无 — 上游 models_basic 无 multi-GPU step

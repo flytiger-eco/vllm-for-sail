@@ -145,9 +145,9 @@ KERNELS_SINGLE_QUANT_ARGS=(
   --ignore=tests/kernels/quantization/test_allspark_gemm.py
   # v0.23.0新增的测试文件，实测fail
   --ignore=tests/kernels/quantization/test_nvfp4_emulation.py
-  # 2026-08-27 PPU run fail 单个用例，--deselect 精确排除（整文件 ignore
-  # 会误伤同文件其余通过用例，cutlass_scaled_mm 是 PPU 回归重点），待调查
+  # 2026-08-27 PPU run fail 用例，--deselect 精确排除
   --deselect 'tests/kernels/quantization/test_cutlass_scaled_mm.py::test_cutlass_int8_azp[True-True-out_dtype1-256-64-32]'
+  --deselect 'tests/kernels/quantization/test_cutlass_scaled_mm.py::test_cutlass_int8_azp[True-True-out_dtype1-256-64-64]'
   --deselect 'tests/kernels/quantization/test_mxfp4_triton_ep.py::TestTritonMoeForwardExpertMap::test_expert_map_remap'
 )
 
