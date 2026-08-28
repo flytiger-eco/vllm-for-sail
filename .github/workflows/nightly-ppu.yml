@@ -16,6 +16,11 @@
 name: Nightly PPU Full Regression
 
 on:
+  # [临时] 合并默认分支前的可见性/触发验证，验证通过后 revert 本段移除
+  push:
+    branches: [feat/gha-ppu-test]
+    paths:
+      - ".github/workflows/nightly-ppu.yml"
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
