@@ -1,79 +1,50 @@
-# Aone CI `.aoneci/test-area-ppu-attention.yaml` 的 GitHub Actions 移植版
-# 结构：
-#   check-changes — 路径变更门禁（对位 Aone diff-guard）
-#   ppu-attention-test — PPU runner 上 docker 内装依赖 + 跑 pytest
-#   ppu-test-finish — 分支保护聚合点
+# Nightly PPU 回归（N0）——对位上游 Buildkite NIGHTLY=1 定时全量构建中的
+# nightly 性质 step（%N / torch_nightly）：kernels（3×%N）+ lora（%N）+
+# models-language（2×%N + torch_nightly），共 3 个 area。
+# 清单与判定口径见 scripts/ppu/nightly-tests-inventory.md。
+# 纯 PR 性质 area（basic-correctness / engine 等）上游 PR 构建本就覆盖，
+# 不在此复跑（单卡资源聚焦 PR 覆盖不到的 nightly 用例）。
 #
-# 测试选集见 scripts/ppu/test-area-ppu-attention.sh。
-name: Attention Test2 (PPU)
+# 触发：仅 schedule + 手动 dispatch（无 push/PR、无路径门禁——nightly 必全量）。
+#   cron "0 18 * * *" = UTC 18:00 = 北京时间 02:00，与白天 PR 测试错峰。
+#   注意：schedule 仅在仓库默认分支生效；其他分支用 workflow_dispatch 手动跑。
+# 串行防抢卡（单卡 PPU 资源）：
+#   - workflow 级 nightly-ppu-run：同一时间只允许一个 nightly run（排队不取消）
+#   - job 级 nightly-ppu-device：3 个 area 串行执行；与单 area 手动入口
+#     （test-area-ppu-models-language.yml）同 group 互斥
+# 时长：timeout 沿用各 PR 版上限（总和 ~9h 为上限而非实际时长），首跑校准
+name: Nightly PPU Full Regression
 
 on:
-  push:
-    branches: [feat/gha-ppu-test]
-    paths:
-      - ".github/workflows/test-area-ppu-attention.yml"
-      - "scripts/ppu/ppu_install_dependency.sh"
-      - "scripts/ppu/test-area-ppu-attention.sh"
-      - "tests/v1/attention/**"
-      - "vllm/v1/attention/**"
-  pull_request:
-    branches: [feat/gha-ppu-test]
+  schedule:
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: test-area-ppu-attention-${{ github.ref }}
-  cancel-in-progress: true
+  group: nightly-ppu-run
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  pull-requests: read
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
 
 jobs:
-  # ==================== 变更检查 ==================== #
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      changes_exist: ${{ steps.decide.outputs.changes_exist }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 仅 PR 用 dorny/paths-filter
-      - name: Detect file changes
-        id: filter
-        uses: dorny/paths-filter@v3
-        if: github.event_name == 'pull_request'
-        with:
-          filters: |
-            ppu_code:
-              - ".github/workflows/test-area-ppu-attention.yml"
-              - "scripts/ppu/ppu_install_dependency.sh"
-              - "scripts/ppu/test-area-ppu-attention.sh"
-              - "tests/v1/attention/**"
-              - "vllm/v1/attention/**"
-
-      - name: Decide whether to run tests
-        id: decide
-        env:
-          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR：按路径过滤结果决定
-            echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
-          else
-            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
-            echo "changes_exist=true" >> $GITHUB_OUTPUT
-          fi
-
-  # ==================== PPU Attention ==================== #
-  ppu-attention-test:
-    needs: [check-changes]
-    if: needs.check-changes.outputs.changes_exist == 'true'
+  # ==================== Nightly 全量（ 3 area ） ==================== #
+  ppu-nightly-test:
     runs-on: [self-hosted, ppu]
-    timeout-minutes: 180
+    strategy:
+      fail-fast: false # 单 area 失败不影响其余 area 排队执行
+      matrix:
+        include:
+          - {area: lora, timeout: 100, run_timeout: 90}
+          - {area: models-language, timeout: 300, run_timeout: 290}
+          - {area: kernels, timeout: 360, run_timeout: 350}
+    timeout-minutes: ${{ matrix.timeout }}
+    concurrency:
+      group: nightly-ppu-device
+      cancel-in-progress: false
     steps:
       - name: Clean workspace
         run: |
@@ -85,9 +56,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run PPU attention tests
-        timeout-minutes: 170
+      - name: Run PPU ${{ matrix.area }} tests
+        timeout-minutes: ${{ matrix.run_timeout }}
         env:
+          AREA: ${{ matrix.area }}
           PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
           PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
         run: |
@@ -112,22 +84,23 @@ jobs:
             bash -c "
               cd /workspace && \
               bash scripts/ppu/ppu_install_dependency.sh && \
-              bash scripts/ppu/test-area-ppu-attention.sh
+              bash scripts/ppu/test-area-ppu-${AREA}.sh
             "
 
       - name: Publish test summary
         if: always()
+        env:
+          AREA: ${{ matrix.area }}
         run: |
           f="test-results/summary.md"
           if [ -f "$f" ]; then
             cat "$f" >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "### Attention Test (PPU)"
+              echo "### Nightly PPU: ${AREA}"
               echo ""
               echo "summary.md not produced — the in-container script exited"
-              echo "before its EXIT trap fired (see 'Run PPU attention tests'"
-              echo "log)."
+              echo "before its EXIT trap fired (see run log)."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -135,14 +108,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-attention-test-results
-          path: |
-            test-results/
+          name: ppu-nightly-${{ matrix.area }}-test-results
+          path: test-results/
           if-no-files-found: warn
 
-  # ==================== 聚合点 ==================== #
-  ppu-test-finish:
-    needs: [check-changes, ppu-attention-test]
+  # ==================== 聚合点（nightly 失败标红供 triage，不阻塞 PR） ==================== #
+  nightly-finish:
+    needs: [ppu-nightly-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
