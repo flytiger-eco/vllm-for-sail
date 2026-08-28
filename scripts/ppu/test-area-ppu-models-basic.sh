@@ -46,7 +46,15 @@ for pkg in terratorch einops timm regex; do
     echo "[deps] ${pkg} already importable — skip"
   else
     echo "[deps] installing ${pkg}"
-    ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}"
+    if [ "${pkg}" = "terratorch" ]; then
+      # mirror 上 stringzilla 只剩 FlyTiger 壳包（无官方 wheel，
+      # cp312+cuda13.0 无预编译产物必炸）——容错跳过，防止 set -e
+      # 杀整个 step；Prithvi/Terratorch 用例已 deselect 兜底
+      ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}" || \
+        echo "[deps] WARN: ${pkg} install failed — continue without it"
+    else
+      ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}"
+    fi
   fi
 done
 
