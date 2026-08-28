@@ -10,8 +10,8 @@
 #   注意：schedule 仅在仓库默认分支生效；其他分支用 workflow_dispatch 手动跑。
 # 串行防抢卡（单卡 PPU 资源）：
 #   - workflow 级 nightly-ppu-run：同一时间只允许一个 nightly run（排队不取消）
-#   - job 级 nightly-ppu-device：3 个 area 串行执行；与单 area 手动入口
-#     （test-area-ppu-models-language.yml）同 group 互斥
+#   - matrix 级 max-parallel: 1：3 个 area 串行执行。
+#   - 跨 workflow 互斥无需额外配置：PPU 整机仅一个 self-hosted runner，天然串行。
 # 时长：timeout 沿用各 PR 版上限（总和 ~9h 为上限而非实际时长），首跑校准
 name: Nightly PPU test
 
@@ -41,15 +41,13 @@ jobs:
     runs-on: [self-hosted, ppu]
     strategy:
       fail-fast: false # 单 area 失败不影响其余 area 排队执行
+      max-parallel: 1 # 单卡 PPU：3 个 area 串行执行
       matrix:
         include:
           - {area: lora, timeout: 100, run_timeout: 90}
           - {area: models-language, timeout: 300, run_timeout: 290}
           - {area: kernels, timeout: 360, run_timeout: 350}
     timeout-minutes: ${{ matrix.timeout }}
-    concurrency:
-      group: nightly-ppu-device
-      cancel-in-progress: false
     steps:
       - name: Clean workspace
         run: |

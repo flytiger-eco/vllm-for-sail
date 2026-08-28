@@ -5,8 +5,9 @@
 # nightly 调度由 nightly-ppu.yml 聚合；
 # 本文件为单 area 手动入口（workflow_dispatch，用于首跑校准与排障），
 
-# 串行：job 级 concurrency 与 nightly-ppu.yml 同 group（nightly-ppu-device），
-#   单卡 PPU 互斥排队，防抢卡。
+# 串行：使用独立 concurrency group（与其余 test-area-ppu-* 一致），不与
+#   nightly-ppu.yml 共享 group——共享组会因「1 运行 + 1 等待」的容量限制
+#   互相挤掉排队任务。PPU 整机仅一个 self-hosted runner，天然串行防抢卡。
 
 name: Models Language Test (Nightly)
 
@@ -26,7 +27,7 @@ jobs:
     runs-on: [self-hosted, ppu]
     timeout-minutes: 300
     concurrency:
-      group: nightly-ppu-device
+      group: test-area-ppu-models-language-${{ github.ref }}
       cancel-in-progress: false
     steps:
       - name: Clean workspace
