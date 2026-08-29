@@ -1,3 +1,4 @@
+#include <cuda_pipeline.h>
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
 #include "torch_utils.h"
