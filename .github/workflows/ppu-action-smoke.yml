@@ -1,0 +1,140 @@
+# PPU Distributed Action 冒烟验证 —— 手动触发，不参与任何门禁
+#
+# 目的：在把 test-area-ppu-* 切到 K8s 调度之前，先用最小用例确认
+# flytiger-eco/ppu-distributed-action 这条链路本身通不通，并把后续迁移
+# 依赖的全部未知项在一次运行里问清楚（见 command 里的 [probe] 段）。
+#
+# 对位文档「示例四：810E 单卡」，默认参数即该示例。文档的完整示例是把同一份
+# with 块按场景复制 5 遍再用 if 挑一个执行；这里改为单 job + 三个 dispatch
+# 入参（board / nnodes / nproc_per_node），语义等价而无重复。
+#
+# 与真实 area workflow 的关键差异：本 workflow 不 checkout、不投递代码，
+# 只跑镜像自带的命令。代码投递怎么做是下一步的事。
+name: PPU Action Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: "板卡（node_selector board-type）"
+        required: true
+        default: OAM-810E
+        type: choice
+        options:
+          - OAM-810E
+          - ZW-M890P
+      nnodes:
+        description: "节点数（0=单机模式，≥2=多机 gang 调度）"
+        required: true
+        default: "0"
+        type: string
+      nproc_per_node:
+        description: "每节点 PPU 卡数"
+        required: true
+        default: "1"
+        type: string
+      image:
+        description: "容器镜像（默认用 PPU CI 的 vLLM 镜像，顺带验证该镜像在
+          ppu-sched 命名空间能否拉取；若拉取失败可换成文档示例镜像以隔离问题）"
+        required: true
+        default: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+        type: string
+  # workflow_dispatch 的运行按钮只对默认分支（v0.20.1）上已存在的 workflow
+  # 出现，本文件在特性分支上点不出来，故额外绑一个只盯自己路径的
+  # push 触发：改完推上去就跑一次，不影响其他任何提交。
+  push:
+    branches:
+      - feat/gha-ppu-test
+    paths:
+      - ".github/workflows/ppu-action-smoke.yml"
+
+concurrency:
+  group: ppu-action-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# push 触发时 inputs 为空，用 || 兼下默认值（= 文档「示例四：810E 单卡」）
+env:
+  SMOKE_BOARD: ${{ inputs.board || 'OAM-810E' }}
+  SMOKE_NNODES: ${{ inputs.nnodes || '0' }}
+  SMOKE_NPROC: ${{ inputs.nproc_per_node || '1' }}
+  SMOKE_IMAGE: ${{ inputs.image || 'pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312' }}
+
+jobs:
+  smoke:
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 20
+    steps:
+      - name: "PPU smoke (nnodes=${{ env.SMOKE_NNODES }}, nproc=${{ env.SMOKE_NPROC }})"
+        id: ppu
+        uses: flytiger-eco/ppu-distributed-action@main
+        with:
+          nnodes: ${{ env.SMOKE_NNODES }}
+          nproc_per_node: ${{ env.SMOKE_NPROC }}
+          node_selector: board-type=${{ env.SMOKE_BOARD }}
+          host_volumes: /nas_aisw:/nas_aisw,/mnt/wl_nas:/mnt/wl_nas
+          image: ${{ env.SMOKE_IMAGE }}
+          namespace: ppu-sched
+          timeout_minutes: 10
+          cleanup_policy: always
+          # 顺序有讲究：[probe] 段全部不致命（失败也继续），排在前面保证无论
+          # 后面怎么挂都能拿到环境信息；最后一行才是文档原样的 && 链，它的
+          # 退出码即本 step 的成败判定，与文档示例语义一致。
+          # 每行以 ';' 收尾而非依赖换行：action 若把多行 command 折成单行仍成立。
+          command: |
+            echo '=== PPU Verification ===' ;
+            echo "Hostname: $(hostname), Node: $NODE_NAME" ;
+            echo "RANK=$RANK NODE_RANK=$NODE_RANK WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT" ;
+            echo '--- [probe] identity / capabilities ---' ;
+            echo "user=$(id -un) uid=$(id -u) gid=$(id -g)" ;
+            echo "CapEff=$(grep CapEff /proc/self/status | awk '{print $2}') (0000003fffffffff = privileged)" ;
+            echo '--- [probe] shm / ulimit（原 docker --shm-size=8g / --ulimit 的替代能力）---' ;
+            echo "before: shm=$(df -h /dev/shm | tail -1) memlock=$(ulimit -l) stack=$(ulimit -s)" ;
+            mount -o remount,size=8G /dev/shm 2>/dev/null && echo "shm remount OK -> $(df -h /dev/shm | tail -1)" || echo "shm remount DENIED (not privileged)" ;
+            ulimit -l unlimited 2>/dev/null && echo "memlock raise OK -> $(ulimit -l)" || echo "memlock raise DENIED" ;
+            ulimit -s 65536 2>/dev/null && echo "stack raise OK -> $(ulimit -s)" || echo "stack raise DENIED" ;
+            echo '--- [probe] NAS 可写性（决定代码投递能否落在 NAS）---' ;
+            for d in /nas_aisw /mnt/wl_nas ; do echo "$d: $(ls -ld $d 2>&1 | head -1)" ; touch $d/.ci-write-probe 2>/dev/null && { echo "  -> writable YES" ; rm -f $d/.ci-write-probe ; } || echo "  -> writable NO" ; done ;
+            echo '--- [probe] 出网（决定 Pod 内能否 git clone / pip install）---' ;
+            echo "  proxies: http_proxy=${http_proxy:-<unset>} https_proxy=${https_proxy:-<unset>} no_proxy=${no_proxy:-<unset>}" ;
+            getent hosts github.com || echo "  github.com DNS FAIL" ;
+            curl -sS -m 10 -I -o /dev/null -w "  github.com http=%{http_code}\n" https://github.com || echo "  github.com UNREACHABLE" ;
+            curl -sS -m 10 -I -o /dev/null -w "  artifactory http=%{http_code} (401/403 也算可达，该源要 netrc 认证)\n" https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple || echo "  artifactory UNREACHABLE" ;
+            echo '--- [probe] toolchain / device ---' ;
+            git --version || echo "  git MISSING" ;
+            python3 -c "import torch; print('  torch', torch.__version__, 'device_count', torch.cuda.device_count())" 2>&1 | tail -3 ;
+            echo '=== [verify] 文档示例四原样（决定本 step 退出码）===' ;
+            ppu-smi && echo '--- ls /nas_aisw ---' && ls /nas_aisw && echo '--- ls /mnt/wl_nas ---' && ls /mnt/wl_nas && echo '=== DONE ==='
+
+      # 顺带验证 action 的 outputs 契约（文档声明有这 4 个）。
+      # 入参与 outputs 一律经 env 传入、不直接插值进 shell：workflow_dispatch
+      # 的 inputs 虽只有写权限者能设，但拼进 run 会变成注入面。
+      - name: Report action outputs
+        if: always()
+        env:
+          IN_BOARD: ${{ env.SMOKE_BOARD }}
+          IN_NNODES: ${{ env.SMOKE_NNODES }}
+          IN_NPROC: ${{ env.SMOKE_NPROC }}
+          IN_IMAGE: ${{ env.SMOKE_IMAGE }}
+          OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
+          OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
+          OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
+          OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
+        run: |
+          {
+            echo "### PPU Action Smoke Test"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| board | ${IN_BOARD} |"
+            echo "| nnodes / nproc_per_node | ${IN_NNODES} / ${IN_NPROC} |"
+            echo "| image | \`${IN_IMAGE}\` |"
+            echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
+            echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
+            echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
+            echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
+          } >> "$GITHUB_STEP_SUMMARY"
