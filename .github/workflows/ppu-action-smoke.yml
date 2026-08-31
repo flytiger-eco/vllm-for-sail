@@ -2,11 +2,11 @@
 #
 # 目的：在把 test-area-ppu-* 切到 K8s 调度之前，先用最小用例确认
 # flytiger-eco/ppu-distributed-action 这条链路本身通不通，并把后续迁移
-# 依赖的全部未知项在一次运行里问清楚（见 command 里的 [probe] 段）。
+# 依赖的全部未知项在一次运行里问清楚（见 probe 脚本）。
 #
 # 对位文档「示例四：810E 单卡」，默认参数即该示例。文档的完整示例是把同一份
-# with 块按场景复制 5 遍再用 if 挑一个执行；这里改为单 job + 三个 dispatch
-# 入参（board / nnodes / nproc_per_node），语义等价而无重复。
+# with 块按场景复制 5 遍再用 if 挑一个执行；这里改为单 job + 四个 dispatch
+# 入参，语义等价而无重复。
 #
 # 与真实 area workflow 的关键差异：本 workflow 不 checkout、不投递代码，
 # 只跑镜像自带的命令。代码投递怎么做是下一步的事。
@@ -69,6 +69,65 @@ jobs:
       image: ghcr.io/actions/actions-runner:latest
     timeout-minutes: 20
     steps:
+      # 为什么要绕 base64 这一圈：action.yml 的「校验 inputs」步骤把
+      # ${{ inputs.command }} 直接文本插值进 shell —— if [ -z "<command>" ]。
+      # 多行 command 被原样粘进那对双引号里，引号奇偶错乱后裸括号会直接引发
+      # syntax error（已本地照该模板复现，报错逐字一致）。base64 后是单行且
+      # 只含 [A-Za-z0-9+/=]，被那对双引号整段吞掉，既不解析也不执行。
+      # 顺带的好处：heredoc 用引号界定符，$(...) 不在 runner 侧展开，
+      # 全部留到 Pod 里才求值。
+      - name: Build probe payload
+        shell: bash
+        id: payload
+        run: |
+          cat > /tmp/ppu-probe.sh <<'PROBE'
+          #!/bin/bash
+          echo '=== PPU Verification ==='
+          echo "Hostname: $(hostname), Node: $NODE_NAME"
+          echo "RANK=$RANK NODE_RANK=$NODE_RANK WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+
+          echo '--- [probe] 身份与权限 ---'
+          echo "user=$(id -un) uid=$(id -u) gid=$(id -g)"
+          echo "CapEff=$(awk '/CapEff/{print $2}' /proc/self/status)"
+          echo '  参考：0000003fffffffff=privileged。submit.sh 未设 securityContext，预期非 privileged'
+
+          echo '--- [probe] shm 与 ulimit ---'
+          echo "shm: $(df -h /dev/shm | tail -1)"
+          echo '  参考：submit.sh 已给 /dev/shm 挂 emptyDir medium=Memory sizeLimit=64Gi，原 --shm-size=8g 已被覆盖'
+          echo "memlock=$(ulimit -l) stack=$(ulimit -s)"
+          ulimit -l unlimited 2>/dev/null && echo "  memlock 提升 OK -> $(ulimit -l)" || echo '  memlock 提升被拒（非 privileged，预期如此；原 docker --ulimit memlock=-1 无等价物）'
+
+          echo '--- [probe] PPU 设备 ---'
+          ls -l /dev/alixpu* 2>/dev/null || echo '  /dev/alixpu* 不存在（设备插件未注入？）'
+          python3 -c 'import torch; print("  torch", torch.__version__, "device_count", torch.cuda.device_count())' 2>&1 | tail -3
+
+          echo '--- [probe] NAS 可写性（决定代码投递能否落 NAS）---'
+          for d in /nas_aisw /mnt/wl_nas; do
+            echo "$d: $(ls -ld "$d" 2>&1 | head -1)"
+            if touch "$d/.ci-write-probe" 2>/dev/null; then
+              echo '  -> writable YES'
+              rm -f "$d/.ci-write-probe"
+            else
+              echo '  -> writable NO'
+            fi
+          done
+
+          echo '--- [probe] 出网（决定 Pod 内能否 git clone / pip install）---'
+          echo "  proxies: http_proxy=${http_proxy:-<unset>} https_proxy=${https_proxy:-<unset>} no_proxy=${no_proxy:-<unset>}"
+          getent hosts github.com || echo '  github.com DNS FAIL'
+          curl -sS -m 10 -I -o /dev/null -w '  github.com http=%{http_code}\n' https://github.com || echo '  github.com UNREACHABLE'
+          curl -sS -m 10 -I -o /dev/null -w '  artifactory http=%{http_code}（401/403 也算可达，该源要 netrc 认证）\n' https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple || echo '  artifactory UNREACHABLE'
+          git --version || echo '  git MISSING'
+
+          echo '=== [verify] 文档示例四原样（决定本 step 退出码）==='
+          ppu-smi && echo '--- ls /nas_aisw ---' && ls /nas_aisw && echo '--- ls /mnt/wl_nas ---' && ls /mnt/wl_nas && echo '=== DONE ==='
+          PROBE
+          # 语法自检：在 runner 上早失败，好过在 Pod 里烧一次调度
+          bash -n /tmp/ppu-probe.sh
+          # tr 而非 base64 -w0：后者是 GNU 专有，前者到处都在
+          echo "b64=$(base64 < /tmp/ppu-probe.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          echo "payload $(wc -c < /tmp/ppu-probe.sh) bytes"
+
       - name: "PPU smoke (nnodes=${{ env.SMOKE_NNODES }}, nproc=${{ env.SMOKE_NPROC }})"
         id: ppu
         uses: flytiger-eco/ppu-distributed-action@main
@@ -81,34 +140,8 @@ jobs:
           namespace: ppu-sched
           timeout_minutes: 10
           cleanup_policy: always
-          # 顺序有讲究：[probe] 段全部不致命（失败也继续），排在前面保证无论
-          # 后面怎么挂都能拿到环境信息；最后一行才是文档原样的 && 链，它的
-          # 退出码即本 step 的成败判定，与文档示例语义一致。
-          # 每行以 ';' 收尾而非依赖换行：action 若把多行 command 折成单行仍成立。
-          command: |
-            echo '=== PPU Verification ===' ;
-            echo "Hostname: $(hostname), Node: $NODE_NAME" ;
-            echo "RANK=$RANK NODE_RANK=$NODE_RANK WORLD_SIZE=$WORLD_SIZE NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT" ;
-            echo '--- [probe] identity / capabilities ---' ;
-            echo "user=$(id -un) uid=$(id -u) gid=$(id -g)" ;
-            echo "CapEff=$(grep CapEff /proc/self/status | awk '{print $2}') (0000003fffffffff = privileged)" ;
-            echo '--- [probe] shm / ulimit（原 docker --shm-size=8g / --ulimit 的替代能力）---' ;
-            echo "before: shm=$(df -h /dev/shm | tail -1) memlock=$(ulimit -l) stack=$(ulimit -s)" ;
-            mount -o remount,size=8G /dev/shm 2>/dev/null && echo "shm remount OK -> $(df -h /dev/shm | tail -1)" || echo "shm remount DENIED (not privileged)" ;
-            ulimit -l unlimited 2>/dev/null && echo "memlock raise OK -> $(ulimit -l)" || echo "memlock raise DENIED" ;
-            ulimit -s 65536 2>/dev/null && echo "stack raise OK -> $(ulimit -s)" || echo "stack raise DENIED" ;
-            echo '--- [probe] NAS 可写性（决定代码投递能否落在 NAS）---' ;
-            for d in /nas_aisw /mnt/wl_nas ; do echo "$d: $(ls -ld $d 2>&1 | head -1)" ; touch $d/.ci-write-probe 2>/dev/null && { echo "  -> writable YES" ; rm -f $d/.ci-write-probe ; } || echo "  -> writable NO" ; done ;
-            echo '--- [probe] 出网（决定 Pod 内能否 git clone / pip install）---' ;
-            echo "  proxies: http_proxy=${http_proxy:-<unset>} https_proxy=${https_proxy:-<unset>} no_proxy=${no_proxy:-<unset>}" ;
-            getent hosts github.com || echo "  github.com DNS FAIL" ;
-            curl -sS -m 10 -I -o /dev/null -w "  github.com http=%{http_code}\n" https://github.com || echo "  github.com UNREACHABLE" ;
-            curl -sS -m 10 -I -o /dev/null -w "  artifactory http=%{http_code} (401/403 也算可达，该源要 netrc 认证)\n" https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple || echo "  artifactory UNREACHABLE" ;
-            echo '--- [probe] toolchain / device ---' ;
-            git --version || echo "  git MISSING" ;
-            python3 -c "import torch; print('  torch', torch.__version__, 'device_count', torch.cuda.device_count())" 2>&1 | tail -3 ;
-            echo '=== [verify] 文档示例四原样（决定本 step 退出码）===' ;
-            ppu-smi && echo '--- ls /nas_aisw ---' && ls /nas_aisw && echo '--- ls /mnt/wl_nas ---' && ls /mnt/wl_nas && echo '=== DONE ==='
+          # 必须是单行、且不含双引号，见上面 payload 步骤的注释
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-probe.sh && bash /tmp/ppu-probe.sh
 
       # 顺带验证 action 的 outputs 契约（文档声明有这 4 个）。
       # 入参与 outputs 一律经 env 传入、不直接插值进 shell：workflow_dispatch
