@@ -114,6 +114,17 @@ jobs:
     outputs:
       ws: ${{ steps.stage.outputs.ws }}
     steps:
+      # 清理上次 docker 运行残留的 root 属主文件，否则 checkout 失败（sglang 经验）。
+      # 本 area 虽然已经不再 docker run，但工作区里还积着迁移前的残留（.pytest_cache、
+      # __pycache__、vllm/vllm_flash_attn/** 等），runner 用户 aiswuser 删不掉，
+      # git clean -ffdx 会整批 Permission denied 并连带 checkout 一起挂。
+      - name: Clean workspace (root-owned files from prior Docker runs)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
