@@ -37,16 +37,21 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # ------------------------------------------------------------------------------
 # [deps] area 特有 pip 依赖（先 import 探测再补装；镜像预装则跳过）
 # 出处：ppu_extras/models_language.yaml extra_pip_install ——
-#   terratorch/einops/timm/regex：tests/models/registry.py 引用链在 collection
+#   einops/timm/regex：tests/models/registry.py 引用链在 collection
 #     阶段 module-level import 触发缺包（同 models_basic）
 #   mteb：pooling_mteb_test/*.py collection 阶段 `import mteb`，缺失则 14 个
 #     文件 collection fail（mteb 用例本身无 core_model marker，runtime 由
 #     -m filter deselect，装它仅为 collection 不炸）
+# 不装 terratorch（原快照含，已移除）：上游 vLLM 已隔离（#41376），
+#   tests/models/test_registry.py 有 find_spec 守卫，缺失自动 skip；
+#   且依赖链 terratorch→albucore→stringzilla 在内部 mirror 只剩
+#   FlyTiger 壳包 sdist（无 cp312+cuda13.0+torch2.11.0 预编译产物），
+#   pip 必炸并触发 set -e 杀整个 step（2026-08-31 本 area 实炸）。
 # 均为纯 Python 包，临时 pip install 安全。镜像 rebake 预装后本段可删。
 # ------------------------------------------------------------------------------
 PIP_INSTALL="python3 -m pip install --no-cache-dir"
 PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
-for pkg in terratorch einops timm regex mteb; do
+for pkg in einops timm regex mteb; do
   if python3 -c "import ${pkg}" 2>/dev/null; then
     echo "[deps] ${pkg} already importable — skip"
   else
