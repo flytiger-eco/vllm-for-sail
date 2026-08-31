@@ -41,7 +41,7 @@ jobs:
     runs-on: [self-hosted, ppu]
     strategy:
       fail-fast: false # 单 area 失败不影响其余 area 排队执行
-      max-parallel: 1 # 单卡 PPU：3 个 area 串行执行 
+      max-parallel: 1 # 单卡 PPU：3 个 area 串行执行  
       matrix:
         include:
           - {area: lora, timeout: 100, run_timeout: 90}
