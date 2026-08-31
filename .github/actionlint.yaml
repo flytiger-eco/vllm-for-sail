@@ -1,0 +1,12 @@
+# actionlint 配置（pre-commit 的 actionlint hook 读取本文件）
+#
+# runs-on 里的自定义标签需在此登记，否则 actionlint 报 "label is unknown"。
+# ARC（Actions Runner Controller）的 runner scale set 只带 scale set 名这一个
+# 标签、不带 self-hosted，故 k8s-runner-group-* 必须显式声明。
+self-hosted-runner:
+  labels:
+    # PPU 机器上的 self-hosted runner（test-area-ppu-*.yml、nightly-ppu.yml）
+    - ppu
+    # PPU 集群的 CPU runner group：job 本体跑在 CPU 上，PPU 卡由
+    # flytiger-eco/ppu-distributed-action 以 K8s Pod 形式申请
+    - k8s-runner-group-cpu-flytiger

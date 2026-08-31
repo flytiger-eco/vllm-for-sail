@@ -1,8 +1,23 @@
 # Aone CI `.aoneci/test-area-ppu-basic-correctness.yaml` 的 GitHub Actions 移植版
 # 结构：
 #   check-changes — 路径变更门禁（对位 Aone diff-guard）
-#   ppu-basic-correctness-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-basic-correctness-test — CPU runner 上用 ppu-distributed-action 拉起
+#     PPU Pod，Pod 内装依赖 + 跑 pytest
 #   ppu-test-finish — 分支保护聚合点
+#
+# 执行形态：本 area 由 self-hosted PPU runner + docker run 切到 K8s 调度 ——
+# job 跑在 CPU runner group，flytiger-eco/ppu-distributed-action 按
+# nnodes/nproc_per_node 在 PPU 节点创建 Pod、流式回传 worker-0 日志。
+# nnodes=0 为单机模式（不建 PodGroup/Headless Service），nproc_per_node=2
+# 满足本 area multi 段测试内部 TP=2 的用卡需求。
+#
+# 代码投递：Pod 只有 image + host_volumes，拿不到 runner 工作区。故 runner
+# checkout 后把工作区 stage 到 NAS 上的 ${PPU_CI_WS}（/mnt/wl_nas 下按 run
+# 命名），Pod 挂载同一宿主机路径后 cd 进去执行；产物 test-results/ 由 runner
+# 从该目录反向取回后上传，作业结束删除该目录。
+#
+# 前置（集群侧，非本仓库可控）：PPU 节点已预拉 ${PPU_BASE_IMAGE}，
+# CPU runner 与 PPU 节点看到的是同一份 /mnt/wl_nas、/nas_aisw。
 #
 # 测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh，
 name: Basic Correctness Test (PPU)
@@ -30,6 +45,14 @@ permissions:
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+  PPU_NAMESPACE: ppu-sched
+  # 板卡硬约束：与脚本里 PPU_DEVICE_LABEL=OAM-810E 的用例快照保持一致
+  PPU_NODE_SELECTOR: board-type=OAM-810E
+  # /nas_aisw = 模型/HF 缓存；/mnt/wl_nas = 代码投递与产物回收
+  PPU_HOST_VOLUMES: /nas_aisw:/nas_aisw,/mnt/wl_nas:/mnt/wl_nas
+  # NAS 上的本 run 专属工作区（runner 与 Pod 共用同一绝对路径）
+  PPU_CI_STAGE_ROOT: /mnt/wl_nas/gha-ci/vllm-for-sail
+  PPU_CI_WS: /mnt/wl_nas/gha-ci/vllm-for-sail/basic-correctness-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   # ==================== 变更检查 ==================== #
@@ -72,48 +95,68 @@ jobs:
   ppu-basic-correctness-test:
     needs: [check-changes]
     if: needs.check-changes.outputs.changes_exist == 'true'
-    runs-on: [self-hosted, ppu]
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     timeout-minutes: 100
     steps:
-      - name: Clean workspace
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            ${{ env.PPU_BASE_IMAGE }} \
-            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
-
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run PPU basic correctness tests
-        timeout-minutes: 90
-        env:
-          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
-          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+      # Pod 侧只能看到 host_volumes，故把工作区投递到 NAS 上的共用路径。
+      # 不投递 .git（244 MB 全是小文件，NFS 上拷贝极慢）：容器内既不构建
+      # wheel 也不靠 setuptools-scm 推导版本号（vllm/_version.py 由
+      # ppu_install_dependency.sh 从镜像 site-packages 拷入），无 git 依赖。
+      - name: Stage workspace to NAS
+        shell: bash
         run: |
-          docker run --rm \
-            --privileged \
-            --network host \
-            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
-            --device=/dev/alixpu_ctl \
-            --device=/dev/alixpu \
-            --ipc=host \
-            --init \
-            --shm-size=8g \
-            --ulimit memlock=-1 \
-            --ulimit stack=67108864 \
-            -v ${{ github.workspace }}:/workspace \
-            -v /nas_aisw:/nas_aisw \
-            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
-            -e PPU_ARTIFACTORY_USER \
-            -e PPU_ARTIFACTORY_PASSWORD \
-            -e PPU_DEVICE_LABEL=OAM-810E \
-            ${{ env.PPU_BASE_IMAGE }} \
-            bash -c "
-              cd /workspace && \
-              bash scripts/ppu/ppu_install_dependency.sh && \
-              bash scripts/ppu/test-area-ppu-basic-correctness.sh
-            "
+          set -euo pipefail
+          # 兜底清理：cleanup 步骤因 root 属主文件失败时留下的历史目录
+          find "${PPU_CI_STAGE_ROOT}" -maxdepth 1 -mindepth 1 -type d -mtime +1 \
+            -exec rm -rf {} + 2>/dev/null || true
+          mkdir -p "${PPU_CI_WS}"
+          tar -cf - --exclude=./.git . | tar -xf - -C "${PPU_CI_WS}"
+          echo "[stage] ${PPU_CI_WS} -> $(du -sh "${PPU_CI_WS}" | cut -f1)"
+
+      - name: Run PPU basic correctness tests
+        uses: flytiger-eco/ppu-distributed-action@main
+        with:
+          nnodes: 0
+          nproc_per_node: 2
+          node_selector: ${{ env.PPU_NODE_SELECTOR }}
+          host_volumes: ${{ env.PPU_HOST_VOLUMES }}
+          image: ${{ env.PPU_BASE_IMAGE }}
+          namespace: ${{ env.PPU_NAMESPACE }}
+          timeout_minutes: 90
+          # always：失败 Pod 若滞留会一直占着 2 张卡，挡住后续 run
+          cleanup_policy: always
+          extra_env: "HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
+          # 每行以 ';' 收尾而非依赖换行：action 若把多行 command 折成单行仍成立。
+          # /etc/hosts 补一条自身记录 = 原 docker --add-host（Ray/vLLM 要能把
+          # hostname 解析成本机 IP）；末尾 chmod 让 runner（非 root）能取回产物
+          # 并删掉 Pod 以 root 写下的 __pycache__ 等文件。
+          command: |
+            cd ${{ env.PPU_CI_WS }} || exit 1 ;
+            echo "[pod] host=$(hostname) node=$NODE_NAME rank=$RANK nproc=$NPROC_PER_NODE" ;
+            echo "$(hostname -i | awk '{print $1}') $(hostname)" >> /etc/hosts || true ;
+            rc=0 ;
+            bash scripts/ppu/ppu_install_dependency.sh || rc=$? ;
+            if [ "$rc" -eq 0 ]; then bash scripts/ppu/test-area-ppu-basic-correctness.sh || rc=$? ; fi ;
+            chmod -R a+rwX . 2>/dev/null || true ;
+            echo "[pod] exit rc=$rc" ;
+            exit "$rc"
+
+      - name: Collect test results from NAS
+        if: always()
+        run: |
+          if [ -d "${PPU_CI_WS}/test-results" ]; then
+            mkdir -p test-results
+            cp -r "${PPU_CI_WS}/test-results/." test-results/
+            ls -l test-results
+          else
+            echo "::warning::no test-results under ${PPU_CI_WS} — the in-container" \
+                 "script exited before its EXIT trap fired, or the Pod never started"
+          fi
 
       - name: Publish test summary
         if: always()
@@ -139,6 +182,12 @@ jobs:
           path: |
             test-results/
           if-no-files-found: warn
+
+      - name: Clean up NAS workspace
+        if: always()
+        run: |
+          rm -rf "${PPU_CI_WS}" || echo "::warning::failed to remove ${PPU_CI_WS}" \
+            "(root-owned leftovers) — next run's stale-dir sweep will retry"
 
   # ==================== 聚合点 ==================== #
   ppu-test-finish:
