@@ -1,0 +1,198 @@
+# Aone CI `.aoneci/test-area-ppu-model-executor.yaml` 的 GitHub Actions 移植版
+# 结构：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-model-executor-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-model-executor-finish — 分支保护聚合点
+#
+# 测试选集见 scripts/ppu/test-area-ppu-model-executor.sh。
+name: Model Executor Test (PPU)
+
+on:
+  push:
+    branches: [v0.23.0]
+    paths:
+      - ".github/workflows/test-area-ppu-model-executor.yml"
+      - "scripts/ppu/ppu_install_dependency.sh"
+      - "scripts/ppu/test-area-ppu-model-executor.sh"
+      - "tests/model_executor/**"
+      - "vllm/model_executor/**"
+  pull_request:
+    branches: [v0.23.0]
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
+
+concurrency:
+  group: test-area-ppu-model-executor-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+
+jobs:
+  # ==================== 变更检查 ==================== #
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_exist: ${{ steps.decide.outputs.changes_exist }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 仅 PR 用 dorny/paths-filter
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            ppu_code:
+              - ".github/workflows/test-area-ppu-model-executor.yml"
+              - "scripts/ppu/ppu_install_dependency.sh"
+              - "scripts/ppu/test-area-ppu-model-executor.sh"
+              - "tests/model_executor/**"
+              - "vllm/model_executor/**"
+
+      - name: Decide whether to run tests
+        id: decide
+        env:
+          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # PR：按路径过滤结果决定
+            echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
+          else
+            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
+            echo "changes_exist=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ==================== PPU Model Executor ==================== #
+  ppu-model-executor-test:
+    needs: [check-changes]
+    # fork PR 不进特权 self-hosted runner（--privileged + 设备直通 +
+    # NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码驱动）
+    if: >-
+      needs.check-changes.outputs.changes_exist == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 45
+    steps:
+      - name: Clean workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run PPU model executor tests
+        timeout-minutes: 40
+        env:
+          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
+        run: |
+          docker run --rm \
+            --privileged \
+            --network host \
+            --add-host="$(hostname):$(hostname -I | awk '{print $1}')" \
+            --device=/dev/alixpu_ctl \
+            --device=/dev/alixpu \
+            --ipc=host \
+            --init \
+            --shm-size=8g \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /nas_aisw:/nas_aisw \
+            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
+            -e PPU_ARTIFACTORY_USER \
+            -e PPU_ARTIFACTORY_PASSWORD \
+            -e TEST_MODE \
+            -e PYTEST_EXTRA_ARGS \
+            -e PPU_DEVICE_LABEL=OAM-810E \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "
+              cd /workspace && \
+              bash scripts/ppu/ppu_install_dependency.sh && \
+              bash scripts/ppu/test-area-ppu-model-executor.sh
+            "
+
+      - name: Publish test summary
+        if: always()
+        run: |
+          f="test-results/summary.md"
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Model Executor Test (PPU)"
+              echo ""
+              echo "summary.md not produced — the in-container script exited"
+              echo "before its EXIT trap fired (see 'Run PPU model executor"
+              echo "tests' log)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-model-executor-test-results
+          path: |
+            test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Annotate failed tests
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/test.xml
+          check_name: PPU Model Executor Test Report
+          annotate_only: true
+          detailed_summary: true
+          fail_on_failure: false
+          require_tests: false
+
+  # ==================== 聚合点 ==================== #
+  ppu-model-executor-finish:
+    needs: [check-changes, ppu-model-executor-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              sep = ','
+              print(f'Failed jobs: {sep.join(failed)}')
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
