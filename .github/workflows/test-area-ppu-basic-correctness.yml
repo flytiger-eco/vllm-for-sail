@@ -1,29 +1,35 @@
 # Aone CI `.aoneci/test-area-ppu-basic-correctness.yaml` 的 GitHub Actions 移植版
 # 结构：
 #   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-stage     — self-hosted PPU runner 上 checkout + 投递代码到 NAS（零占卡）
 #   ppu-basic-correctness-test — CPU runner 上用 ppu-distributed-action 拉起
-#     PPU Pod，Pod 内装依赖 + 跑 pytest
+#     PPU Pod，Pod 内装依赖 + 跑 pytest（真正吃卡的一段）
+#   ppu-collect   — self-hosted PPU runner 上取回产物、上传、清理 NAS
 #   ppu-test-finish — 分支保护聚合点
 #
-# 执行形态：本 area 由 self-hosted PPU runner + docker run 切到 K8s 调度 ——
-# job 跑在 CPU runner group，flytiger-eco/ppu-distributed-action 按
-# nnodes/nproc_per_node 在 PPU 节点创建 Pod、流式回传 worker-0 日志。
+# 执行形态：本 area 从 self-hosted PPU runner + docker run 切到 K8s 调度。
 # nnodes=0 为单机模式（不建 PodGroup/Headless Service），nproc_per_node=2
 # 满足本 area multi 段测试内部 TP=2 的用卡需求。
 #
-# 代码投递：Pod 只有 image + host_volumes，拿不到 runner 工作区。故 runner
-# checkout 后把工作区 stage 到 NAS 上的共用目录（Stage 步骤按
-# PPU_CI_STAGE_CANDIDATES 次序探测可写根目录，结果写回 PPU_CI_WS），
-# Pod 挂载同一宿主机路径后 cd 进去执行；产物 test-results/ 由 runner
-# 从该目录反向取回后上传，作业结束删除该目录。
+# 为什么还留着 self-hosted runner：Pod 只有 image + host_volumes，拿不到 runner
+# 工作区，代码必须走一个两边都能看到的中转。而 2026-08-31 冒烟实测确认：
+#   - CPU runner 的 job 容器里没有任何 NAS（ARC 用 k8s-novolume hook，只挂了
+#     kubectl 的 hostPath），所以 CPU runner 写不进 NAS；
+#   - Pod 内 github.com DNS 能解析但 TCP 超时，所以 Pod 也没法自己 git clone。
+# 于是让 self-hosted runner（就在 PPU 机器上，既能访问 github 又挂着 /nas_aisw）
+# 只做 checkout + 拷 NAS + 取回产物 —— 零占卡、几十秒，吃卡的测试跑在 K8s Pod 里。
+# 集群侧若后续给 job 容器挂上 NAS（改 action 仓库的 hook-extension-cpu
+# ConfigMap），ppu-stage / ppu-collect 两个 job 可以直接删掉，中间那个 job 不用动。
 #
-# 探测而非写死路径的原因：本集群 ARC 用 k8s-novolume hook（runner pod 与
-# job 容器无共享卷），job 容器里 /mnt/wl_nas 并不存在、且无权在 /mnt
-# 下新建。哪个 NAS 挂载点对 job 容器可见可写只能运行时知道，故 Stage
-# 步骤自带环境盘点输出，全部候选都不可用时直接 ::error 报出它看到的现状。
+# 已知能力回退：Pod 非 privileged，memlock 只有 64KB 且提不上去（K8s pod spec
+# 无 ulimit 字段），原 docker `--ulimit memlock=-1` 没有等价物。若测试因 pinned
+# memory / RDMA 注册失败，需要集群侧给 pod 加 securityContext。
+# 已确认不再是问题的：/dev/shm 由 submit.sh 挂成 emptyDir medium=Memory
+# sizeLimit=64Gi，比原来 `--shm-size=8g` 更宽。
 #
-# 前置（集群侧，非本仓库可控）：PPU 节点已预拉 ${PPU_BASE_IMAGE}，
-# CPU runner 与 PPU 节点看到的是同一份 NAS 导出。
+# 抢卡风险：其余 9 个 area 仍在 self-hosted runner 上跑 docker run，本 area 的
+# Pod 与它们不再由"单 runner 天然串行"隔开，可能同时用卡。若出现"96 GiB free
+# 但分配失败"这类虚假 OOM，需要重新引入跨 workflow 的共享并发组。
 #
 # 测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh，
 name: Basic Correctness Test (PPU)
@@ -54,12 +60,12 @@ env:
   PPU_NAMESPACE: ppu-sched
   # 板卡硬约束：与脚本里 PPU_DEVICE_LABEL=OAM-810E 的用例快照保持一致
   PPU_NODE_SELECTOR: board-type=OAM-810E
-  # /nas_aisw = 模型/HF 缓存；/mnt/wl_nas = 通用 NAS（两者都挂给 Pod，
-  # 代码投递目录在哪一个由 Stage 步骤探测得出）
-  PPU_HOST_VOLUMES: /nas_aisw:/nas_aisw,/mnt/wl_nas:/mnt/wl_nas
-  # 代码投递候选根目录，按序探测可写性（空格分隔）
-  PPU_CI_STAGE_CANDIDATES: /nas_aisw/gha-ci/vllm-for-sail /mnt/wl_nas/gha-ci/vllm-for-sail
-  # 本 run 专属目录名；完整路径 PPU_CI_WS 由 Stage 步骤写入 GITHUB_ENV
+  # Pod 侧挂载（hostPath）。左侧是宿主机路径、右侧是容器内路径 —— wl_nas 这块
+  # 盘在宿主机上叫 /wl_nas，容器内习惯挂到 /mnt/wl_nas（owner 2026-08-31 指正）。
+  # /nas_aisw 同时承载模型权重、HF 缓存与代码投递目录
+  PPU_HOST_VOLUMES: /nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas
+  # 代码投递根目录：self-hosted runner 与 PPU 节点看到的是同一份导出
+  PPU_CI_STAGE_ROOT: /nas_aisw/gha-ci/vllm-for-sail
   PPU_CI_RUN_TAG: basic-correctness-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -99,58 +105,112 @@ jobs:
             echo "changes_exist=true" >> $GITHUB_OUTPUT
           fi
 
-  # ==================== PPU Basic Correctness  ==================== #
-  ppu-basic-correctness-test:
+  # ==================== 代码投递（零占卡）==================== #
+  ppu-stage:
     needs: [check-changes]
     if: needs.check-changes.outputs.changes_exist == 'true'
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    timeout-minutes: 100
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 20
+    outputs:
+      ws: ${{ steps.stage.outputs.ws }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Pod 侧只能看到 host_volumes，故把工作区投递到两边共用的 NAS 路径。
       # 不投递 .git（244 MB 全是小文件，NFS 上拷贝极慢）：容器内既不构建
       # wheel 也不靠 setuptools-scm 推导版本号（vllm/_version.py 由
       # ppu_install_dependency.sh 从镜像 site-packages 拷入），无 git 依赖。
+      # 也排除 test-results：那是上一个 run 的 collect job 留在工作区里的。
       - name: Stage workspace to NAS
+        id: stage
         shell: bash
         run: |
-          set -uo pipefail
-          echo "========== [probe] job container view =========="
-          echo "[probe] user=$(id -un 2>/dev/null || echo '?') uid=$(id -u) gid=$(id -g)"
-          for p in / /mnt /nas_aisw /mnt/wl_nas; do
-            echo "[probe] ${p}: $(ls -ld "${p}" 2>&1 | head -1)"
-          done
-          echo "[probe] nfs/nas mounts:"
-          df -hT 2>/dev/null | grep -iE "nfs|nas|Filesystem" || echo "[probe] (none)"
-
-          echo "========== [stage] pick a writable shared root =========="
-          ws=""
-          for root in ${PPU_CI_STAGE_CANDIDATES}; do
-            if mkdir -p "${root}/${PPU_CI_RUN_TAG}" 2>/dev/null \
-               && [ -w "${root}/${PPU_CI_RUN_TAG}" ]; then
-              ws="${root}/${PPU_CI_RUN_TAG}"
-              echo "[stage] usable: ${root}"
-              break
-            fi
-            echo "[stage] NOT usable: ${root}"
-          done
-          if [ -z "${ws}" ]; then
-            echo "::error::no writable shared dir in this job container (tried:" \
-                 "${PPU_CI_STAGE_CANDIDATES}). ARC 用 k8s-novolume hook，代码投递" \
-                 "要求 NAS 必须挂入 job 容器——它实际看到什么见上方 [probe] 输出"
-            exit 1
-          fi
-          echo "PPU_CI_WS=${ws}" >> "${GITHUB_ENV}"
-
-          # 兜底清理：cleanup 步骤因 root 属主文件失败时留下的历史目录
-          find "$(dirname "${ws}")" -maxdepth 1 -mindepth 1 -type d -mtime +1 \
-            -exec rm -rf {} + 2>/dev/null || true
-          tar -cf - --exclude=./.git . | tar -xf - -C "${ws}"
+          set -euo pipefail
+          ws="${PPU_CI_STAGE_ROOT}/${PPU_CI_RUN_TAG}"
+          rm -rf "${ws}"
+          mkdir -p "${ws}"
+          tar -cf - --exclude=./.git --exclude=./test-results . | tar -xf - -C "${ws}"
+          echo "ws=${ws}" >> "$GITHUB_OUTPUT"
           echo "[stage] ${ws} -> $(du -sh "${ws}" | cut -f1)"
+
+      # 兜底清理：run 被取消时 collect job 不会执行，目录会留在 NAS 上
+      - name: Sweep stale staging dirs
+        if: always()
+        shell: bash
+        run: |
+          find "${PPU_CI_STAGE_ROOT}" -maxdepth 1 -mindepth 1 -type d -mtime +1 \
+            -exec rm -rf {} + 2>/dev/null || true
+
+  # ==================== PPU Basic Correctness ==================== #
+  ppu-basic-correctness-test:
+    needs: [check-changes, ppu-stage]
+    if: needs.check-changes.outputs.changes_exist == 'true'
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    # 含 Pod 调度 + 镜像准备开销（冒烟实测约 210s），比 pod 自身超时留足余量
+    timeout-minutes: 110
+    steps:
+      # owner 指出 NAS 在宿主机上的路径是 /wl_nas（不是 /mnt/wl_nas）。而上次
+      # stage 步骤在 job 容器里只探了 /nas_aisw 与 /mnt/wl_nas 两个候选，
+      # /wl_nas 从来没试过。若它在 job 容器里就可写，代码可以由 CPU runner
+      # 直接投递，ppu-stage / ppu-collect 两个 job 都能删掉。这一步只记录现状，
+      # 不参与成败判定。
+      - name: Probe job-container NAS visibility (non-fatal)
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "user=$(id -un) uid=$(id -u)"
+          for d in /wl_nas /nas_aisw /mnt/wl_nas; do
+            if [ -d "${d}" ]; then
+              echo "${d}: exists, $(ls "${d}" 2>/dev/null | wc -l) entries"
+              if touch "${d}/.ci-write-probe" 2>/dev/null; then
+                echo "  -> writable YES（可直接投递，两个 self-hosted job 可删）"
+                rm -f "${d}/.ci-write-probe"
+              else
+                echo "  -> writable NO"
+              fi
+            else
+              echo "${d}: absent"
+            fi
+          done
+          df -hT 2>/dev/null | grep -Ei 'nfs|nas' \
+            || echo "job 容器内没有任何 nfs/nas 挂载"
+
+      # 为什么绕 base64：action.yml 的「校验 inputs」步骤把 ${{ inputs.command }}
+      # 直接文本插值进 shell —— if [ -z "<command>" ]。多行 command 被粘进那对
+      # 双引号里，引号奇偶错乱后裸括号会引发 syntax error，且落在引号外的
+      # $(...) 会在 runner 上被真实执行。base64 后是单行且只含 [A-Za-z0-9+/=]，
+      # 被那对双引号整段吞掉，既不解析也不执行。引号界定符的 heredoc 还保证
+      # $(...) 不在 runner 侧展开，全部留到 Pod 里才求值。
+      - name: Build pod payload
+        id: payload
+        shell: bash
+        run: |
+          cat > /tmp/run-area.sh <<'AREA'
+          #!/bin/bash
+          cd "${CI_WS}" || exit 1
+          echo "[pod] host=$(hostname) node=${NODE_NAME} nproc=${NPROC_PER_NODE} user=$(id -un)"
+          echo "[pod] shm=$(df -h /dev/shm | tail -1)"
+          echo "[pod] memlock=$(ulimit -l)KB stack=$(ulimit -s)KB"
+          # 原 docker --add-host 的替代：单机模式不建 Headless Service，Pod 自己的
+          # hostname 在集群 DNS 里查不到，而 Ray/vLLM 要能把它解析成本机 IP
+          echo "$(hostname -i | awk '{print $1}') $(hostname)" >> /etc/hosts || true
+          rc=0
+          bash scripts/ppu/ppu_install_dependency.sh || rc=$?
+          if [ "${rc}" -eq 0 ]; then
+            bash scripts/ppu/test-area-ppu-basic-correctness.sh || rc=$?
+          fi
+          # Pod 内是 root，产物默认 root 属主；放开权限让 self-hosted runner
+          # （非 root）能取回并删除
+          chmod -R a+rwX . 2>/dev/null || true
+          echo "[pod] exit rc=${rc}"
+          exit "${rc}"
+          AREA
+          # 语法自检：在 runner 上早失败，好过烧一次 Pod 调度
+          bash -n /tmp/run-area.sh
+          # tr 而非 base64 -w0：后者是 GNU 专有
+          echo "b64=$(base64 < /tmp/run-area.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
 
       - name: Run PPU basic correctness tests
         uses: flytiger-eco/ppu-distributed-action@main
@@ -161,51 +221,42 @@ jobs:
           host_volumes: ${{ env.PPU_HOST_VOLUMES }}
           image: ${{ env.PPU_BASE_IMAGE }}
           namespace: ${{ env.PPU_NAMESPACE }}
-          timeout_minutes: 90
+          timeout_minutes: 95
           # always：失败 Pod 若滞留会一直占着 2 张卡，挡住后续 run
           cleanup_policy: always
-          extra_env: "HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
-          # 每行以 ';' 收尾而非依赖换行：action 若把多行 command 折成单行仍成立。
-          # /etc/hosts 补一条自身记录 = 原 docker --add-host（Ray/vLLM 要能把
-          # hostname 解析成本机 IP）。remount /dev/shm + ulimit 是原 docker
-          # --shm-size=8g / --ulimit memlock=-1 / stack=64M 的替代：K8s pod spec
-          # 无此类字段，privileged 下（有 CAP_SYS_RESOURCE）可从容器内自提，
-          # 非 privileged 时静默跳过。shm 必需：MessageQueue 环形缓冲区
-          # 默认 24MB x 10 块 ≈ 240MB，超过容器 /dev/shm 默认 64MB 会报
-          # ENOSPC 或 SIGBUS。随后一行把实际拿到的额度打印出来供首跑定性。
-          # 末尾 chmod 让 runner（非 root）能取回产物并删掉 Pod 以 root 写下的文件。
-          command: |
-            cd ${{ env.PPU_CI_WS }} || exit 1 ;
-            echo "[pod] host=$(hostname) node=$NODE_NAME rank=$RANK nproc=$NPROC_PER_NODE" ;
-            echo "$(hostname -i | awk '{print $1}') $(hostname)" >> /etc/hosts || true ;
-            mount -o remount,size=8G /dev/shm 2>/dev/null || true ;
-            ulimit -l unlimited 2>/dev/null || true ;
-            ulimit -s 65536 2>/dev/null || true ;
-            echo "[pod] user=$(id -un) memlock=$(ulimit -l) stack=$(ulimit -s) shm=$(df -h /dev/shm | tail -1)" ;
-            rc=0 ;
-            bash scripts/ppu/ppu_install_dependency.sh || rc=$? ;
-            if [ "$rc" -eq 0 ]; then bash scripts/ppu/test-area-ppu-basic-correctness.sh || rc=$? ; fi ;
-            chmod -R a+rwX . 2>/dev/null || true ;
-            echo "[pod] exit rc=$rc" ;
-            exit "$rc"
+          # CI_WS 走 extra_env 而非插进 payload，投递目录变更不影响 payload 内容
+          extra_env: "CI_WS=${{ needs.ppu-stage.outputs.ws }},HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
+          # 必须是单行且不含双引号，见上面 payload 步骤的注释
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/run-area.sh && bash /tmp/run-area.sh
 
+  # ==================== 产物回收（零占卡）==================== #
+  ppu-collect:
+    needs: [ppu-stage, ppu-basic-correctness-test]
+    # 测试失败也要取产物；stage 没成功则无处可取
+    if: always() && needs.ppu-stage.result == 'success'
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 20
+    env:
+      WS: ${{ needs.ppu-stage.outputs.ws }}
+    steps:
+      # 本 job 不 checkout，工作区是 self-hosted runner 上的复用目录，
+      # 里面可能残留上一个 run 的 test-results，先清掉
       - name: Collect test results from NAS
-        if: always()
+        shell: bash
         run: |
-          ws="${PPU_CI_WS:-}"
-          if [ -z "$ws" ]; then
-            echo "::warning::PPU_CI_WS unset — staging never succeeded, nothing to collect"
-          elif [ -d "$ws/test-results" ]; then
+          rm -rf test-results
+          if [ -d "${WS}/test-results" ]; then
             mkdir -p test-results
-            cp -r "$ws/test-results/." test-results/
+            cp -r "${WS}/test-results/." test-results/
             ls -l test-results
           else
-            echo "::warning::no test-results under $ws — the in-container script" \
-                 "exited before its EXIT trap fired, or the Pod never started"
+            echo "::warning::no test-results under ${WS} — 容器内脚本在 EXIT trap" \
+                 "触发前就退出了，或 Pod 根本没起来（看上一个 job 的日志）"
           fi
 
       - name: Publish test summary
         if: always()
+        shell: bash
         run: |
           f="test-results/summary.md"
           if [ -f "$f" ]; then
@@ -231,15 +282,14 @@ jobs:
 
       - name: Clean up NAS workspace
         if: always()
+        shell: bash
         run: |
-          ws="${PPU_CI_WS:-}"
-          [ -n "$ws" ] || exit 0
-          rm -rf "$ws" || echo "::warning::failed to remove $ws (root-owned" \
-            "leftovers) — next run's stale-dir sweep will retry"
+          rm -rf "${WS}" || echo "::warning::failed to remove ${WS} —" \
+            "下一个 run 的 stale-dir sweep 会重试"
 
   # ==================== 聚合点 ==================== #
   ppu-test-finish:
-    needs: [check-changes, ppu-basic-correctness-test]
+    needs: [check-changes, ppu-stage, ppu-basic-correctness-test, ppu-collect]
     if: always()
     runs-on: ubuntu-latest
     steps:

@@ -135,7 +135,10 @@ jobs:
           nnodes: ${{ env.SMOKE_NNODES }}
           nproc_per_node: ${{ env.SMOKE_NPROC }}
           node_selector: board-type=${{ env.SMOKE_BOARD }}
-          host_volumes: /nas_aisw:/nas_aisw,/mnt/wl_nas:/mnt/wl_nas
+          # 左侧宿主机路径 / 右侧容器内路径。wl_nas 在宿主机上叫 /wl_nas
+          # （owner 2026-08-31 指正）；hostPath 用的是 DirectoryOrCreate，左侧写错
+          # 不会报错，只会在宿主机上新建一个空目录，得到一个假的“挂载成功”
+          host_volumes: /nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas
           image: ${{ env.SMOKE_IMAGE }}
           namespace: ppu-sched
           timeout_minutes: 10
