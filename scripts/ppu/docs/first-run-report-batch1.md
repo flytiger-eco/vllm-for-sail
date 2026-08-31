@@ -66,26 +66,23 @@
 
 首跑实测：**6 failed / 362 passed / 24 skipped**。6 个 red 用例已逐个 deselect 并注释 （恢复路径见脚本注释），分 3 类：
 
-### 1.1 模型未入库（离线加载失败）×2 
+### 1.1 模型未入库（离线加载失败）×2
 
-*   `tests/models/test_transformers.py::test_pooling[TransformersEmbeddingModel]` —— 用例模型 BAAI/bge-base-en-v1.5 未入库，HF\_HUB\_OFFLINE=1 下加载失败
-    
-*   `tests/models/test_transformers.py::test_pooling[TransformersForSequenceClassification]` —— 用例模型 papluca/xlm-roberta-base-language-detection 未入库，同上
-    
+* `tests/models/test_transformers.py::test_pooling[TransformersEmbeddingModel]` —— 用例模型 BAAI/bge-base-en-v1.5 未入库，HF\_HUB\_OFFLINE=1 下加载失败
+
+* `tests/models/test_transformers.py::test_pooling[TransformersForSequenceClassification]` —— 用例模型 papluca/xlm-roberta-base-language-detection 未入库，同上
 
 ### 1.2 vLLM vs HF 对拍失败 ×1 —— 待查
 
-*   `tests/models/test_transformers.py::test_models[hmellor/Ilama-3.2-1B-auto]` —— transformers backend 对拍（custom code + trust\_remote\_code 路径）不一致， 具体 mismatch 原因待查；模型走 Aone 同构路径 symlink，本体是否就位也待确认
-    
+* `tests/models/test_transformers.py::test_models[hmellor/Ilama-3.2-1B-auto]` —— transformers backend 对拍（custom code + trust\_remote\_code 路径）不一致， 具体 mismatch 原因待查；模型走 Aone 同构路径 symlink，本体是否就位也待确认
 
 ### 1.3 registry 新 arch import 链失败 ×3 —— 原因（代码级推断）
 
-*   `tests/models/test_registry.py::test_registry_imports[Gemma4UnifiedForConditionalGeneration]` —— gemma4\_unified.py 顶层 import `transformers.models.gemma4_unified.*`， 镜像内 transformers 版本不含该子模块（推断，精确报错待查日志）
-    
-*   `tests/models/test_registry.py::test_registry_imports[MiDashengLMModel]` —— midashenglm.py 顶层 `import torchaudio.functional`，PPU 镜像 torchaudio 缺失/不兼容（推断）
-    
-*   `tests/models/test_registry.py::test_registry_imports[CohereAsrForConditionalGeneration]` —— 引用链至 vllm/transformers\_utils/processors/cohere\_asr.py 顶层 `from torchaudio.functional import melscale_fbanks`，同上 torchaudio 问题（推断）
-    
+* `tests/models/test_registry.py::test_registry_imports[Gemma4UnifiedForConditionalGeneration]` —— gemma4\_unified.py 顶层 import `transformers.models.gemma4_unified.*`， 镜像内 transformers 版本不含该子模块（推断，精确报错待查日志）
+
+* `tests/models/test_registry.py::test_registry_imports[MiDashengLMModel]` —— midashenglm.py 顶层 `import torchaudio.functional`，PPU 镜像 torchaudio 缺失/不兼容（推断）
+
+* `tests/models/test_registry.py::test_registry_imports[CohereAsrForConditionalGeneration]` —— 引用链至 vllm/transformers\_utils/processors/cohere\_asr.py 顶层 `from torchaudio.functional import melscale_fbanks`，同上 torchaudio 问题（推断）
 
 备注：terratorch 注册的 vllm.general\_plugins 插件（terratorch\_fix）在 EngineCore 刷 ImportError（torchgeo>=0.8 移除 trainers.utils）——已确认非致命（load\_plugins\_by\_group 有 try/except 兜底），属已知无害噪声，保留 terratorch 安装以覆盖 Prithvi/Terratorch arch 注册测试。
 
@@ -93,8 +90,7 @@
 
 首跑 **1 failed**（无用例级 error）：
 
-*   `tests/v1/attention/test_indexer_deepseek_v4_slot_mapping.py::test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size` —— 原因明确：create\_vllm\_config() 构造 ModelConfig(model="meta-llama/Meta-Llama-3-8B") 只解析 HF config，但该 gated 仓库不在 NAS 缓存，HF\_HUB\_OFFLINE=1 下直接 ValidationError。 处置：VLLM\_MODEL\_REDIRECT\_PATH 重定向到本地 config-only stub（zero-diff，不改上游测试）； 修复后复跑 131 用例 100 passed / 31 skipped / 0 failed（45s 量级，skip 均为 SM90/SM100/ ROCm/fp8 等硬件架构不匹配，属预期）。恢复条件：Meta-Llama-3-8B stage 到 /nas\_aisw 后删除 stub。
-    
+* `tests/v1/attention/test_indexer_deepseek_v4_slot_mapping.py::test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size` —— 原因明确：create\_vllm\_config() 构造 ModelConfig(model="meta-llama/Meta-Llama-3-8B") 只解析 HF config，但该 gated 仓库不在 NAS 缓存，HF\_HUB\_OFFLINE=1 下直接 ValidationError。 处置：VLLM\_MODEL\_REDIRECT\_PATH 重定向到本地 config-only stub（zero-diff，不改上游测试）； 修复后复跑 131 用例 100 passed / 31 skipped / 0 failed（45s 量级，skip 均为 SM90/SM100/ ROCm/fp8 等硬件架构不匹配，属预期）。恢复条件：Meta-Llama-3-8B stage 到 /nas\_aisw 后删除 stub。
 
 注：test\_gdn\_metadata\_builder.py 的 2 个用例（test\_gdn\_build\_classification / test\_has\_initial\_state\_after\_reclassification）为 Aone 快照既有排除（root cause TBD， F2 跟踪），非本次首跑新增。
 
@@ -122,60 +118,55 @@ v1\_engine step（tests/v1/engine/）首跑实测：**17 failed / 100 passe
 
 ### 5.1 abort 语义 ×6 —— 待查
 
-*   tests/v1/engine/test\_abort\_final\_step.py::test\_abort\_during\_final\_step\[False\]
-    
-*   tests/v1/engine/test\_abort\_final\_step.py::test\_abort\_during\_final\_step\[True\]
-    
-*   tests/v1/engine/test\_async\_llm.py::test\_multi\_abort\[RequestOutputKind.DELTA\]
-    
-*   tests/v1/engine/test\_async\_llm.py::test\_multi\_abort\[RequestOutputKind.FINAL\_ONLY\]
-    
-*   tests/v1/engine/test\_async\_llm.py::test\_abort\_final\_output\[RequestOutputKind.DELTA\]
-    
-*   tests/v1/engine/test\_async\_llm.py::test\_abort\_final\_output\[RequestOutputKind.FINAL\_ONLY\]
-    
+* tests/v1/engine/test\_abort\_final\_step.py::test\_abort\_during\_final\_step\[False\]
+
+* tests/v1/engine/test\_abort\_final\_step.py::test\_abort\_during\_final\_step\[True\]
+
+* tests/v1/engine/test\_async\_llm.py::test\_multi\_abort\[RequestOutputKind.DELTA\]
+
+* tests/v1/engine/test\_async\_llm.py::test\_multi\_abort\[RequestOutputKind.FINAL\_ONLY\]
+
+* tests/v1/engine/test\_async\_llm.py::test\_abort\_final\_output\[RequestOutputKind.DELTA\]
+
+* tests/v1/engine/test\_async\_llm.py::test\_abort\_final\_output\[RequestOutputKind.FINAL\_ONLY\]
 
 ### 5.2 EngineCore 基础 ×4 —— 待查（疑似 OOM/调度相关）
 
-*   tests/v1/engine/test\_engine\_core.py::test\_engine\_core
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_advanced\_sampling
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_concurrent\_batches
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_invalid\_request\_id\_type
-    
+* tests/v1/engine/test\_engine\_core.py::test\_engine\_core
+
+* tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_advanced\_sampling
+
+* tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_concurrent\_batches
+
+* tests/v1/engine/test\_engine\_core.py::test\_engine\_core\_invalid\_request\_id\_type
 
 ### 5.3 encoder 零 kv-cache 实例 ×6 —— 待查
 
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_producer-0.01-False\]
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_consumer-0.7-True\]
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_consumer-0.7-False\]
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_producer-0.01-False\]
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_consumer-0.7-True\]
-    
-*   tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_consumer-0.7-False\]
-    
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_producer-0.01-False\]
+
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_consumer-0.7-True\]
+
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[False-ec\_consumer-0.7-False\]
+
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_producer-0.01-False\]
+
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_consumer-0.7-True\]
+
+* tests/v1/engine/test\_engine\_core.py::test\_encoder\_instance\_zero\_kv\_cache\[True-ec\_consumer-0.7-False\]
 
 ### 5.4 preprocess 错误处理 ×1 —— 待查
 
-*   tests/v1/engine/test\_preprocess\_error\_handling.py::test\_preprocess\_error\_handling
-    
+* tests/v1/engine/test\_preprocess\_error\_handling.py::test\_preprocess\_error\_handling
 
 ## 6. Entrypoints LLM（failure，11m34s）
 
 首跑 fail **3 个用例，同一根因（已查明）**——FlexAttention 反向块表确定性 OOM：
 
-*   tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[mp-1\]（single 段：mp-1 failed / 3 skipped）
-    
-*   tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[mp-2\]（multi 段）
-    
-*   tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[ray-2\]（multi 段）
-    
+* tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[mp-1\]（single 段：mp-1 failed / 3 skipped）
+
+* tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[mp-2\]（multi 段）
+
+* tests/entrypoints/llm/test\_collective\_rpc.py::test\_collective\_rpc\[ray-2\]（multi 段）
 
 根因：本次 run attention backend 解析到 FLEX\_ATTENTION（ppu.py 候选优先级 FLASH\_ATTN→TRITON\_ATTN→FLEX\_ATTENTION，日志栈确认落到 flex），其 metadata build 阶段 physical\_to\_logical\_mapping 分配 (max\_num\_seqs × num\_gpu\_blocks) 的 int64 反向块表； tiny 模型 + 96 GiB 大显存 → max\_num\_seqs=1024（≥70 GiB 卡的 LLM\_CLASS 默认值）、 KV cache 7.38 亿 tokens ≈ 4614 万 blocks → 单卡需 352 GiB >> 96 GiB，EngineCore warmup 即 OOM（tp=2 双卡 KV cache 更大，单次分配要 702.89 GiB）。上游小显存卡（max\_num\_seqs=256 且 num\_gpu\_blocks 小）不触发。
 
@@ -187,10 +178,9 @@ v1\_engine step（tests/v1/engine/）首跑实测：**17 failed / 100 passe
 
 无用例级 fail，**2 个 step 级 error，均为 v0.23 rebase 布局地雷（原因明确）**：
 
-1.  **entrypoints\_unit step：collection error**。Aone 快照 ignore 集未同步 v0.23 上游目录 布局：instrumentator/sagemaker 已迁入 serve/ 子目录、rpc/offline\_mode 目录不存在， 4 条 ignore 全为死路径静默失效；v0.23 新增的 tests/entrypoints/speech\_to\_text/ 未被 排除，其 correctness/test\_transcription\_api\_correctness.py:43 有模块级 `get_tokenizer(whisper-large-v3)`，离线环境 collection 阶段即炸，且 collection error 的爆炸半径是整次 pytest 调用（rc=2，全 step 不执行）。
-    
-2.  **v1\_entrypoints step：pytest usage error（exit 4）**。tests/v1/entrypoints/ 目录在 v0.23 已整体移除（用例迁入 tests/entrypoints/openai/），快照仍引用该路径，必挂。
-    
+1. **entrypoints\_unit step：collection error**。Aone 快照 ignore 集未同步 v0.23 上游目录 布局：instrumentator/sagemaker 已迁入 serve/ 子目录、rpc/offline\_mode 目录不存在， 4 条 ignore 全为死路径静默失效；v0.23 新增的 tests/entrypoints/speech\_to\_text/ 未被 排除，其 correctness/test\_transcription\_api\_correctness.py:43 有模块级 `get_tokenizer(whisper-large-v3)`，离线环境 collection 阶段即炸，且 collection error 的爆炸半径是整次 pytest 调用（rc=2，全 step 不执行）。
+
+2. **v1\_entrypoints step：pytest usage error（exit 4）**。tests/v1/entrypoints/ 目录在 v0.23 已整体移除（用例迁入 tests/entrypoints/openai/），快照仍引用该路径，必挂。
 
 处置：ignore 集对齐上游 .buildkite/test\_areas/entrypoints.yaml unit step（增 ignore serve / speech\_to\_text / generate，删 4 条死路径）；删除 v1\_entrypoints step；MODEL\_MAP 同步清理无消费者条目、补 Qwen3-0.6B（anthropic/test\_messages.py）。
 
@@ -202,8 +192,8 @@ v1\_engine step（tests/v1/engine/）首跑实测：**17 failed / 100 passe
 
 ## 数据来源与置信度说明
 
-*   GitHub 规定查看/下载 Actions 日志与 artifact 需登录（匿名 API 返回 403/401），本报告 未能直接读取首跑日志。
-    
-*   首跑 red 用例清单与统计数来自各 scripts/ppu/test-area-ppu-\*.sh 内的首跑 triage 标注 （2026-08-27 实测记录）及 5 个首跑修复提交的 diff，与 run 元数据（结论/耗时）交叉一致。
-    
-*   标注"推断"的原因（models-basic 的 3 个 registry import 链）为代码级依赖分析，未经日志 核实；engine 17 用例与 kernels 3 文件的具体报错待查。建议后续在已登录环境下载各 run 的 `ppu-*-test-results` artifact（内含 junit test.xml）复核精确报错。
+* GitHub 规定查看/下载 Actions 日志与 artifact 需登录（匿名 API 返回 403/401），本报告 未能直接读取首跑日志。
+
+* 首跑 red 用例清单与统计数来自各 scripts/ppu/test-area-ppu-\*.sh 内的首跑 triage 标注 （2026-08-27 实测记录）及 5 个首跑修复提交的 diff，与 run 元数据（结论/耗时）交叉一致。
+
+* 标注"推断"的原因（models-basic 的 3 个 registry import 链）为代码级依赖分析，未经日志 核实；engine 17 用例与 kernels 3 文件的具体报错待查。建议后续在已登录环境下载各 run 的 `ppu-*-test-results` artifact（内含 junit test.xml）复核精确报错。

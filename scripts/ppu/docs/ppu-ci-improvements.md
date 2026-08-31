@@ -15,7 +15,7 @@
 最近一次 CI 实测（2026-08-26 前）:
 
 | unit | tests | passed | skipped | time |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | test_mem | 4 | 4 | 0 | 329s |
 | test_basic_correctness | 29 | 17 | 12 | 1265s |
 | test_basic_correctness_distributed | 11 | 11 | 0 | 626s |
@@ -170,7 +170,7 @@ Ascend 在 Buildkite 用 `soft_fail: true`：硬件 CI 跑但不阻塞主干。G
 ## 附：厂家 CI 模式对照
 
 | 实践 | 上游/厂家 | PPU 现状 | 对应条目 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 路径门禁 | Buildkite `source_file_dependencies` | 已有（on.push.paths + dorny) | — |
 | 镜像与测试分离/内容哈希跳过构建 | AMD ci_base 哈希 | 用厂商预置镜像，暂无自建 | P2-5 可缓解 |
 | 硬件测试 soft_fail | Ascend `soft_fail: true` | ppu-test-finish 聚合点已有 | P3-7 |
