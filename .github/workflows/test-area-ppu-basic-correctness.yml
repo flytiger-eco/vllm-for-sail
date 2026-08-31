@@ -3,7 +3,7 @@
 #   check-changes — 路径变更门禁（对位 Aone diff-guard）
 #   ppu-basic-correctness-test — CPU runner 上用 ppu-distributed-action 拉起
 #     PPU Pod，Pod 内装依赖 + 跑 pytest
-#   ppu-test-finish — 分支保护聚合点
+#   ppu-basic-correctness-finish — 分支保护聚合点
 #
 # 执行形态：本 area 由 self-hosted PPU runner + docker run 切到 K8s 调度 ——
 # job 跑在 CPU runner group，flytiger-eco/ppu-distributed-action 按
@@ -23,17 +23,23 @@
 name: Basic Correctness Test (PPU)
 
 on:
-  push:
-    branches: [feat/gha-ppu-test]
-    paths:
-      - ".github/workflows/test-area-ppu-basic-correctness.yml"
-      - "scripts/ppu/ppu_install_dependency.sh"
-      - "scripts/ppu/test-area-ppu-basic-correctness.sh"
-      - "tests/basic_correctness/**"
-      - "vllm/*"
+  # 重量级 area（timeout 上限 100min，首跑未标定耗时）：PR 上由 ppu-full 标签
+  # 显式拉起，夜间由 nightly-ppu.yml 兜底。job 本体在 CPU runner 上，但 Pod 仍要
+  # 向同一批 PPU 节点申请 2 张卡，与自托管 runner 的 area 争同一批硬件。
+  # 依赖路径清单保留在下方 check-changes 的 dorny 过滤器中。
   pull_request:
-    branches: [feat/gha-ppu-test]
+    branches: [v0.23.0]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
 
 concurrency:
   group: test-area-ppu-basic-correctness-${{ github.ref }}
@@ -82,19 +88,27 @@ jobs:
         id: decide
         env:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+          HAS_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ppu-full') }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR：按路径过滤结果决定
-            echo "changes_exist=${FILTER_HIT:-false}" >> $GITHUB_OUTPUT
+            # 重量级 area 在 PR 上默认不跑，需显式打 ppu-full 标签；
+            # 路径命中结果仅记录，作为后续提升为自动触发档的观测数据。
+            echo "[gate] paths_hit=${FILTER_HIT:-false} ppu_full_label=${HAS_FULL_LABEL}"
+            echo "changes_exist=${HAS_FULL_LABEL}" >> "$GITHUB_OUTPUT"
           else
-            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
-            echo "changes_exist=true" >> $GITHUB_OUTPUT
+            # 手动触发（workflow_dispatch）：必跑
+            echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ==================== PPU Basic Correctness  ==================== #
   ppu-basic-correctness-test:
     needs: [check-changes]
-    if: needs.check-changes.outputs.changes_exist == 'true'
+    # fork PR 不跑：extra_env 里带 artifactory 凭证、Pod 挂 NAS，不能被外部
+    # PR 的代码驱动（代码还会被 stage 到共享 NAS 上执行）。
+    if: >-
+      needs.check-changes.outputs.changes_exist == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner:latest
@@ -130,7 +144,9 @@ jobs:
           timeout_minutes: 90
           # always：失败 Pod 若滞留会一直占着 2 张卡，挡住后续 run
           cleanup_policy: always
-          extra_env: "HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
+          # extra_env 以 ',' 分隔，所以 pytest_args 里不能带逗号（带了会被当成
+          # 下一个环境变量切开）；-k 表达式用 "not a and not b" 而非逗号形式。
+          extra_env: "HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,TEST_MODE=${{ inputs.test_mode || 'all' }},PYTEST_EXTRA_ARGS=${{ inputs.pytest_args || '' }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
           # 每行以 ';' 收尾而非依赖换行：action 若把多行 command 折成单行仍成立。
           # /etc/hosts 补一条自身记录 = 原 docker --add-host（Ray/vLLM 要能把
           # hostname 解析成本机 IP）；末尾 chmod 让 runner（非 root）能取回产物
@@ -182,6 +198,19 @@ jobs:
           path: |
             test-results/
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Annotate failed tests
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/test.xml
+          check_name: PPU Basic Correctness Test Report
+          annotate_only: true
+          detailed_summary: true
+          fail_on_failure: false
+          require_tests: false
 
       - name: Clean up NAS workspace
         if: always()
@@ -190,7 +219,7 @@ jobs:
             "(root-owned leftovers) — next run's stale-dir sweep will retry"
 
   # ==================== 聚合点 ==================== #
-  ppu-test-finish:
+  ppu-basic-correctness-finish:
     needs: [check-changes, ppu-basic-correctness-test]
     if: always()
     runs-on: ubuntu-latest

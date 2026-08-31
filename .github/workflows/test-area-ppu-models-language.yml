@@ -14,6 +14,15 @@ name: Models Language Test (Nightly)
 # 不放 schedule/push/PR 触发，避免与聚合 workflow 重复调度。
 on:
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -45,11 +54,13 @@ jobs:
         env:
           PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
           PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
         run: |
           docker run --rm \
             --privileged \
             --network host \
-            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
+            --add-host="$(hostname):$(hostname -I | awk '{print $1}')" \
             --device=/dev/alixpu_ctl \
             --device=/dev/alixpu \
             --ipc=host \
@@ -62,6 +73,8 @@ jobs:
             -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
             -e PPU_ARTIFACTORY_USER \
             -e PPU_ARTIFACTORY_PASSWORD \
+            -e TEST_MODE \
+            -e PYTEST_EXTRA_ARGS \
             -e PPU_DEVICE_LABEL=OAM-810E \
             ${{ env.PPU_BASE_IMAGE }} \
             bash -c "
@@ -92,3 +105,16 @@ jobs:
           name: ppu-models-language-test-results
           path: test-results/
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Annotate failed tests
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/test.xml
+          check_name: PPU Models Language Test Report
+          annotate_only: true
+          detailed_summary: true
+          fail_on_failure: false
+          require_tests: false

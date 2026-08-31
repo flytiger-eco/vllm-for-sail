@@ -1,29 +1,37 @@
-# Nightly PPU 回归（N0）——对位上游 Buildkite NIGHTLY=1 定时全量构建中的
-# nightly 性质 step（%N / torch_nightly）：kernels（3×%N）+ lora（%N）+
-# models-language（2×%N + torch_nightly），共 3 个 area。
-# 清单与判定口径见 scripts/ppu/nightly-tests-inventory.md。
-# 纯 PR 性质 area（basic-correctness / engine 等）上游 PR 构建本就覆盖，
-# 不在此复跑（单卡资源聚焦 PR 覆盖不到的 nightly 用例）。
+# 定时 PPU 回归——重量级 area 的兜底覆盖。
 #
-# 触发：仅 schedule + 手动 dispatch（无 push/PR、无路径门禁——nightly 必全量）。
-#   cron "0 18 * * *" = UTC 18:00 = 北京时间 02:00，与白天 PR 测试错峰。
-#   注意：schedule 仅在仓库默认分支生效；其他分支用 workflow_dispatch 手动跑。
-# 串行防抢卡（单卡 PPU 资源）：
-#   - workflow 级 nightly-ppu-run：同一时间只允许一个 nightly run（排队不取消）
-#   - matrix 级 max-parallel: 1：3 个 area 串行执行。
-#   - 跨 workflow 互斥无需额外配置：PPU 整机仅一个 self-hosted runner，天然串行。
-# 时长：timeout 沿用各 PR 版上限（总和 ~9h 为上限而非实际时长），首跑校准
+# 与 PR 门禁的分工（详见 scripts/ppu/docs/ppu-ci-usage.md）：
+#   PR 自动触发档：attention / model-executor / entrypoints / samplers（约 14min）
+#   PR 标签触发档（ppu-full）：其余 7 个重量级 area，不自动跑
+#   本 workflow：把标签触发档的 7 个 area 定时补跑一遍，保证即使没人打标签
+#   也有每日/每周的回归基线。
+#
+# 为什么拆两档 cron：PPU 整机只有一个 self-hosted runner，所有 job 串行。
+#   7 个 area 连跑，已标定的 4 个就已占 4h46min（kernels 2h14min +
+#   engine 1h32min + models-basic 48min + entrypoints-llm 12min，数据源：批次 1
+#   首跑报告），再加 basic-correctness / lora / models-language 三个未标定的，
+#   会一直占用到工作时段、把白天的 PR 快速集堵在队列里。故按时长拆分：
+#     - 工作日夜间集：basic-correctness / entrypoints-llm / lora / models-basic
+#       （已标定部分 1h 以内，剩下两个按 timeout 上限 100min 预留）
+#     - 周末集：engine / kernels / models-language（已知最长的两个 + 未标定的
+#       models-language），周六 02:00 起跑，跑到白天也不影响开发
+#   cron 为 UTC：18:00 UTC = 次日 02:00 北京时间，故 `0-4` = 周一~周五，
+#   `5` = 周六。schedule 仅在仓库默认分支生效，其他分支用 workflow_dispatch。
+#
+# 串行防抢卡：workflow 级 concurrency（排队不取消）+ matrix max-parallel: 1。
 name: Nightly PPU test
 
 on:
-  # [临时] 合并默认分支前的可见性/触发验证，验证通过后移除
-  push:
-    branches: [feat/gha-ppu-test]
-    paths:
-      - ".github/workflows/nightly-ppu.yml"
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * 0-4" # 周一~周五 02:00（北京）：短 area 夜间集
+    - cron: "0 18 * * 5" # 周六 02:00（北京）：长 area 周末集
   workflow_dispatch:
+    inputs:
+      area_set:
+        description: "跑哪一档：auto(按 cron 判定) | nightly(短) | weekend(长) | all"
+        type: choice
+        default: auto
+        options: [auto, nightly, weekend, all]
 
 concurrency:
   group: nightly-ppu-run
@@ -36,17 +44,46 @@ env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
 
 jobs:
-  # ==================== Nightly 全量（ 3 area ） ==================== #
+  # ==================== 选择本次要跑的 area 档 ==================== #
+  select-areas:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Pick area set
+        id: pick
+        env:
+          # schedule 事件带 cron 表达式；dispatch 事件为空
+          CRON: ${{ github.event.schedule }}
+          AREA_SET: ${{ inputs.area_set || 'auto' }}
+        run: |
+          # timeout/run_timeout：已标定的按首跑实测收紧（entrypoints-llm 11m34s
+          # → 60/50，models-basic 48m07s → 120/110）；basic-correctness / lora /
+          # models-language 未标定，暂留 PR 版上限，首次定时跑完后回写。
+          nightly='[{"area":"basic-correctness","timeout":100,"run_timeout":90},{"area":"entrypoints-llm","timeout":60,"run_timeout":50},{"area":"lora","timeout":100,"run_timeout":90},{"area":"models-basic","timeout":120,"run_timeout":110}]'
+          weekend='[{"area":"engine","timeout":300,"run_timeout":290},{"area":"kernels","timeout":360,"run_timeout":350},{"area":"models-language","timeout":300,"run_timeout":290}]'
+          case "${AREA_SET}" in
+            nightly) sel="${nightly}" ;;
+            weekend) sel="${weekend}" ;;
+            all)     sel="$(python3 -c "import json,sys;print(json.dumps(json.loads(sys.argv[1])+json.loads(sys.argv[2])))" "${nightly}" "${weekend}")" ;;
+            *)
+              # auto：周六那条 cron 跑长 area 集，其余跑短 area 集
+              if [ "${CRON}" = "0 18 * * 5" ]; then sel="${weekend}"; else sel="${nightly}"; fi
+              ;;
+          esac
+          echo "[select] area_set=${AREA_SET} cron='${CRON}'"
+          echo "${sel}" | python3 -c "import json,sys;print('[select] areas:', ', '.join(a['area'] for a in json.load(sys.stdin)))"
+          echo "matrix=${sel}" >> "$GITHUB_OUTPUT"
+
+  # ==================== 重量级 area 定时补跑 ==================== #
   ppu-nightly-test:
+    needs: [select-areas]
     runs-on: [self-hosted, ppu]
     strategy:
       fail-fast: false # 单 area 失败不影响其余 area 排队执行
-      max-parallel: 1 # 单卡 PPU：3 个 area 串行执行 
+      max-parallel: 1 # 单卡 PPU：area 串行执行
       matrix:
-        include:
-          - {area: lora, timeout: 100, run_timeout: 90}
-          - {area: models-language, timeout: 300, run_timeout: 290}
-          - {area: kernels, timeout: 360, run_timeout: 350}
+        include: ${{ fromJson(needs.select-areas.outputs.matrix) }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Clean workspace
@@ -69,7 +106,7 @@ jobs:
           docker run --rm \
             --privileged \
             --network host \
-            --add-host=$(hostname):$(hostname -I | awk '{print $1}') \
+            --add-host="$(hostname):$(hostname -I | awk '{print $1}')" \
             --device=/dev/alixpu_ctl \
             --device=/dev/alixpu \
             --ipc=host \
@@ -114,10 +151,11 @@ jobs:
           name: ppu-nightly-${{ matrix.area }}-test-results
           path: test-results/
           if-no-files-found: warn
+          retention-days: 14
 
   # ==================== 聚合点 ==================== #
   nightly-finish:
-    needs: [ppu-nightly-test]
+    needs: [select-areas, ppu-nightly-test]
     if: always()
     runs-on: ubuntu-latest
     steps:

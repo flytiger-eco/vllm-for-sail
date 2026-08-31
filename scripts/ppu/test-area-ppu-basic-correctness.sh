@@ -31,6 +31,10 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
+# workflow_dispatch 的 pytest_args 透传：按空白切分后追加到每个 step 的
+# pytest 命令尾部（如 `-k test_foo -x`），排障时缩小范围而不必改脚本。
+read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
+
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-bc-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
@@ -190,6 +194,7 @@ PYEOF
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
+# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -286,6 +291,8 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
+  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT，一并收进 artifact 便于排障
+  cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
 }
@@ -307,7 +314,7 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
@@ -334,7 +341,7 @@ _run_step() {
     echo "========== [step] ${label} =========="
     local out_xml="${TMP_JUNIT}/${label}.xml"
     set +e
-    pytest -v -s "${args[@]}" --junit-xml="${out_xml}"
+    pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
     local rc=$?
     set -e
     echo "[step] ${label} rc=${rc}"
