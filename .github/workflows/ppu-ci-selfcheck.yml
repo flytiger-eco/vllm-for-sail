@@ -1,0 +1,43 @@
+# PPU CI 自检——不需要 PPU 设备的静态校验，跑在 GitHub 托管 runner 上。
+#
+# 存在意义：PPU area 的真实测试要排队等唯一一台 self-hosted runner，反馈慢；
+# 而「排除项指向已不存在的测试路径」这类问题纯静态就能查出来。把这类校验前置
+# 到廉价 runner 上，PPU 机器只跑真正需要硬件的部分。
+#
+# 覆盖：
+#   - scripts/ppu/check-exclusions.py：--ignore/--deselect 引用的测试路径必须存在
+#     （失效的 --ignore 会被 pytest 静默吞掉，导致排除项形同虚设）
+name: PPU CI Selfcheck
+
+on:
+  push:
+    branches: [v0.23.0]
+    paths:
+      - ".github/workflows/ppu-ci-selfcheck.yml"
+      - "scripts/ppu/**"
+      - "tests/**"
+  pull_request:
+    branches: [v0.23.0]
+    paths:
+      - ".github/workflows/ppu-ci-selfcheck.yml"
+      - "scripts/ppu/**"
+      - "tests/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ppu-ci-selfcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check exclusion paths still exist
+        run: python3 scripts/ppu/check-exclusions.py
