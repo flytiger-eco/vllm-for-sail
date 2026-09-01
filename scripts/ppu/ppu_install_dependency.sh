@@ -2,8 +2,8 @@
 # ==============================================================================
 # scripts/ppu/ppu_install_dependency.sh — PPU CI 依赖安装（GitHub Actions）
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/test-area-ppu-lora.yml 与
-#   test-area-ppu-basic-correctness.yml（共用），在 PPU 基础镜像容器内执行：
+# 调用方：全部 .github/workflows/test-area-ppu-*.yml（11 个 area 共用）与
+#   nightly-ppu.yml，在 PPU 基础镜像容器内执行：
 #   pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-...-vllm0.23.0-py312
 #
 # 对位：
@@ -93,6 +93,9 @@ ${PIP_INSTALL} pytest pytest-asyncio tblib pytest-shard pyyaml -i "${PPU_PIP_IND
 # 分支源码 + C 扩展 = 镜像构建”的混合形态。ABI 前提：分支未改 csrc/
 # Python 绑定接口（当前改动集中在 vllm/lora 纯 Python）。正式流程后续
 # 切换为 wheel 构建（对位 Aone .aoneci/build-wheel-ppu.yaml），届时未段可删。
+# 门禁影响：因为 C 扩展来自镜像而非本次改动，改 csrc/ 的 PR 在 CI 里跑的仍是
+# 镜像里的旧 .so，绿灯是假绿。为此 test-area-ppu-kernels.yml 的路径过滤刻意
+# 不含 csrc/**（见该文件注释）。接上 PPU wheel 构建后一并恢复。
 # 注：定位 site-packages 用 sysconfig 而非 import vllm —— cwd=REPO_ROOT 时
 # import vllm 走的就是源码树，拿到的是错误答案。
 echo "========== [cext] borrow compiled extensions from image vllm =========="

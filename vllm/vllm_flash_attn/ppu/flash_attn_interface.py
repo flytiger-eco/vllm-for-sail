@@ -298,7 +298,6 @@ def flash_attn_varlen_func(
             out = out_fa2
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
-        # [Note]: Aone#75639039
         # PPU FA3 use max_seqlen_k to choose tile
         # max_seqlen_k is needed when cu_seqlens_k on prefill
         if cu_seqlens_k is None:

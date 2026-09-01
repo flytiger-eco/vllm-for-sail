@@ -29,6 +29,10 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
+# workflow_dispatch 的 pytest_args 透传：按空白切分后追加到每个 step 的
+# pytest 命令尾部（如 `-k test_foo -x`），排障时缩小范围而不必改脚本。
+read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
+
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-lora-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
@@ -50,6 +54,12 @@ LORA_SINGLE_ARGS=(
   --ignore=tests/lora/test_deepseekv2_tp.py
   --ignore=tests/lora/test_gptoss_tp.py
   --ignore=tests/lora/test_qwen3moe_tp.py
+  # 上游 v0.23.0 的 `LoRA %N` step 同样排除本文件（它归到 4 卡 LoRA TP
+  # step）；旧快照漏抄，补回以对齐上游选集。
+  --ignore=tests/lora/test_qwen35_densemodel_lora.py
+  # 注：上游 v0.23.0 的 ignore 列表里**没有**本文件（即上游在分片 step 里跑），
+  # PPU 侧沿用旧快照继续排除，属未经确认的多余排除项。
+  # 台账见 scripts/ppu/docs/ppu-ci-exclusions.md，确认后决定恢复或补理由。
   --ignore=tests/lora/test_minicpmv_tp.py
   # ChatGLM3 tokenizer._pad() 缺 padding_side 参数，与 transformers 不兼容
   --ignore=tests/lora/test_add_lora.py
@@ -147,7 +157,7 @@ import os
 MODEL_MAP = {
     # ---- base models ----
     # single/multi 主力（conftest、test_lora_functions、test_qwen3_unembed、
-    # test_worker、test_llm_with_multi_loras）
+    # test_worker、test_qwen3_with_multi_loras）
     # 清单命中：checkpoints_cleaned.json path=checkpoints/LLM/qwen/v3/Qwen3-0.6B
     "Qwen/Qwen3-0.6B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
     # test_mixtral.py 的 MoE base（清单命中 LLM/Mistral/v1）
@@ -261,6 +271,7 @@ PYEOF
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
+# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -357,6 +368,8 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
+  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT，一并收进 artifact 便于排障
+  cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
 }
@@ -378,7 +391,7 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
@@ -405,7 +418,7 @@ _run_step() {
     echo "========== [step] ${label} =========="
     local out_xml="${TMP_JUNIT}/${label}.xml"
     set +e
-    pytest -v -s "${args[@]}" --junit-xml="${out_xml}"
+    pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
     local rc=$?
     set -e
     echo "[step] ${label} rc=${rc}"
@@ -416,10 +429,10 @@ _run_step() {
 if [ "${MODE}" = "single" ]; then
   _run_step "lora_full" 4 "${LORA_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
-  _run_step "test_llm_with_multi_loras" 1 "${LORA_MULTI_ARGS[@]}"
+  _run_step "test_qwen3_with_multi_loras" 1 "${LORA_MULTI_ARGS[@]}"
 else  # all
   _run_step "lora_full" 4 "${LORA_SINGLE_ARGS[@]}"
-  _run_step "test_llm_with_multi_loras" 1 "${LORA_MULTI_ARGS[@]}"
+  _run_step "test_qwen3_with_multi_loras" 1 "${LORA_MULTI_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

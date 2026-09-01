@@ -30,6 +30,10 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}' (本 area 仅 single|all，无 multi 段)" >&2; exit 2 ;;
 esac
 
+# workflow_dispatch 的 pytest_args 透传：按空白切分后追加到每个 step 的
+# pytest 命令尾部（如 `-k test_foo -x`），排障时缩小范围而不必改脚本。
+read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
+
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-models-language-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
@@ -97,12 +101,6 @@ ML_STANDARD_ARGS=(
   # forward 输出量级错误（cosine similarity 0.53，vllm output 100x smaller
   # than hf），PPU Issue #10。deselect 直到上游修复。
   "--deselect=tests/models/language/pooling/test_embedding.py::test_models[intfloat/e5-mistral-7b-instruct]"
-  # 首跑失败（2026-08-31 nightly，2 红）：MiniCPM4.1-8B 两个
-  # use_prompt_embeds 变体全灭——trust_remote_code 模型，NAS 预置目录缺
-  # configuration_minicpm.py 等动态模块代码，HF_HUB_OFFLINE=1 下 HF runner
-  # 初始化即失败。恢复路径：NAS 补全 .py 文件后移除这两条。
-  "--deselect=tests/models/language/generation/test_common.py::test_models[True-False-5-32-openbmb/MiniCPM4.1-8B]"
-  "--deselect=tests/models/language/generation/test_common.py::test_models[False-False-5-32-openbmb/MiniCPM4.1-8B]"
 )
 # Step 2 extra_standard —— 对位上游 "Language Models Tests (Extra Standard) %N"
 # （torch_nightly，parallelism 2 → shards=2，45min）：slow_test 子集。
@@ -115,16 +113,6 @@ ML_EXTRA_STANDARD_ARGS=(
   # 同 Step 1 的已知失败 deselect（若该用例带 slow_test marker 则在此段生效；
   # 不带则 deselect 无效果，无害）
   "--deselect=tests/models/language/pooling/test_embedding.py::test_models[intfloat/e5-mistral-7b-instruct]"
-  # 首跑失败（2026-08-31 nightly，本段 4 红，两 shard 各 2）：
-  # - bloom-560m 两个 use_prompt_embeds 变体全灭（alibi slopes 用例，
-  #   疑似 PPU 数值漂移，待 traceback 坐实）
-  # - Qwen2.5-1.5B-apeach classification / bge-base-en-v1.5 embedding：
-  #   疑似与 PPU Issue #10 同族的 pooling 数值问题，待 traceback 坐实
-  # 恢复路径：根因确认并修复后移除对应条目。
-  "--deselect=tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]"
-  "--deselect=tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]"
-  "--deselect=tests/models/language/pooling/test_classification.py::test_models[float-jason9693/Qwen2.5-1.5B-apeach]"
-  "--deselect=tests/models/language/pooling/test_embedding.py::test_models[BAAI/bge-base-en-v1.5]"
 )
 # Step 3 hybrid —— 对位上游 "Language Models Tests (Hybrid) %N"（torch_nightly，
 # parallelism 2 → shards=2，75min）：hybrid_model marker（mamba/jamba/zamba/
@@ -336,6 +324,7 @@ PYEOF
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
+# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -430,6 +419,8 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
+  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT，一并收进 artifact 便于排障
+  cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
 }
@@ -451,7 +442,7 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
@@ -478,7 +469,7 @@ _run_step() {
     echo "========== [step] ${label} =========="
     local out_xml="${TMP_JUNIT}/${label}.xml"
     set +e
-    pytest -v -s "${args[@]}" --junit-xml="${out_xml}"
+    pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
     local rc=$?
     set -e
     echo "[step] ${label} rc=${rc}"
