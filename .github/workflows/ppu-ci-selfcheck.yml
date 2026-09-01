@@ -18,7 +18,8 @@ on:
       - "scripts/ppu/**"
       - "tests/**"
   pull_request:
-    branches: [v0.23.0]
+    # feat/gha-ppu-test：开发期验证用，合入 v0.23.0 后移除
+    branches: [v0.23.0, feat/gha-ppu-test]
     paths:
       - ".github/workflows/ppu-ci-selfcheck.yml"
       - "scripts/ppu/**"

@@ -13,7 +13,8 @@ on:
   # nightly-ppu.yml 兜底。依赖路径清单保留在下方 check-changes 的 dorny
   # 过滤器中。
   pull_request:
-    branches: [v0.23.0]
+    # feat/gha-ppu-test：开发期验证用，合入 v0.23.0 后移除
+    branches: [v0.23.0, feat/gha-ppu-test]
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
