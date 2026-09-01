@@ -30,10 +30,9 @@ permissions:
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
-  # 左侧宿主机路径、右侧容器内路径。wl_nas 在宿主机上叫 /wl_nas（owner 指正）
+  # 左侧宿主机路径、右侧容器内路径。wl_nas 在宿主机上叫 /wl_nas
   PPU_HOST_VOLUMES: /nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas
-  # 投递候选，按序探测取第一个可写的。每项是 <job 容器里的路径>=<Pod 里的路径>，
-  # 两侧并不同名：/wl_nas 挂进 Pod 是 /mnt/wl_nas
+  # /wl_nas 挂进 /mnt/wl_nas
   PPU_CI_STAGE_CANDIDATES: "/wl_nas/gha-ci=/mnt/wl_nas/gha-ci /mnt/wl_nas/gha-ci=/mnt/wl_nas/gha-ci /nas_aisw/gha-ci=/nas_aisw/gha-ci"
   PPU_CI_RUN_TAG: bc-${{ github.run_id }}-${{ github.run_attempt }}
 
