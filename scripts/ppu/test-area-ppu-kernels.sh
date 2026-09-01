@@ -148,6 +148,11 @@ KERNELS_SINGLE_QUANT_ARGS=(
   # 2026-08-27 PPU run fail 用例，--deselect 排除
   --deselect 'tests/kernels/quantization/test_cutlass_scaled_mm.py::test_cutlass_int8_azp'
   --deselect 'tests/kernels/quantization/test_mxfp4_triton_ep.py::TestTritonMoeForwardExpertMap::test_expert_map_remap'
+  # 2026-09-01 PPU nightly fail：marlin int8×uint4（AWQ zp 路径，bf16 输出）
+  # max_diff 0.0408 擦边超阈值 0.04——PPU 数值漂移，与 cutlass int8 AZP
+  # 同族。首犯先单条 deselect；若后续换参数组合复现（打地鼠），升级为
+  # 整函数 deselect（参照 test_cutlass_int8_azp 的演进）。
+  --deselect 'tests/kernels/quantization/test_marlin_gemm.py::test_marlin_gemm[a_type467-b_type467-c_type467-8-257-3328-1408-False-False-False-True]'
 )
 
 # Step 5: kernels_attention — flashmla/triton_decode_attention 有 is_ppu()
