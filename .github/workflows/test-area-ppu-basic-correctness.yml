@@ -4,25 +4,17 @@
 #   ppu-basic-correctness-test — PPU runner 上 docker 内装依赖 + 跑 pytest
 #   ppu-basic-correctness-finish — 分支保护聚合点
 #
-# 2026-09-01：从 K8s 调度（ppu-distributed-action + NAS 投递）切回
-# self-hosted PPU runner + docker 直跑形态。K8s 链路当前卡在 job 容器
-# 无可写 NAS（三候选实测均 NOT usable），待集群侧挂载解决后再评估切换。
-#
-# 测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh，
-# 模型来自挂载的 /nas_aisw 卷。
+# 测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh。
 name: Basic Correctness Test (PPU)
 
 on:
-  push:
-    branches: [feat/gha-ppu-test]
-    paths:
-      - ".github/workflows/test-area-ppu-basic-correctness.yml"
-      - "scripts/ppu/ppu_install_dependency.sh"
-      - "scripts/ppu/test-area-ppu-basic-correctness.sh"
-      - "tests/basic_correctness/**"
-      - "vllm/*"
+  # 重量级 area（PPU 整机仅一个 runner，job 串行；首跑未标定耗时，
+  # timeout 上限 100min）：PR 上由 ppu-full 标签显式拉起，夜间/周末由
+  # nightly-ppu.yml 兜底。依赖路径清单保留在下方 check-changes 的 dorny
+  # 过滤器中。
   pull_request:
-    branches: [feat/gha-ppu-test]
+    branches: [v0.23.0]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       test_mode:
@@ -73,12 +65,15 @@ jobs:
         id: decide
         env:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+          HAS_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ppu-full') }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR：按路径过滤结果决定
-            echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
+            # 重量级 area 在 PR 上默认不跑，需显式打 ppu-full 标签；
+            # 路径命中结果仅记录，作为后续提升为自动触发档的观测数据。
+            echo "[gate] paths_hit=${FILTER_HIT:-false} ppu_full_label=${HAS_FULL_LABEL}"
+            echo "changes_exist=${HAS_FULL_LABEL}" >> "$GITHUB_OUTPUT"
           else
-            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
+            # 手动触发（workflow_dispatch）：必跑
             echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
 
