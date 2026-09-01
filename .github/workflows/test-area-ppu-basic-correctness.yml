@@ -1,14 +1,15 @@
-# Basic Correctness (PPU) —— 最小可跑形态
+# Aone CI `.aoneci/test-area-ppu-basic-correctness.yaml` 的 GitHub Actions 移植版
+# 结构：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-basic-correctness-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-basic-correctness-finish — 分支保护聚合点
 #
-# 一个 job，跑在 CPU runner group，用 flytiger-eco/ppu-distributed-action 在
-# PPU 节点起 Pod 跑测试。nnodes=0 是单机模式，nproc_per_node=2 满足本 area
-# multi 段内部 TP=2 的用卡需求。
+# 2026-09-01：从 K8s 调度（ppu-distributed-action + NAS 投递）切回
+# self-hosted PPU runner + docker 直跑形态。K8s 链路当前卡在 job 容器
+# 无可写 NAS（三候选实测均 NOT usable），待集群侧挂载解决后再评估切换。
 #
-# 代码投递：Pod 只有 image + host_volumes，拿不到 runner 工作区，而 Pod 内
-# 访问不了 github（DNS 能解析但 TCP 超时，2026-08-31 实测）。所以只剩一条路
-# —— job 容器 checkout 后把工作区拷到一块两边都看得见的 NAS，Pod 挂载同一
-# 宿主机路径后 cd 进去执行。job 容器里到底有没有这样一块盘是本 workflow 的
-# 成败前提，Stage 步骤会把它看到的现状打出来。
+# 测试选集见 scripts/ppu/test-area-ppu-basic-correctness.sh，
+# 模型来自挂载的 /nas_aisw 卷。
 name: Basic Correctness Test (PPU)
 
 on:
@@ -19,7 +20,19 @@ on:
       - "scripts/ppu/ppu_install_dependency.sh"
       - "scripts/ppu/test-area-ppu-basic-correctness.sh"
       - "tests/basic_correctness/**"
+      - "vllm/*"
+  pull_request:
+    branches: [feat/gha-ppu-test]
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
 
 concurrency:
   group: test-area-ppu-basic-correctness-${{ github.ref }}
@@ -27,109 +40,164 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
-  # 左侧宿主机路径、右侧容器内路径。wl_nas 在宿主机上叫 /wl_nas
-  PPU_HOST_VOLUMES: /nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas
-  # /wl_nas 挂进 /mnt/wl_nas
-  PPU_CI_STAGE_CANDIDATES: "/wl_nas/gha-ci=/mnt/wl_nas/gha-ci /mnt/wl_nas/gha-ci=/mnt/wl_nas/gha-ci /nas_aisw/gha-ci=/nas_aisw/gha-ci"
-  PPU_CI_RUN_TAG: bc-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
-  test:
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    # 含 Pod 调度 + 镜像准备开销（实测约 210s）
-    timeout-minutes: 110
+  # ==================== 变更检查 ==================== #
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 不投递 .git（244 MB 小文件，NFS 上极慢）：容器内不构建 wheel、也不靠
-      # setuptools-scm 推版本号（vllm/_version.py 由 ppu_install_dependency.sh
-      # 从镜像 site-packages 拷入）
-      - name: Stage workspace to NAS
-        id: stage
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[probe] user=$(id -un) uid=$(id -u) gid=$(id -g)"
-          df -hT 2>/dev/null | grep -Ei 'nfs|nas' || echo "[probe] 无 nfs/nas 挂载"
-          ws=""
-          for pair in ${PPU_CI_STAGE_CANDIDATES}; do
-            here="${pair%%=*}"
-            there="${pair#*=}"
-            top="/$(printf '%s' "${here}" | cut -d/ -f2)"
-            echo "[probe] ${top}: $(ls -ld "${top}" 2>&1 | head -1)"
-            if mkdir -p "${here}/${PPU_CI_RUN_TAG}" 2>/dev/null \
-               && [ -w "${here}/${PPU_CI_RUN_TAG}" ]; then
-              ws="${here}/${PPU_CI_RUN_TAG}"
-              echo "ws=${ws}" >> "$GITHUB_OUTPUT"
-              echo "ws_pod=${there}/${PPU_CI_RUN_TAG}" >> "$GITHUB_OUTPUT"
-              echo "[stage] usable: ${ws}（Pod 内是 ${there}/${PPU_CI_RUN_TAG}）"
-              break
-            fi
-            echo "[stage] NOT usable: ${here}/${PPU_CI_RUN_TAG}"
-          done
-          if [ -z "${ws}" ]; then
-            echo "::error::job 容器里没有可写的共享目录（试过 ${PPU_CI_STAGE_CANDIDATES}）。" \
-                 "ARC 用的是 k8s-novolume hook，NAS 必须先挂进 job 容器才能投递代码；" \
-                 "它实际看到什么见上面 [probe] 输出。"
-            exit 1
-          fi
-          tar -cf - --exclude=./.git . | tar -xf - -C "${ws}"
-          echo "[stage] ${ws} -> $(du -sh "${ws}" | cut -f1)"
+      # 仅 PR 用 dorny/paths-filter
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            ppu_code:
+              - ".github/workflows/test-area-ppu-basic-correctness.yml"
+              - "scripts/ppu/ppu_install_dependency.sh"
+              - "scripts/ppu/test-area-ppu-basic-correctness.sh"
+              - "tests/basic_correctness/**"
+              - "vllm/*"
 
-      # action.yml 的「校验 inputs」步骤把 ${{ inputs.command }} 直接文本插值进
-      # shell（if [ -z "<command>" ]），多行内容会撑坏引号奇偶并触发 syntax
-      # error。base64 后是单行、只含 [A-Za-z0-9+/=]，被那对双引号整段吞掉。
-      # 引号界定符的 heredoc 还保证 $(...) 留到 Pod 里才求值。
-      - name: Build pod payload
-        id: payload
-        shell: bash
+      - name: Decide whether to run tests
+        id: decide
+        env:
+          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
         run: |
-          cat > /tmp/run.sh <<'RUN'
-          #!/bin/bash
-          cd "${CI_WS}" || exit 1
-          echo "[pod] host=$(hostname) node=${NODE_NAME} nproc=${NPROC_PER_NODE}"
-          # 原 docker --add-host 的替代：单机模式不建 Headless Service，Pod 自己的
-          # hostname 在集群 DNS 里查不到，而 Ray/vLLM 要能把它解析成本机 IP
-          echo "$(hostname -i | awk '{print $1}') $(hostname)" >> /etc/hosts || true
-          rc=0
-          bash scripts/ppu/ppu_install_dependency.sh || rc=$?
-          if [ "${rc}" -eq 0 ]; then
-            bash scripts/ppu/test-area-ppu-basic-correctness.sh || rc=$?
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # PR：按路径过滤结果决定
+            echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
+          else
+            # push / 手动触发：必跑（push 已被 on.push.paths 触发级过滤）
+            echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "[pod] exit rc=${rc}"
-          exit "${rc}"
-          RUN
-          bash -n /tmp/run.sh
-          echo "b64=$(base64 < /tmp/run.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
+
+  # ==================== PPU Basic Correctness ==================== #
+  ppu-basic-correctness-test:
+    needs: [check-changes]
+    # fork PR 不进特权 self-hosted runner（--privileged + 设备直通 +
+    # NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码驱动）
+    if: >-
+      needs.check-changes.outputs.changes_exist == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, ppu]
+    timeout-minutes: 100
+    steps:
+      - name: Clean workspace
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Run PPU basic correctness tests
-        uses: flytiger-eco/ppu-distributed-action@main
-        with:
-          nnodes: 0
-          nproc_per_node: 2
-          node_selector: board-type=OAM-810E
-          host_volumes: ${{ env.PPU_HOST_VOLUMES }}
-          image: ${{ env.PPU_BASE_IMAGE }}
-          namespace: ppu-sched
-          timeout_minutes: 95
-          # always：失败 Pod 若滞留会一直占着 2 张卡
-          cleanup_policy: always
-          extra_env: "CI_WS=${{ steps.stage.outputs.ws_pod }},HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}"
-          # 必须单行且不含双引号，见上面 payload 步骤的注释
-          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/run.sh && bash /tmp/run.sh
-
-      # 不留垃圾在 NAS 上；Pod 以 root 写下的文件 job 容器可能删不掉，失败只告警
-      - name: Clean up NAS workspace
-        if: always()
-        shell: bash
+        timeout-minutes: 90
         env:
-          WS: ${{ steps.stage.outputs.ws }}
+          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
         run: |
-          [ -n "${WS}" ] || exit 0
-          rm -rf "${WS}" 2>/dev/null || echo "::warning::${WS} 未能删净（root 属主文件）"
+          docker run --rm \
+            --privileged \
+            --network host \
+            --add-host="$(hostname):$(hostname -I | awk '{print $1}')" \
+            --device=/dev/alixpu_ctl \
+            --device=/dev/alixpu \
+            --ipc=host \
+            --init \
+            --shm-size=8g \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /nas_aisw:/nas_aisw \
+            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
+            -e PPU_ARTIFACTORY_USER \
+            -e PPU_ARTIFACTORY_PASSWORD \
+            -e TEST_MODE \
+            -e PYTEST_EXTRA_ARGS \
+            -e PPU_DEVICE_LABEL=OAM-810E \
+            ${{ env.PPU_BASE_IMAGE }} \
+            bash -c "
+              cd /workspace && \
+              bash scripts/ppu/ppu_install_dependency.sh && \
+              bash scripts/ppu/test-area-ppu-basic-correctness.sh
+            "
+
+      - name: Publish test summary
+        if: always()
+        run: |
+          f="test-results/summary.md"
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Basic Correctness Test (PPU)"
+              echo ""
+              echo "summary.md not produced — the in-container script exited"
+              echo "before its EXIT trap fired (see 'Run PPU basic correctness"
+              echo "tests' log)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-basic-correctness-test-results
+          path: |
+            test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Annotate failed tests
+        if: always()
+        continue-on-error: true
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: test-results/test.xml
+          check_name: PPU Basic Correctness Test Report
+          annotate_only: true
+          detailed_summary: true
+          fail_on_failure: false
+          require_tests: false
+
+  # ==================== 聚合点 ==================== #
+  ppu-basic-correctness-finish:
+    needs: [check-changes, ppu-basic-correctness-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              sep = ','
+              print(f'Failed jobs: {sep.join(failed)}')
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
