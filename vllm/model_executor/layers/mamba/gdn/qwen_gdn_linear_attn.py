@@ -81,10 +81,46 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
+try:
+    from pla.prefill.flashqla import (
+        chunk_gated_delta_rule_fwd as pla_chunk_gated_delta_rule_fwd,
+    )
+
+    _PLA_AVAILABLE = True
+except ImportError:
+    pla_chunk_gated_delta_rule_fwd = None
+    _PLA_AVAILABLE = False
+
+
+def _pla_prefill_supported(vllm_config: VllmConfig) -> bool:
+    """Check whether the pla FlashQLA prefill kernel can run here.
+
+    FlashQLA requires head dims of 128 and instantiates a fixed set of
+    per-rank (num_v_heads, num_k_heads) configs, so validate the TP-sharded
+    head counts against its whitelist before selecting the backend.
+    """
+    if not _PLA_AVAILABLE:
+        return False
+    hf_cfg = vllm_config.model_config.hf_text_config
+    head_k_dim = getattr(hf_cfg, "linear_key_head_dim", None)
+    head_v_dim = getattr(hf_cfg, "linear_value_head_dim", None)
+    num_k_heads = getattr(hf_cfg, "linear_num_key_heads", None)
+    num_v_heads = getattr(hf_cfg, "linear_num_value_heads", None)
+    if head_k_dim != 128 or head_v_dim != 128:
+        return False
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    if num_k_heads is None or num_v_heads is None:
+        return False
+    from pla.prefill.flashqla.ops import SUPPORTED_HEAD_CONFIGS
+
+    return (num_v_heads // tp_size, num_k_heads // tp_size) in (
+        SUPPORTED_HEAD_CONFIGS
+    )
+
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "pla"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -97,6 +133,11 @@ def _resolve_gdn_prefill_backend(
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
+
+    The PPU pla (FlashQLA) CUDA kernel is chosen when:
+    * ``requested in ["pla", "auto"]``;
+    * ``platform == ppu``;
+    * head dims are 128 and the TP-sharded head counts are supported.
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -107,6 +148,11 @@ def _resolve_gdn_prefill_backend(
     backend = str(backend_cfg).strip().lower()
 
     if not current_platform.is_cuda():
+        return backend, "triton"
+
+    if current_platform.is_ppu():
+        if backend in ("pla", "auto") and _pla_prefill_supported(vllm_config):
+            return backend, "pla"
         return backend, "triton"
 
     head_k_dim = getattr(
@@ -145,6 +191,7 @@ def _log_gdn_backend_decision(
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
+        "pla": "PLA FlashQLA",
         "triton": "Triton/FLA",
     }[active_backend]
     logger.info_once(
@@ -217,7 +264,9 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
+        if backend in ("flashinfer", "cutedsl", "pla") and (
+            active_backend != backend
+        ):
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
@@ -229,6 +278,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cuda
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
+        elif active_backend == "pla":
+            self._forward_method = self.forward_pla
         else:
             self._forward_method = self.forward_native
 
@@ -335,6 +386,57 @@ class ChunkGatedDeltaRule(CustomOp):
         )
         if not output_final_state:
             final_state = None
+        return o, final_state
+
+    def forward_pla(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        assert not use_qk_l2norm_in_kernel, (
+            "The pla prefill backend expects l2-normalized q/k; run "
+            "fused_post_conv_prep with apply_l2norm=True."
+        )
+
+        q = q.squeeze(0).contiguous()
+        k = k.squeeze(0).contiguous()
+        v = v.squeeze(0).contiguous()
+        g = g.squeeze(0).to(torch.float32).contiguous()
+        beta = beta.squeeze(0).to(torch.float32).contiguous()
+        # pla expects [N, H, DK, DV] fp32 while vLLM stores [N, H, DV, DK].
+        state = (
+            initial_state.transpose(-1, -2)
+            .contiguous()
+            .to(torch.float32, non_blocking=True)
+        )
+
+        _, _, o, _, final_state = pla_chunk_gated_delta_rule_fwd(
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            v.unsqueeze(0),
+            g.unsqueeze(0),
+            beta.unsqueeze(0),
+            scale=None,
+            initial_state=state,
+            cu_seqlens=cu_seqlens,
+            output_final_state=output_final_state,
+        )
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2)
+        if core_attn_out is not None:
+            o_flat = o.reshape(-1)
+            co_flat = core_attn_out.reshape(-1)
+            co_flat[: o_flat.numel()].copy_(o_flat)
         return o, final_state
 
 
