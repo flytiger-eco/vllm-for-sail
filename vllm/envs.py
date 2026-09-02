@@ -2096,11 +2096,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "triton",
         ],
     ),
-    # Use PPU SAIL CUDA PLA kernels (k_last / k_last_packed) for GDN decode
-    # instead of the community Triton kernels. Mirrors SGLang's
-    # SGLANG_SAIL_PLA_CUDA. Only effective on PPU with the `pla` package
-    # installed and a float32 GDN ssm state cache; otherwise the Triton
-    # kernels are used as fallback.
+    # Use PPU SAIL CUDA PLA kernels for GDN instead of the community Triton
+    # kernels: decode (k_last / k_last_packed) and prefill (FlashQLA
+    # chunk_gated_delta_rule_fwd). Mirrors SGLang's SGLANG_SAIL_PLA_CUDA.
+    # Only effective on PPU with the `pla` package installed; otherwise the
+    # Triton kernels are used as fallback. Decode additionally requires a
+    # float32 GDN ssm state cache; prefill additionally requires head dims of
+    # 128 and a supported TP-sharded (num_v_heads, num_k_heads) config.
     "VLLM_PPU_USE_PLA": lambda: (
         os.getenv("VLLM_PPU_USE_PLA", "True").strip().lower()
         in ("true", "1")
