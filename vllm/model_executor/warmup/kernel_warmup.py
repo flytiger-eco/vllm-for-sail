@@ -25,6 +25,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
+    kimi_k3_triton_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup_if_needed,
@@ -79,12 +82,15 @@ def kernel_warmup(worker: "Worker"):
         minimax_m3_msa_warmup,
     )
 
-    # Pooling models do not use the generation slot-mapping path.
-    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
-        warm_v1_block_table_kernels(
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
+    if not worker.use_v2_model_runner:
+        # Pooling models do not use the generation slot-mapping path.
+        if not worker.model_runner.is_pooling_model:
+            warm_v1_block_table_kernels(worker.model_runner)
+        # No dummy run reaches the scheduler-driven KV-block zeroing path.
+        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
+        if zeroer is not None:
+            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
+
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
@@ -124,6 +130,7 @@ def kernel_warmup(worker: "Worker"):
          envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
          or (not envs.VLLM_PPU_DENSE_BACKEND or
          envs.VLLM_PPU_DENSE_BACKEND == "deepgemm")
+         or envs.VLLM_PPU_DENSE_BF16_DEEPGEMM
         )
     )
     if do_ppu_deep_gemm_warmup:
@@ -179,6 +186,8 @@ def kernel_warmup(worker: "Worker"):
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         cutedsl_warmup()
+
+    kimi_k3_triton_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:

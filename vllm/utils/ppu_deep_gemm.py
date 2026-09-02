@@ -200,10 +200,14 @@ _int8_gemm_nt_impl: Callable[..., Any] | None = None
 _int8_einsum_impl: Callable[..., Any] | None = None
 _int8_grouped_nopad_impl: Callable[..., Any] | None = None
 _int8_grouped_masked_impl: Callable[..., Any] | None = None
+_bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
 _bf16_grouped_masked_impl: Callable[..., Any] | None = None
 _fp4_grouped_nopad_impl: Callable[..., Any] | None = None
 _fp4_grouped_masked_impl: Callable[..., Any] | None = None
+_w4a16_grouped_nopad_impl: Callable[..., Any] | None = None
+_w4a16_grouped_fused_impl: Callable[..., Any] | None = None
+_w4a16_grouped_masked_impl: Callable[..., Any] | None = None
 
 # mqa logtiss
 _fp8_mqa_logits_impl: Callable[..., Any] | None = None
@@ -221,6 +225,7 @@ _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 _set_compile_mode_impl: Callable[..., Any] | None = None
 _get_compile_mode_impl: Callable[..., Any] | None = None
+_moe_align_block_size_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -230,8 +235,10 @@ def _lazy_init() -> None:
     global _grouped_masked_impl, _fp8_grouped_nopad_impl
     global _int8_gemm_nt_impl, _int8_einsum_impl
     global _int8_grouped_nopad_impl, _int8_grouped_masked_impl
+    global _bf16_gemm_nt_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
     global _fp4_grouped_nopad_impl, _fp4_grouped_masked_impl
+    global _w4a16_grouped_nopad_impl, _w4a16_grouped_fused_impl, _w4a16_grouped_masked_impl
     global _set_compile_mode_impl, _get_compile_mode_impl
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
     global _int8_mqa_logits_impl, _int8_paged_mqa_logits_impl
@@ -241,6 +248,7 @@ def _lazy_init() -> None:
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
+    global _moe_align_block_size_impl
 
     # fast path
     if (
@@ -252,10 +260,14 @@ def _lazy_init() -> None:
         or _int8_einsum_impl is not None
         or _int8_grouped_nopad_impl is not None
         or _int8_grouped_masked_impl is not None
+        or _bf16_gemm_nt_impl is not None
         or _bf16_grouped_nopad_impl is not None
         or _bf16_grouped_masked_impl is not None
         or _fp4_grouped_nopad_impl is not None
         or _fp4_grouped_masked_impl is not None
+        or _w4a16_grouped_nopad_impl is not None
+        or _w4a16_grouped_fused_impl is not None
+        or _w4a16_grouped_masked_impl is not None
         or _fp8_mqa_logits_impl is not None
         or _fp8_paged_mqa_logits_impl is not None
         or _int8_mqa_logits_impl is not None
@@ -266,6 +278,7 @@ def _lazy_init() -> None:
         or _tf32_hc_prenorm_gemm_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
+        or _moe_align_block_size_impl is not None
     ):
         return
 
@@ -312,6 +325,7 @@ def _lazy_init() -> None:
     _int8_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_int8_int8_bf16_nt_masked", None
     )
+    _bf16_gemm_nt_impl = getattr(_dg, "gemm_bf16_bf16_bf16_nt", None)
     _bf16_grouped_nopad_impl = getattr(
         _dg, "m_grouped_gemm_bf16_bf16_bf16_nt_nopad", None
     )
@@ -324,8 +338,18 @@ def _lazy_init() -> None:
     _fp4_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_fp4_fp4_bf16_nt_masked", None
     )
+    _w4a16_grouped_nopad_impl = getattr(
+        _dg, "m_grouped_gemm_w4a16_nopad", None
+    )
+    _w4a16_grouped_fused_impl = getattr(
+        _dg, "m_grouped_gemm_w4a16_fused", None
+    )
+    _w4a16_grouped_masked_impl = getattr(
+        _dg, "m_grouped_gemm_w4a16_masked", None
+    )
     _get_compile_mode_impl = getattr(_dg, "get_compile_mode", None)
     _set_compile_mode_impl = getattr(_dg, "set_compile_mode", None)
+    _moe_align_block_size_impl = getattr(_dg, "moe_align_block_size", None)
     DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
@@ -413,6 +437,13 @@ def int8_m_grouped_gemm_nt_masked(*args, **kwargs):
     return _int8_grouped_masked_impl(*args, **kwargs)
 
 
+def bf16_gemm_nt(*args, **kwargs):
+    _lazy_init()
+    if _bf16_gemm_nt_impl is None:
+        return _missing(*args, **kwargs)
+    return _bf16_gemm_nt_impl(*args, **kwargs)
+
+
 def m_grouped_bf16_gemm_nt_nopad(*args, **kwargs):
     _lazy_init()
     if _bf16_grouped_nopad_impl is None:
@@ -441,11 +472,39 @@ def bf16_m_grouped_gemm_nt_masked(*args, **kwargs):
     return _bf16_grouped_masked_impl(*args, **kwargs)
 
 
+def m_grouped_w4a16_gemm_nt_nopad(*args, **kwargs):
+    _lazy_init()
+    if _w4a16_grouped_nopad_impl is None:
+        return _missing(*args, **kwargs)
+    return _w4a16_grouped_nopad_impl(*args, **kwargs)
+
+
+def m_grouped_w4a16_gemm_nt_fused(*args, **kwargs):
+    _lazy_init()
+    if _w4a16_grouped_fused_impl is None:
+        return _missing(*args, **kwargs)
+    return _w4a16_grouped_fused_impl(*args, **kwargs)
+
+
+def w4a16_m_grouped_gemm_nt_masked(*args, **kwargs):
+    _lazy_init()
+    if _w4a16_grouped_masked_impl is None:
+        return _missing(*args, **kwargs)
+    return _w4a16_grouped_masked_impl(*args, **kwargs)
+
+
 def transform_sf_into_required_layout(*args, **kwargs):
     _lazy_init()
     if _transform_sf_into_required_layout_impl is None:
         return _missing(*args, **kwargs)
     return _transform_sf_into_required_layout_impl(*args, **kwargs)
+
+
+def moe_align_block_size(*args, **kwargs):
+    _lazy_init()
+    if _moe_align_block_size_impl is None:
+        return _missing(*args, **kwargs)
+    return _moe_align_block_size_impl(*args, **kwargs)
 
 
 def fp8_mqa_logits(
@@ -862,6 +921,71 @@ def should_use_deepgemm_for_fp8_linear(
     )
 
 
+@functools.cache
+def is_ppu_15() -> bool:
+    """Return `True` on PPU 1.5 (890p), which reports capability (8, 9)."""
+    return current_platform.is_ppu() and current_platform.is_device_capability(
+        (8, 9)
+    )
+
+
+def should_use_deepgemm_for_bf16_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> bool:
+    """Decide whether an unquantized BF16 dense GEMM should run on DeepGEMM.
+
+    Requires `VLLM_PPU_DENSE_BF16_DEEPGEMM` and PPU 1.5; DeepGEMM dense
+    GEMM only supports K-major (nt) operands, so both A `[..., K]` and
+    B `[N, K]` must be contiguous BF16.  When *bias* is present the caller
+    must fall back to acblas (``F.linear``) to avoid the extra elementwise
+    add overhead.  Otherwise (no bias) callers can use DeepGEMM when all
+    conditions are satisfied.
+    """
+    if bias is not None:
+        return False
+
+    if not envs.VLLM_PPU_DENSE_BF16_DEEPGEMM:
+        return False
+
+    if not (current_platform.is_ppu() and has_deep_gemm()):
+        return False
+
+    # BF16 dense GEMM is only optimized on PPU 1.5 for now; PPU 1.0 will be
+    # enabled once the kernel-side optimization lands.
+    if not is_ppu_15():
+        return False
+
+    return (
+        x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and weight.dim() == 2
+        and x.is_contiguous()
+        and weight.is_contiguous()
+    )
+
+
+def bf16_dense_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """BF16 dense linear via DeepGEMM (K-major operands only).
+
+    Callers must check `should_use_deepgemm_for_bf16_linear` first.
+    """
+    original_shape = x.shape
+    x_2d = x.reshape(-1, original_shape[-1])
+    m = x_2d.shape[0]
+    n = weight.shape[0]
+    output = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+    bf16_gemm_nt(x_2d, weight, output)
+    if bias is not None:
+        output = output + bias
+    return output.view(*original_shape[:-1], n)
+
+
 def fp8_mqa_logits_torch(
     q: torch.Tensor,
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -989,12 +1113,17 @@ __all__ = [
     "m_grouped_fp8_gemm_nt_nopad",
     "fp8_m_grouped_gemm_nt_masked",
     "int8_gemm_nt",
+    "bf16_gemm_nt",
+    "bf16_dense_linear",
     "m_grouped_int8_gemm_nt_nopad",
     "int8_m_grouped_gemm_nt_masked",
     "m_grouped_bf16_gemm_nt_nopad",
     "bf16_m_grouped_gemm_nt_masked",
     "m_grouped_fp4_gemm_nt_nopad",
     "fp4_m_grouped_gemm_nt_masked",
+    "m_grouped_w4a16_gemm_nt_nopad",
+    "m_grouped_w4a16_gemm_nt_fused",
+    "w4a16_m_grouped_gemm_nt_masked",
     "fp8_mqa_logits",
     "fp8_mqa_logits_torch",
     "fp8_paged_mqa_logits",
@@ -1007,8 +1136,11 @@ __all__ = [
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "is_ppu_15",
+    "should_use_deepgemm_for_bf16_linear",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
+    "moe_align_block_size",
 ]

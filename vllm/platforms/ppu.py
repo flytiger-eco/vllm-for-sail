@@ -145,8 +145,26 @@ class PPUPlatform(NvmlCudaPlatform):
         if "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
 
+        # Kimi-K3: PPU DeepGEMM has no MegaMoE API (fp8_fp4_mega_moe / symm
+        # buffers), so reject that backend early with a clear message; the
+        # default FusedMoE + LatentMoERunner path (PPU DeepGEMM / batched
+        # DeepGEMM + DeepEP) is used instead. No-op for non-K3 models.
+        kernel_config = vllm_config.kernel_config
+        if getattr(kernel_config, "moe_backend", None) == "deep_gemm_mega_moe":
+            raise ValueError(
+                "moe_backend='deep_gemm_mega_moe' is not supported on PPU: PPU "
+                "DeepGEMM does not provide the MegaMoE API. Use the default MoE "
+                "backend."
+            )
+
     @classmethod
     def use_custom_allreduce(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        # PPU does not support Programmatic Dependent Launch (PDL). Force it off
+        # so PDL-gated kernels fall back to the standard launch path.
         return False
 
     # -----------------------------------------------------------------

@@ -6,6 +6,10 @@ import math
 
 import numpy
 import torch
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationType,
+)
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -352,7 +356,10 @@ def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1)
 
 
 def check_moe_marlin_supports_layer(
-    layer: RoutedExperts, group_size: int, allow_tile_padding: bool = False
+    layer: RoutedExperts,
+    group_size: int,
+    allow_tile_padding: bool = False,
+    weight_quant: QuantizationArgs | None = None,
 ) -> bool:
     """Whether the fused MoE Marlin kernel supports ``layer``.
 
@@ -362,9 +369,17 @@ def check_moe_marlin_supports_layer(
     straddling the padded boundary stays unsupported. hidden_size is the MoE
     I/O extent and is never padded. Act-order keeps the strict shape.
     """
-    if current_platform.is_ppu() and not envs.VLLM_PPU_ENABLE_MOE_MARLIN:
-        return False
-
+    if current_platform.is_ppu():
+        if not envs.VLLM_PPU_ENABLE_MOE_MARLIN and not (
+            weight_quant is not None
+            and group_size == 32
+            and weight_quant.type == QuantizationType.INT
+            and weight_quant.num_bits == 4
+            and weight_quant.symmetric
+            and envs.VLLM_USE_DEEP_GEMM
+            and envs.VLLM_MOE_USE_DEEP_GEMM
+        ):
+            return False
 
     if current_platform.is_rocm():
         return False

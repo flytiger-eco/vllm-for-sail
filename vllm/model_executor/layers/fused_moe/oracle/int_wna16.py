@@ -52,6 +52,8 @@ class WNA16MoEBackend(Enum):
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     XPU = "XPU"
     EMULATION = "EMULATION"
+    PPU_DEEPGEMM = "PPU_DEEPGEMM"
+    BATCHED_PPU_DEEPGEMM = "BATCHED_PPU_DEEPGEMM"
 
 
 def backend_to_kernel_cls(
@@ -74,6 +76,18 @@ def backend_to_kernel_cls(
         return [MarlinExperts]
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
         return [BatchedMarlinExperts]
+    elif backend == WNA16MoEBackend.PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+            PPUDeepGemmExperts,
+        )
+
+        return [PPUDeepGemmExperts]
+    elif backend == WNA16MoEBackend.BATCHED_PPU_DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+            PPUBatchedDeepGemmExperts,
+        )
+
+        return [PPUBatchedDeepGemmExperts]
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
     elif backend == WNA16MoEBackend.XPU:
@@ -106,6 +120,13 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
+    if current_platform.is_ppu():
+        return [
+            WNA16MoEBackend.PPU_DEEPGEMM,
+            WNA16MoEBackend.BATCHED_PPU_DEEPGEMM,
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+        ]
 
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.FLASHINFER_TRTLLM,
@@ -121,6 +142,8 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     """Map user's MoEBackend to WNA16MoEBackend."""
     mapping = {
         "marlin": WNA16MoEBackend.MARLIN,
+        "ppu_deep_gemm": WNA16MoEBackend.PPU_DEEPGEMM,
+        "ppu_deep_gemm_w4a16": WNA16MoEBackend.PPU_DEEPGEMM,
         "humming": WNA16MoEBackend.HUMMING,
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
@@ -189,6 +212,11 @@ def select_wna16_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_wna16_backend(runner_backend)
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == WNA16MoEBackend.PPU_DEEPGEMM
+        ):
+            requested_backend = WNA16MoEBackend.BATCHED_PPU_DEEPGEMM
         return _return_or_raise(
             requested_backend, config, weight_key, None, activation_format
         )
@@ -287,6 +315,12 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
+    from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
+        PPUDeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+        PPUBatchedDeepGemmExperts,
+    )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, the Humming
@@ -294,6 +328,8 @@ def make_wna16_moe_kernel(
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
+        PPUDeepGemmExperts,
+        PPUBatchedDeepGemmExperts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
@@ -1335,6 +1371,8 @@ def convert_to_wna16_moe_kernel_format(
     if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.PPU_DEEPGEMM,
+        WNA16MoEBackend.BATCHED_PPU_DEEPGEMM,
     ):
         from vllm.model_executor.layers.quantization.auto_awq import (
             AutoAWQConfig,

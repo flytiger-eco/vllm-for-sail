@@ -111,7 +111,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
             if (
                 not check_moe_marlin_supports_layer(
-                    layer, group_size, allow_tile_padding=not is_actorder
+                    layer,
+                    group_size,
+                    allow_tile_padding=not is_actorder,
+                    weight_quant=weight_quant,
                 )
                 or current_platform.is_rocm()
             ):

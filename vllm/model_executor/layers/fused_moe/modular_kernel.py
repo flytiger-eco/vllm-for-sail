@@ -597,6 +597,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif moe_config.has_bias and not cls._supports_bias():
+            return False, _make_reason("bias")
         return True, None
 
     @staticmethod
@@ -770,6 +772,13 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    @staticmethod
+    def _supports_bias() -> bool:
+        """
+        Whether the kernel supports bias.
+        """
+        return True
+
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -923,6 +932,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             beta=beta,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            activation_situ_beta=self.moe_config.activation_situ_beta,
+            activation_situ_linear_beta=(self.moe_config.activation_situ_linear_beta),
         )
 
     @abstractmethod
@@ -1294,6 +1305,14 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        use_output_alias = (
+            output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        )
+
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1301,15 +1320,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
+            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
                 fused_out = output_alias
+        elif use_output_alias:
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
