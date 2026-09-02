@@ -57,6 +57,10 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.sail_cuda_pla_prefill import (
+    get_sail_cuda_pla_prefill_fwd,
+    get_sail_cuda_pla_prefill_head_configs,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
@@ -90,25 +94,17 @@ logger = init_logger(__name__)
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
-try:
-    from pla.prefill.flashqla import (
-        chunk_gated_delta_rule_fwd as pla_chunk_gated_delta_rule_fwd,
-    )
-
-    _PLA_AVAILABLE = True
-except ImportError:
-    pla_chunk_gated_delta_rule_fwd = None
-    _PLA_AVAILABLE = False
-
 
 def _pla_prefill_supported(vllm_config: VllmConfig) -> bool:
     """Check whether the pla FlashQLA prefill kernel can run here.
 
-    FlashQLA requires head dims of 128 and instantiates a fixed set of
-    per-rank (num_v_heads, num_k_heads) configs, so validate the TP-sharded
-    head counts against its whitelist before selecting the backend.
+    The resolver applies the ``VLLM_PPU_USE_PLA`` and PPU platform gates and
+    returns ``None`` when the kernel is unusable. FlashQLA additionally
+    requires head dims of 128 and instantiates a fixed set of per-rank
+    (num_v_heads, num_k_heads) configs, so validate the TP-sharded head counts
+    against its whitelist before selecting the backend.
     """
-    if not _PLA_AVAILABLE:
+    if get_sail_cuda_pla_prefill_fwd() is None:
         return False
     hf_cfg = vllm_config.model_config.hf_text_config
     head_k_dim = getattr(hf_cfg, "linear_key_head_dim", None)
@@ -120,11 +116,11 @@ def _pla_prefill_supported(vllm_config: VllmConfig) -> bool:
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     if num_k_heads is None or num_v_heads is None:
         return False
-    from pla.prefill.flashqla.ops import SUPPORTED_HEAD_CONFIGS
 
-    return (num_v_heads // tp_size, num_k_heads // tp_size) in (
-        SUPPORTED_HEAD_CONFIGS
-    )
+    return (
+        num_v_heads // tp_size,
+        num_k_heads // tp_size,
+    ) in get_sail_cuda_pla_prefill_head_configs()
 
 
 def _resolve_gdn_prefill_backend(
@@ -146,6 +142,8 @@ def _resolve_gdn_prefill_backend(
     The PPU pla (FlashQLA) CUDA kernel is chosen when:
     * ``requested in ["pla", "auto"]``;
     * ``platform == ppu``;
+    * ``VLLM_PPU_USE_PLA`` is enabled (the default) and the ``pla`` package is
+      importable;
     * head dims are 128 and the TP-sharded head counts are supported.
     """
     additional_config = vllm_config.additional_config
@@ -423,12 +421,17 @@ class ChunkGatedDeltaRule(CustomOp):
         g = g.squeeze(0).to(torch.float32).contiguous()
         beta = beta.squeeze(0).to(torch.float32).contiguous()
         # pla expects [N, H, DK, DV] fp32 while vLLM stores [N, H, DV, DK].
+        # A cold start passes None, which pla accepts and zero-initializes
+        # internally, so it must not be transposed.
         state = (
             initial_state.transpose(-1, -2)
             .contiguous()
             .to(torch.float32, non_blocking=True)
+            if initial_state is not None
+            else None
         )
 
+        pla_chunk_gated_delta_rule_fwd = get_sail_cuda_pla_prefill_fwd()
         _, _, o, _, final_state = pla_chunk_gated_delta_rule_fwd(
             q.unsqueeze(0),
             k.unsqueeze(0),
