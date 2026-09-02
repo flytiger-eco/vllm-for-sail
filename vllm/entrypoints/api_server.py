@@ -184,3 +184,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     asyncio.run(run_server(args))
+
+
+# ppu ci smoke: fast-tier path-filter trigger (do not merge)

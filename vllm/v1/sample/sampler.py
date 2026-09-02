@@ -437,3 +437,6 @@ class Sampler(nn.Module):
             sampling_metadata.repetition_penalties,
             output_token_ids,
         )
+
+
+# ppu ci smoke: fast-tier path-filter trigger (do not merge)
