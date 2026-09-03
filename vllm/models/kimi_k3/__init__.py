@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 model — hardware-isolated entry point.
 
-The implementation lives under ``nvidia/`` and ``amd/``; this module picks the
-right one for the current platform and re-exports the public classes used by
-the model registry. (Mirrors ``vllm.models.minimax_m3``.)
+The implementation lives under ``nvidia/``, ``amd/``, and ``ppu/``; this module
+picks the right one for the current platform and re-exports the public classes
+used by the model registry. (Mirrors ``vllm.models.deepseek_v4``.)
 """
 
 from typing import TYPE_CHECKING
@@ -24,6 +24,12 @@ elif current_platform.is_rocm():
     from .amd.linear import KimiLinearForCausalLM  # type: ignore[assignment]
     from .amd.model import KimiK3ForConditionalGeneration  # type: ignore[assignment]
     from .amd.mtp import KimiK3MTP  # type: ignore[assignment]
+elif current_platform.is_ppu():
+    from .ppu.model import (  # type: ignore[assignment]
+        KimiK3ForConditionalGeneration,
+        KimiLinearForCausalLM,
+    )
+    from .ppu.mtp import KimiK3MTP  # type: ignore[assignment]
 else:
     from .nvidia.model import KimiK3ForConditionalGeneration, KimiLinearForCausalLM
     from .nvidia.mtp import KimiK3MTP

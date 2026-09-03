@@ -218,13 +218,17 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
-        if current_platform.is_ppu() and not current_platform.is_device_capability(
-                (8, 0)):
-            # NOTE: W4A4, PPU USE MXFP4 Weights + MXFP4 Activations
-            # Only on sm90+ (e.g. 890P); sm80 (e.g. 810E) falls back to
-            # w4a16 (BF16 activation) with Marlin backend.
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic)
+        if current_platform.is_ppu():
+            if (
+                current_platform.is_device_capability((8, 0))
+                or moe.moe_backend == "marlin"
+            ):
+                # SM80 (e.g., 810E) or explicit Marlin: Use W4A16 (BF16 activations).
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            else:
+                # Newer HW (e.g., SM89+/890P): Use W4A4 (MXFP4 weights & activations).
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                    moe, activation_key=kMxfp4Dynamic)
         else:
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
@@ -587,15 +591,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
         if current_platform.is_ppu():
-            if not current_platform.is_device_capability((8, 0)):
-                # NOTE: W4A4, PPU USE MXFP4 Weights + MXFP4 Activations
-                # Only on sm90+ (e.g. 890P); sm80 (e.g. 810E) falls back to
-                # w4a16 (BF16 activation) with Marlin backend.
+            if current_platform.is_device_capability((8, 0)) or moe.moe_backend in (
+                "marlin",
+                "ppu_deep_gemm_w4a16",
+            ):
+                # SM80 (e.g., 810E) or explicit Marlin/ppu_deep_gemm_w4a16: Use W4A16 (BF16 activations).
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            else:
+                # Newer HW (e.g., SM89+/890P): Use W4A4 (MXFP4 weights & activations).
                 self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                     moe, activation_key=kMxfp4Dynamic)
-            else:
-                # sm80 (810E) → W4A16
-                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
         elif self.is_k3_situ_aiter:
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]

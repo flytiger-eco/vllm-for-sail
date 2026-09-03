@@ -126,6 +126,7 @@ MoEBackend = Literal[
     "deep_gemm",
     "deep_gemm_mega_moe",
     "ppu_deep_gemm",
+    "ppu_deep_gemm_w4a16",
     "ppu_acext",
     "cutlass",
     "flashinfer_trtllm",

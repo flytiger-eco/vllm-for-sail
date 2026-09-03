@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -27,6 +28,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 DEVICE = "cuda"
@@ -651,22 +653,51 @@ def test_fused_kda_decode_correctness(
     conv_actual.copy_(conv_seed)
     state_actual.copy_(state_seed)
     fused_weight = weight.reshape(3, dim, W).transpose(1, 2).contiguous()
-    actual = ops.fused_kda_decode(
-        x=packed_x,
-        weight=fused_weight,
-        bias=None,
-        conv_state=conv_actual,
-        raw_g=raw_g,
-        raw_beta=raw_beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        state_indices=state_indices,
-        state=state_actual,
-        lower_bound=lower_bound,
-        output_gate=output_gate if fuse_output_norm else None,
-        norm_weight=norm_weight if fuse_output_norm else None,
-        norm_eps=norm_eps,
-    )
+    if current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA:
+        from pla.decode.kda import fused_kda_decode_mega_forward
+
+        actual = torch.empty(
+            1,
+            packed_x.shape[0],
+            raw_g.shape[2],
+            raw_g.shape[3],
+            dtype=packed_x.dtype,
+            device=packed_x.device,
+        )
+        fused_kda_decode_mega_forward(
+            x=packed_x,
+            weight=fused_weight,
+            bias=None,
+            conv_state=conv_actual,
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            a_log=A_log,
+            dt_bias=dt_bias,
+            state_indices=state_indices,
+            state=state_actual,
+            out=actual,
+            lower_bound=lower_bound,
+            output_gate=output_gate if fuse_output_norm else None,
+            norm_weight=norm_weight if fuse_output_norm else None,
+            norm_eps=norm_eps,
+        )
+    else:
+        actual = ops.fused_kda_decode(
+            x=packed_x,
+            weight=fused_weight,
+            bias=None,
+            conv_state=conv_actual,
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            state_indices=state_indices,
+            state=state_actual,
+            lower_bound=lower_bound,
+            output_gate=output_gate if fuse_output_norm else None,
+            norm_weight=norm_weight if fuse_output_norm else None,
+            norm_eps=norm_eps,
+        )
 
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
     torch.testing.assert_close(conv_actual, conv_ref, atol=0, rtol=0)
@@ -686,10 +717,13 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
 
 @torch.inference_mode()
 def test_flashkda_correctness():
-    if not is_flashkda_supported(128, torch.bfloat16, -3.0):
-        pytest.skip("FlashKDA is not supported on this platform")
+    if current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA:
+        from pla.prefill.flashkdapro import flashkda_fwd
+    else:
+        if not is_flashkda_supported(128, torch.bfloat16, -3.0):
+            pytest.skip("FlashKDA is not supported on this platform")
 
-    import vllm._flashkda_C  # noqa: F401
+        import vllm._flashkda_C  # noqa: F401
 
     B, T, H, D = 1, 48, 2, 128
     torch.manual_seed(11)
@@ -731,27 +765,45 @@ def test_flashkda_correctness():
 
     actual_out = torch.empty_like(v)
     actual_state = torch.empty_like(initial_state)
-    workspace = torch.empty(
-        torch.ops._flashkda_C.get_workspace_size(T, H, cu_seqlens.numel() - 1),
-        dtype=torch.uint8,
-        device=DEVICE,
-    )
-    torch.ops._flashkda_C.fwd(
-        q,
-        k,
-        v,
-        raw_g,
-        beta_logits,
-        D**-0.5,
-        actual_out,
-        workspace,
-        A_log,
-        dt_bias,
-        lower_bound,
-        initial_state,
-        actual_state,
-        cu_seqlens,
-    )
+
+    if current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA:
+        flashkda_fwd(
+            q.view(B * T, H, D),
+            k.view(B * T, H, D),
+            v.view(B * T, H, D),
+            raw_g.view(B * T, H, D),
+            beta_logits.view(B * T, H),
+            A_log,
+            dt_bias,
+            actual_out.view(B * T, H, D),
+            scale=D**-0.5,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            final_state=actual_state,
+            cu_seqlens=cu_seqlens,
+        )
+    else:
+        workspace = torch.empty(
+            torch.ops._flashkda_C.get_workspace_size(T, H, cu_seqlens.numel() - 1),
+            dtype=torch.uint8,
+            device=DEVICE,
+        )
+        torch.ops._flashkda_C.fwd(
+            q,
+            k,
+            v,
+            raw_g,
+            beta_logits,
+            D**-0.5,
+            actual_out,
+            workspace,
+            A_log,
+            dt_bias,
+            lower_bound,
+            initial_state,
+            actual_state,
+            cu_seqlens,
+        )
 
     assert_close("o", expected_out, actual_out, 0.01)
     assert_close("ht", expected_state, actual_state, 0.01)

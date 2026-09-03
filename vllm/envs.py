@@ -303,6 +303,7 @@ if TYPE_CHECKING:
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
+    VLLM_PPU_DENSE_BF16_DEEPGEMM: bool = False
     VLLM_PPU_USE_PLA: bool = True
     VLLM_PPU_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_PPU_FORCE_MOE_WNA16_CUDA: bool = False
@@ -310,6 +311,7 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
+    VLLM_PPU_DEEPGEMM_MOE_TP_FUSED: bool = True
 
 def get_default_cache_root():
     return os.getenv(
@@ -2096,6 +2098,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "triton",
         ],
     ),
+    # Use PPU DeepGEMM for unquantized BF16 dense GEMM.
+    # Default (False): keep the acblas path (F.linear).
+    # When enabled, only K-major BF16 dense GEMMs on PPU 1.5 are routed to
+    # DeepGEMM; everything else still falls back to acblas.
+    "VLLM_PPU_DENSE_BF16_DEEPGEMM": lambda: (
+        os.getenv("VLLM_PPU_DENSE_BF16_DEEPGEMM", "False").strip().lower()
+        in ("true", "1")
+    ),
     # Use PPU SAIL CUDA PLA kernels for GDN instead of the community Triton
     # kernels: decode (k_last / k_last_packed) and prefill (FlashQLA
     # chunk_gated_delta_rule_fwd). Mirrors SGLang's SGLANG_SAIL_PLA_CUDA.
@@ -2136,6 +2146,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PPU_NVTX_DUMP_TOPK": lambda: (
         os.getenv("VLLM_SAIL_NVTX_DUMP_TOPK", "False").lower() in ("true", "1")
         or os.getenv("VLLM_PPU_NVTX_DUMP_TOPK", "False").lower() in ("true", "1")
+    ),
+    # Use DeepGEMM fused moe
+    "VLLM_PPU_DEEPGEMM_MOE_TP_FUSED": lambda: (
+        os.getenv("VLLM_PPU_DEEPGEMM_MOE_TP_FUSED", "True").strip().lower()
+        in ("true", "1")
     ),
 }
 

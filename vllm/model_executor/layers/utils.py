@@ -98,6 +98,25 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
+def ppu_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    # PPU NOTE: when VLLM_PPU_DENSE_BF16_DEEPGEMM is enabled, route K-major
+    # BF16 dense GEMMs on PPU 1.5 to DeepGEMM; everything else keeps the
+    # default acblas path (F.linear).
+    from vllm.utils.ppu_deep_gemm import should_use_deepgemm_for_bf16_linear
+
+    if should_use_deepgemm_for_bf16_linear(x, weight, bias):
+        logger.info_once(
+            "Using PPU DeepGEMM for unquantized BF16 dense GEMM"
+        )
+        return torch.ops.vllm.ppu_bf16_deepgemm_linear(x, weight, bias)
+    return torch.nn.functional.linear(x, weight, bias)
+
+
 def use_aiter_triton_gemm(n, m, k, dtype):
     if (
         not rocm_aiter_ops.is_triton_gemm_enabled()
@@ -219,6 +238,27 @@ direct_register_custom_op(
     op_name="rocm_unquantized_gemm",
     op_func=rocm_unquantized_gemm_impl,
     fake_impl=rocm_unquantized_gemm_fake,
+)
+
+
+def ppu_bf16_deepgemm_linear_impl(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    from vllm.utils.ppu_deep_gemm import bf16_dense_linear
+
+    return bf16_dense_linear(x, weight, bias)
+
+
+def ppu_bf16_deepgemm_linear_fake(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="ppu_bf16_deepgemm_linear",
+    op_func=ppu_bf16_deepgemm_linear_impl,
+    fake_impl=ppu_bf16_deepgemm_linear_fake,
 )
 
 
@@ -350,5 +390,7 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
+    elif current_platform.is_ppu():
+        return ppu_unquantized_gemm
     else:
         return default_unquantized_gemm

@@ -171,6 +171,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
          envs.VLLM_PPU_MOE_BACKEND == "deepgemm")
          or (not envs.VLLM_PPU_DENSE_BACKEND or
          envs.VLLM_PPU_DENSE_BACKEND == "deepgemm")
+         or envs.VLLM_PPU_DENSE_BF16_DEEPGEMM
         )
     )
     if do_ppu_deep_gemm_warmup:
