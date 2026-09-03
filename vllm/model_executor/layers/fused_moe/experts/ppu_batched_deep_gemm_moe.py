@@ -26,17 +26,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.ppu_deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_m_grouped_gemm_nt_masked,
     int8_m_grouped_gemm_nt_masked,
     bf16_m_grouped_gemm_nt_masked,
     fp4_m_grouped_gemm_nt_masked,
+    w4a16_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
@@ -95,11 +97,16 @@ def _silu_mul_quant_deep_gemm(
     SWIGLU_LIMIT: tl.constexpr,
     ALPHA: tl.constexpr,
     BETA: tl.constexpr,
+    IS_SITU: tl.constexpr,
+    SITU_BETA: tl.constexpr,
+    SITU_LINEAR_BETA: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
 ):
     G = H // GROUP_SIZE
+    SITU_INV_BETA: tl.constexpr = 1.0 / SITU_BETA
+    SITU_LINEAR_INV_BETA: tl.constexpr = 1.0 / SITU_LINEAR_BETA
 
     # map program id -> (e, g)
     pid = tl.program_id(0)
@@ -127,11 +134,22 @@ def _silu_mul_quant_deep_gemm(
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
-        if SWIGLU_LIMIT > 0.0:
+        if not IS_SITU and SWIGLU_LIMIT > 0.0:
             gate = tl.minimum(gate, SWIGLU_LIMIT)
             up = tl.clamp(up, -SWIGLU_LIMIT, SWIGLU_LIMIT)
-        gate = gate * (1.0 / (1.0 + tl.exp(-ALPHA * gate)))
-        y = gate * (up + BETA)
+
+        if IS_SITU:
+            gate_out = SITU_BETA * tldevice.tanh(gate * SITU_INV_BETA) / (
+                1.0 + tl.exp(-gate)
+            )
+            if SITU_LINEAR_BETA > 0.0:
+                up_out = SITU_LINEAR_BETA * tldevice.tanh(up * SITU_LINEAR_INV_BETA)
+            else:
+                up_out = up
+            y = gate_out * up_out
+        else:
+            gate = gate * (1.0 / (1.0 + tl.exp(-ALPHA * gate)))
+            y = gate * (up + BETA)
 
         y_s = tl.maximum(tl.max(tl.abs(y)), eps) / quant_max
 
@@ -155,6 +173,9 @@ def _persistent_masked_m_silu_mul_quant(
     swiglu_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    is_situ: bool = False,
+    situ_beta: float = 1.0,
+    situ_linear_beta: float = -1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -237,7 +258,9 @@ def _persistent_masked_m_silu_mul_quant(
     ).to_int()
 
     swiglu_limit_val = swiglu_limit if swiglu_limit is not None else 0.0
-    is_plain_silu = swiglu_limit_val == 0.0 and alpha == 1.0 and beta == 0.0
+    is_plain_silu = (
+        swiglu_limit_val == 0.0 and alpha == 1.0 and beta == 0.0 and not is_situ
+    )
 
     if cuda_arch >= 80 and use_fp8 and group_size == 128 and is_plain_silu:
         # C++ fast path only supports plain silu(gate) * up.
@@ -290,6 +313,9 @@ def _persistent_masked_m_silu_mul_quant(
             swiglu_limit_val,
             alpha,
             beta,
+            IS_SITU=is_situ,
+            SITU_BETA=situ_beta,
+            SITU_LINEAR_BETA=situ_linear_beta,
             BLOCK=triton.next_power_of_2(group_size),
             NUM_STAGES=4,
             num_warps=1,
@@ -307,6 +333,9 @@ def persistent_masked_m_silu_mul_quant(
     swiglu_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    is_situ: bool = False,
+    situ_beta: float = 1.0,
+    situ_linear_beta: float = -1.0,
 ):
     return _persistent_masked_m_silu_mul_quant(
         y,
@@ -319,6 +348,9 @@ def persistent_masked_m_silu_mul_quant(
         swiglu_limit=swiglu_limit,
         alpha=alpha,
         beta=beta,
+        is_situ=is_situ,
+        situ_beta=situ_beta,
+        situ_linear_beta=situ_linear_beta,
     )
 
 
@@ -331,6 +363,9 @@ def int8_persistent_masked_m_silu_mul_quant(
     swiglu_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    is_situ: bool = False,
+    situ_beta: float = 1.0,
+    situ_linear_beta: float = -1.0,
 ):
     return _persistent_masked_m_silu_mul_quant(
         y,
@@ -343,6 +378,9 @@ def int8_persistent_masked_m_silu_mul_quant(
         swiglu_limit=swiglu_limit,
         alpha=alpha,
         beta=beta,
+        is_situ=is_situ,
+        situ_beta=situ_beta,
+        situ_linear_beta=situ_linear_beta,
     )
 
 
@@ -370,11 +408,16 @@ def _silu_mul_deep_gemm(
     SWIGLU_LIMIT: tl.constexpr,
     ALPHA: tl.constexpr,
     BETA: tl.constexpr,
+    IS_SITU: tl.constexpr,
+    SITU_BETA: tl.constexpr,
+    SITU_LINEAR_BETA: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
 ):
     G = H // GROUP_SIZE
+    SITU_INV_BETA: tl.constexpr = 1.0 / SITU_BETA
+    SITU_LINEAR_INV_BETA: tl.constexpr = 1.0 / SITU_LINEAR_BETA
 
     # map program id -> (e, g)
     pid = tl.program_id(0)
@@ -406,11 +449,22 @@ def _silu_mul_deep_gemm(
             other=0.0,
         ).to(tl.float32)
 
-        if SWIGLU_LIMIT > 0.0:
+        if not IS_SITU and SWIGLU_LIMIT > 0.0:
             x = tl.minimum(x, SWIGLU_LIMIT)
             y2 = tl.clamp(y2, -SWIGLU_LIMIT, SWIGLU_LIMIT)
-        x = x * (1.0 / (1.0 + tl.exp(-ALPHA * x)))
-        y = x * (y2 + BETA)
+
+        if IS_SITU:
+            gate_out = SITU_BETA * tldevice.tanh(x * SITU_INV_BETA) / (
+                1.0 + tl.exp(-x)
+            )
+            if SITU_LINEAR_BETA > 0.0:
+                up_out = SITU_LINEAR_BETA * tldevice.tanh(y2 * SITU_LINEAR_INV_BETA)
+            else:
+                up_out = y2
+            y = gate_out * up_out
+        else:
+            x = x * (1.0 / (1.0 + tl.exp(-ALPHA * x)))
+            y = x * (y2 + BETA)
         y_q = y
 
         tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
@@ -424,8 +478,12 @@ def silu_mul_deep_gemm(
     swiglu_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    is_situ: bool = False,
+    situ_beta: float = 1.0,
+    situ_linear_beta: float = -1.0,
 ):
-    """Compute gate * sigmoid(alpha * gate) * (up + beta) with optional clamping.
+    """Compute gate * sigmoid(alpha * gate) * (up + beta) with optional clamping,
+    or the SITU gated activation when ``is_situ`` is ``True``.
 
     y has shape (E, T, 2*H). The first half of the last dimension is the gate,
     the second half is the up projection.
@@ -476,6 +534,9 @@ def silu_mul_deep_gemm(
         swiglu_limit_val,
         alpha,
         beta,
+        IS_SITU=is_situ,
+        SITU_BETA=situ_beta,
+        SITU_LINEAR_BETA=situ_linear_beta,
         BLOCK=group_size,
         NUM_STAGES=8,
         num_warps=1,
@@ -515,8 +576,11 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     SWIGLU_LIMIT: tl.constexpr,
     ALPHA: tl.constexpr,
     BETA: tl.constexpr,
+    IS_SITU: tl.constexpr,
+    SITU_BETA: tl.constexpr,
+    SITU_LINEAR_BETA: tl.constexpr,
 ):
-    """Fused SiLU+mul + MXFP4 quantisation for batched-expert (EP) layout.
+    """Fused SiLU/SITU+mul + MXFP4 quantisation for batched-expert (EP) layout.
 
     Grid: (hidden_dim_split, token_blocks_per_expert, expert_num)
 
@@ -527,6 +591,8 @@ def _silu_mul_mxfp4_quant_deep_gemm(
     QUANT_MAX: tl.constexpr = 6.0  # max abs value of e2m1
     NUM_GROUPS: tl.constexpr = BLOCK_N // GROUP_SIZE
     NUM_SCALE_PAIRS: tl.constexpr = NUM_GROUPS // 2
+    SITU_INV_BETA: tl.constexpr = 1.0 / SITU_BETA
+    SITU_LINEAR_INV_BETA: tl.constexpr = 1.0 / SITU_LINEAR_BETA
 
     BLOCK_NUM_PER_EXPERT = tl.num_programs(1)
 
@@ -571,14 +637,26 @@ def _silu_mul_mxfp4_quant_deep_gemm(
         ).to(tl.float32)
 
         # -- Clamp: gate at max only, up both ways (matches C++ reference) --
-        if SWIGLU_LIMIT > 0.0:
+        if not IS_SITU and SWIGLU_LIMIT > 0.0:
             gate = tl.minimum(gate, SWIGLU_LIMIT)
             up = tl.clamp(up, -SWIGLU_LIMIT, SWIGLU_LIMIT)
 
-        # -- gate * sigmoid(alpha * gate) * (up + beta) --
-        gate = gate / (1.0 + tl.exp(-ALPHA * gate))
-        gate = gate.to(input_ptr.dtype.element_ty)
-        gate_up = (up + BETA) * gate
+        if IS_SITU:
+            # -- SITU (Kimi SituGLU): beta * tanh(gate / beta) * sigmoid(gate)
+            #    times (linear_beta * tanh(up / linear_beta) if set, else up) --
+            gate_out = SITU_BETA * tldevice.tanh(gate * SITU_INV_BETA) / (
+                1.0 + tl.exp(-gate)
+            )
+            if SITU_LINEAR_BETA > 0.0:
+                up_out = SITU_LINEAR_BETA * tldevice.tanh(up * SITU_LINEAR_INV_BETA)
+            else:
+                up_out = up
+            gate_up = gate_out * up_out
+        else:
+            # -- gate * sigmoid(alpha * gate) * (up + beta) --
+            gate = gate / (1.0 + tl.exp(-ALPHA * gate))
+            gate = gate.to(input_ptr.dtype.element_ty)
+            gate_up = (up + BETA) * gate
 
         # -- MXFP4 e2m1 quantisation with E8M0 scale, RTNE rounding --
         gate_up_grouped = tl.reshape(gate_up, [NUM_GROUPS, GROUP_SIZE])
@@ -652,8 +730,11 @@ def silu_mul_mxfp4_quant_masked(
     swiglu_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    is_situ: bool = False,
+    situ_beta: float = 1.0,
+    situ_linear_beta: float = -1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused SiLU+mul + MXFP4 quantisation (masked / batched-expert layout).
+    """Fused SiLU/SITU+mul + MXFP4 quantisation (masked / batched-expert layout).
 
     Args:
         y: Activations tensor of shape ``(E, T, 2*H)`` in bf16.  The first
@@ -662,6 +743,12 @@ def silu_mul_mxfp4_quant_masked(
         tokens_per_expert: Per-expert valid-token counts, shape ``(E,)``.
         swiglu_limit: Optional clamp limit for the gate before silu (DeepSeek
            V4).  When ``None`` or ``0.0``, no clamping is applied.
+        is_situ: If ``True``, apply the SITU gated activation instead of
+           SiLU/SWiGLU.
+        situ_beta: SITU ``beta`` parameter. Defaults to ``1.0`` when unset.
+        situ_linear_beta: SITU ``linear_beta`` parameter. Defaults to ``-1.0``
+           when unset; any non-positive value leaves the up projection
+           unchanged.
 
     Returns:
         Tuple ``(y_q, y_s)`` where:
@@ -729,6 +816,9 @@ def silu_mul_mxfp4_quant_masked(
         SWIGLU_LIMIT=swiglu_limit_val,
         ALPHA=alpha,
         BETA=beta,
+        IS_SITU=is_situ,
+        SITU_BETA=situ_beta,
+        SITU_LINEAR_BETA=situ_linear_beta,
         num_warps=1,
     )
 
@@ -755,7 +845,7 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
         self.block_wise = quant_config.block_shape is not None
-        if self.block_wise:
+        if self.block_wise and not quant_config.use_int4_w4a16:
             assert (
                 self.block_shape[1] == get_mk_alignment_for_contiguous_layout(is_blockwise=self.block_wise)[1]
             )
@@ -767,6 +857,15 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_beta = (
             quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
+        self.activation_situ_beta = (
+            moe_config.activation_situ_beta
+            if moe_config.activation_situ_beta is not None else 1.0
+        )
+        self.activation_situ_linear_beta = (
+            moe_config.activation_situ_linear_beta
+            if moe_config.activation_situ_linear_beta is not None
+            else -1.0
         )
 
     @staticmethod
@@ -791,6 +890,8 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+            (kInt4Static32, None),
+            (kMxfp4Static, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -801,11 +902,16 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SITU,
         ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
+
+    @staticmethod
+    def _supports_bias() -> bool:
+        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -822,6 +928,18 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        E, M, N, K, topk = super().moe_problem_size(a1, w1, w2, topk_ids)
+        if self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_int4_w4a16:
+            N = w2.size(1) * 32
+        return E, M, N, K, topk
 
     def workspace_shapes(
         self,
@@ -900,7 +1018,8 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         a1q = hidden_states
 
-        assert w2.size(1) == w1.size(2)
+        if not (self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_int4_w4a16):
+            assert w2.size(1) == w1.size(2)
 
         E, max_num_tokens, N, K, _ = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
@@ -938,6 +1057,9 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 swiglu_limit=self.gemm1_clamp_limit,
                 alpha=self.gemm1_alpha,
                 beta=self.gemm1_beta,
+                is_situ=(activation == MoEActivation.SITU),
+                situ_beta=self.activation_situ_beta,
+                situ_linear_beta=self.activation_situ_linear_beta,
             )
 
             fp8_m_grouped_gemm_nt_masked(
@@ -964,11 +1086,45 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 swiglu_limit=self.gemm1_clamp_limit,
                 alpha=self.gemm1_alpha,
                 beta=self.gemm1_beta,
+                is_situ=(activation == MoEActivation.SITU),
+                situ_beta=self.activation_situ_beta,
+                situ_linear_beta=self.activation_situ_linear_beta,
             )
 
             int8_m_grouped_gemm_nt_masked(
                 (a2q, a2q_scale),
                 (w2, self.w2_scale),
+                output,
+                expert_num_tokens,
+                expected_m,
+            )
+        elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_int4_w4a16:
+            # w4a16
+            if self.quant_config.use_mxfp4_w4a16:
+                w1_scale = self.w1_scale.view(torch.uint8)
+                w2_scale = self.w2_scale.view(torch.uint8)
+            else:
+                w1_scale, w2_scale = self.w1_scale, self.w2_scale
+            w4a16_m_grouped_gemm_nt_masked(
+                a1q,
+                (w1, w1_scale),
+                workspace1,
+                expert_num_tokens,
+                expected_m,
+            )
+            a2q = silu_mul_deep_gemm(
+                workspace1,
+                expert_num_tokens,
+                swiglu_limit=self.gemm1_clamp_limit,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
+                is_situ=(activation == MoEActivation.SITU),
+                situ_beta=self.activation_situ_beta,
+                situ_linear_beta=self.activation_situ_linear_beta,
+            )
+            w4a16_m_grouped_gemm_nt_masked(
+                a2q,
+                (w2, w2_scale),
                 output,
                 expert_num_tokens,
                 expected_m,
@@ -985,11 +1141,109 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                 swiglu_limit=self.gemm1_clamp_limit,
                 alpha=self.gemm1_alpha,
                 beta=self.gemm1_beta,
+                is_situ=(activation == MoEActivation.SITU),
+                situ_beta=self.activation_situ_beta,
+                situ_linear_beta=self.activation_situ_linear_beta,
             )
 
             bf16_m_grouped_gemm_nt_masked(
                 a2q, w2, output, expert_num_tokens, expected_m
             )
+
+
+class PPUBatchedDeepGemmExpertsW4FA16MMA(PPUBatchedDeepGemmExperts):
+    @staticmethod
+    def _supports_current_device() -> bool:
+        # w4fa16_mma requires sm90+ on PPU; disable on sm80
+        if current_platform.is_device_capability((8, 0)):
+            return False
+        return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        return mk.FusedMoEExpertsModular.moe_problem_size(self, a1, w1, w2, topk_ids)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
+        assert hidden_states.ndim == 3
+        a1q = hidden_states
+
+        # For mxfp4: w1.size(2) is hidden_size // 2 (two fp4 packed per uint8),
+        # and w2.size(1) is hidden_size (the full uncompressed row count).
+        assert w2.size(1) == w1.size(2) * 2
+
+        E, max_num_tokens, N, K, _ = self.moe_problem_size(
+            hidden_states, w1, w2, topk_ids
+        )
+
+        workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
+
+        expected_m = self.estimate_expected_m(
+            global_num_experts=global_num_experts,
+            max_tokens_per_expert=max_num_tokens,
+            topk=topk_ids.size(-1),
+        )
+
+        assert self.quant_config.use_mxfp4_w4a16
+
+        w4a16_m_grouped_gemm_nt_masked(
+            a1q,
+            (w1, self.w1_scale),
+            workspace1,
+            expert_num_tokens,
+            expected_m,
+        )
+        a2q = silu_mul_deep_gemm(
+            workspace1,
+            expert_num_tokens,
+            swiglu_limit=self.gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+            is_situ=(activation == MoEActivation.SITU),
+            situ_beta=self.activation_situ_beta,
+            situ_linear_beta=self.activation_situ_linear_beta,
+        )
+        w4a16_m_grouped_gemm_nt_masked(
+            a2q,
+            (w2, self.w2_scale),
+            output,
+            expert_num_tokens,
+            expected_m,
+        )
 
 
 class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
@@ -1023,6 +1277,15 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         self.gemm1_beta = (
             quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
         )
+        self.activation_situ_beta = (
+            moe_config.activation_situ_beta
+            if moe_config.activation_situ_beta is not None else 1.0
+        )
+        self.activation_situ_linear_beta = (
+            moe_config.activation_situ_linear_beta
+            if moe_config.activation_situ_linear_beta is not None
+            else -1.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1053,6 +1316,9 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            # Kimi-K3 latent MoE experts use the SiTU gated activation; the
+            # betas flow via moe_config -> base activation() -> situ_and_mul.
+            MoEActivation.SITU,
         ]
 
     @staticmethod
@@ -1169,16 +1435,23 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
 
-        # SiLU+mul on (E, T, 2*H) -> (E, T, H//2) uint8 + scales, fused with
-        # mxfp4 quantisation.  The fused Triton kernel supports SILU and
-        # SWIGLUOAI_UNINTERLEAVE (with clamp/alpha/beta); other activation
-        # variants fall back to a two-step approach.
-        if activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE):
+        # SiLU/SITU+mul on (E, T, 2*H) -> (E, T, H//2) uint8 + scales, fused with
+        # mxfp4 quantisation.  The fused Triton kernel supports SILU,
+        # SWIGLUOAI_UNINTERLEAVE (with clamp/alpha/beta) and SITU; other
+        # activation variants fall back to a two-step approach.
+        if activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SITU,
+        ):
             a2q, a2q_scale = silu_mul_mxfp4_quant_masked(
                 workspace1, expert_num_tokens,
                 swiglu_limit=self.gemm1_clamp_limit,
                 alpha=self.gemm1_alpha,
                 beta=self.gemm1_beta,
+                is_situ=(activation == MoEActivation.SITU),
+                situ_beta=self.activation_situ_beta,
+                situ_linear_beta=self.activation_situ_linear_beta,
             )
             # silu_mul_mxfp4_quant_masked outputs scale in [E, H//32//2, T] layout.
             # fp4_m_grouped_gemm_nt_masked expects [E, T, H//32//2], so permute.

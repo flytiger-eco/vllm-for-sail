@@ -25,27 +25,32 @@ from vllm.model_executor.layers.fused_moe.experts.ppu_deep_gemm_moe import (
     PPUDeepGemmExpertsMXFP4,
 )
 from vllm.model_executor.layers.fused_moe.experts.ppu_batched_deep_gemm_moe import (
+    PPUBatchedDeepGemmExperts,
     PPUBatchedDeepGemmExpertsMXFP4,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
     CompressedTensorsLinearMethod,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.tracing import instrument
 from vllm.utils.ppu_deep_gemm import (
+    bf16_gemm_nt,
     fp8_gemm_nt,
     get_compile_mode,
     get_deep_gemm_config,
     get_mk_alignment_for_contiguous_layout,
     int8_gemm_nt,
+    is_ppu_15,
     m_grouped_bf16_gemm_nt_nopad,
     m_grouped_fp8_gemm_nt_nopad,
     m_grouped_fp4_gemm_nt_nopad,
     m_grouped_int8_gemm_nt_nopad,
     fp4_m_grouped_gemm_nt_masked,
+    m_grouped_w4a16_gemm_nt_nopad,
+    w4a16_m_grouped_gemm_nt_masked,
     set_compile_mode,
 )
 from vllm.utils.import_utils import has_deep_gemm
@@ -177,7 +182,7 @@ def _extract_data_from_fused_moe_module(
         assert isinstance(w2, torch.Tensor)
         w13_s = None
         w2_s = None
-    elif w13.dtype in [torch.int8, torch.uint8, torch.float8_e4m3fn]:
+    elif w13.dtype in [torch.int8, torch.uint8, torch.float8_e4m3fn, torch.int32]:
         w13_s = (
             m.w13_weight_scale_inv
             if hasattr(m, "w13_weight_scale_inv")
@@ -450,6 +455,37 @@ def _int8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     )
 
 
+def _bf16_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
+    """
+    Return True if the input module/layer could be processed with DeepGEMM.
+    """
+    if not envs.VLLM_PPU_DENSE_BF16_DEEPGEMM:
+        return False
+
+    if not (
+        isinstance(module, LinearBase)
+        and isinstance(module.quant_method, UnquantizedLinearMethod)
+    ):
+        return False
+
+    w = getattr(module, "weight", None)
+    if not isinstance(w, torch.Tensor):
+        return False
+
+    if getattr(module, "bias", None) is not None:
+        return False
+
+    # DeepGEMM dense GEMM only supports K-major operands, and the BF16
+    # kernel is only optimized on PPU 1.5 for now.
+    return (
+        has_deep_gemm()
+        and is_ppu_15()
+        and w.ndim == 2
+        and w.dtype == torch.bfloat16
+        and w.is_contiguous()
+    )
+
+
 def _fused_moe_grouped_gemm_may_use_deep_gemm_int8(module: torch.nn.Module) -> bool:
     if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
         return False
@@ -558,6 +594,44 @@ def _deepgemm_grouped_int8_gemm_nt_contiguous_warmup(
         if w.size() not in GROUPED_INT8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
             _warmup(w, ws)
             GROUPED_INT8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.add(w.size())
+
+
+BF16_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
+
+
+def _deepgemm_bf16_gemm_nt_warmup(
+    w: torch.Tensor,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    if w.size() in BF16_GEMM_NT_WARMUP_CACHE:
+        return
+
+    n, k = w.size()
+
+    device = w.device
+    a1 = torch.empty((max_tokens, k), device=device, dtype=torch.bfloat16)
+    out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
+
+    m_values = _get_gemm_nt_m_values(w, max_tokens)
+    m_values = _shard_m_values_chunked(m_values)
+
+    for num_tokens in m_values:
+        bf16_gemm_nt(a1[:num_tokens], w, out[:num_tokens])
+        if pbar is not None:
+            pbar.update(1)
+
+    BF16_GEMM_NT_WARMUP_CACHE.add(w.size())
+
+
+def deepgemm_bf16_gemm_nt_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    dg_modules = [m for m in model.modules() if _bf16_linear_may_use_deep_gemm(m)]
+
+    for dgm in dg_modules:
+        w = dgm.weight
+        _deepgemm_bf16_gemm_nt_warmup(w=w, max_tokens=max_tokens, pbar=pbar)
 
 
 def deepgemm_int8_gemm_nt_warmup(
@@ -897,6 +971,202 @@ def deepgemm_grouped_fp4_gemm_nt_masked_warmup(
         )
 
 
+def _fused_moe_grouped_gemm_may_use_deep_gemm_w4a16(
+    module: torch.nn.Module, masked: bool = False
+) -> bool:
+    if envs.VLLM_PPU_MOE_BACKEND and envs.VLLM_PPU_MOE_BACKEND != "deepgemm":
+        return False
+
+    if not isinstance(module, MoERunner):
+        return False
+
+    quant_method = module._quant_method
+    moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
+
+    if moe_quant_config is None or not (
+        moe_quant_config.use_mxfp4_w4a16 or moe_quant_config.use_int4_w4a16
+    ):
+        return False
+
+    moe_kernel = getattr(quant_method, "moe_kernel", None)
+    if moe_kernel is None:
+        return False
+
+    fused_experts = moe_kernel.impl.fused_experts
+    return isinstance(
+        fused_experts, PPUBatchedDeepGemmExperts if masked else PPUDeepGemmExperts
+    )
+
+
+GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
+
+
+def _deepgemm_grouped_w4a16_gemm_nt_contiguous_warmup(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_topk: int,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    if (
+        w1.size() in GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
+        and w2.size() in GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
+    ):
+        return
+
+    MAX_M, block_m, expert_ids, _ = _get_grouped_gemm_params(
+        w1, w2, num_topk, max_tokens
+    )
+    device = w1.device
+
+    def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
+        if w.dtype == torch.uint8:
+            # w4fa16_mma
+            n, k = w.size(1), w.size(2) * 2
+        else:
+            # w4a16 / w4fa16
+            n, k = w.size(2) // 2, w.size(1) * 16
+
+        a = torch.empty((MAX_M, k), device=device, dtype=torch.bfloat16)
+        out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
+
+        m_values = list(range(block_m, MAX_M + 1, block_m))
+        m_values = _shard_m_values_chunked(m_values)
+
+        # w4fa16
+        if w_scale.dtype == torch.float8_e8m0fnu:
+            w_scale = w_scale.view(torch.uint8)
+
+        for num_tokens in m_values:
+            m_grouped_w4a16_gemm_nt_nopad(
+                a[:num_tokens],
+                (w, w_scale),
+                out[:num_tokens],
+                expert_ids[:num_tokens],
+                None,
+            )
+            if pbar is not None:
+                pbar.update(1)
+
+    for w, ws in [(w1, w1_scale), (w2, w2_scale)]:
+        if w.size() not in GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
+            _warmup(w, ws)
+            GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE.add(w.size())
+
+
+def deepgemm_grouped_w4a16_gemm_nt_contiguous_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    dg_modules = [
+        m for m in model.modules() if _fused_moe_grouped_gemm_may_use_deep_gemm_w4a16(m)
+    ]
+    for dgm in dg_modules:
+        w13, w13_scale, w2, w2_scale, num_topk = _extract_data_from_fused_moe_module(
+            dgm
+        )
+        _deepgemm_grouped_w4a16_gemm_nt_contiguous_warmup(
+            w13, w2, w13_scale, w2_scale, num_topk, max_tokens, pbar=pbar
+        )
+
+
+GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE: set[torch.Size] = set()
+
+
+def _deepgemm_grouped_w4a16_gemm_nt_masked_warmup(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_topk: int,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    if (
+        w1.size() in GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE
+        and w2.size() in GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE
+    ):
+        return
+
+    num_experts = w1.size(0)
+    device = w1.device
+
+    # Maximum per-expert token count used during real execution
+    dp_world = get_dp_group().world_size
+    max_tokens_total = dp_world * max_tokens
+    max_tokens_per_expert = max(
+        1,
+        (max_tokens_total * num_topk + num_experts - 1) // num_experts,
+    )
+
+    block_m = get_mk_alignment_for_contiguous_layout()[0]
+    # Round up to block_m granularity
+    max_tokens_per_expert = math.ceil(max_tokens_per_expert / block_m) * block_m
+    max_tokens_per_expert = max(max_tokens_per_expert, block_m)
+
+    def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
+        if w.dtype == torch.uint8:
+            # w4fa16_mma
+            n, k = w.size(1), w.size(2) * 2
+        else:
+            # w4a16 / w4fa16
+            n, k = w.size(2) // 2, w.size(1) * 16
+
+        num_groups = w.size(0)
+        a = torch.empty(
+            (num_groups, max_tokens_per_expert, k),
+            device=device, dtype=torch.bfloat16,
+        )
+        out = torch.empty(
+            (num_groups, max_tokens_per_expert, n),
+            device=device, dtype=torch.bfloat16,
+        )
+        # expert_num_tokens: (E,) – uniform load for warmup
+        m_values = list(range(block_m, max_tokens_per_expert + 1, block_m))
+        m_values = _shard_m_values_chunked(m_values)
+
+        # w4fa16
+        if w_scale.dtype == torch.float8_e8m0fnu:
+            w_scale = w_scale.view(torch.uint8)
+
+        for expected_m in m_values:
+            expert_num_tokens = torch.full(
+                (num_groups,), expected_m,
+                device=device, dtype=torch.int32,
+            )
+            w4a16_m_grouped_gemm_nt_masked(
+                a,
+                (w, w_scale),
+                out,
+                expert_num_tokens,
+                expected_m,
+            )
+            if pbar is not None:
+                pbar.update(1)
+
+    for w, ws in [(w1, w1_scale), (w2, w2_scale)]:
+        if w.size() not in GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE:
+            _warmup(w, ws)
+            GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE.add(w.size())
+
+
+def deepgemm_grouped_w4a16_gemm_nt_masked_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    dg_modules = [
+        m for m in model.modules()
+        if _fused_moe_grouped_gemm_may_use_deep_gemm_w4a16(m, masked=True)
+    ]
+    for dgm in dg_modules:
+        w13, w13_scale, w2, w2_scale, num_topk = _extract_data_from_fused_moe_module(
+            dgm
+        )
+        _deepgemm_grouped_w4a16_gemm_nt_masked_warmup(
+            w13, w2, w13_scale, w2_scale, num_topk, max_tokens, pbar=pbar
+        )
+
+
 def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
@@ -958,13 +1228,19 @@ def _count_warmup_iterations_int8(model: torch.nn.Module, max_tokens: int) -> in
 
 
 def _count_warmup_iterations_bf16(model: torch.nn.Module, max_tokens: int) -> int:
+    seen_dense_sizes: set[torch.Size] = set(BF16_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
         GROUPED_BF16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
 
     total = 0
     for m in model.modules():
-        if _fused_moe_grouped_gemm_may_use_deep_gemm_bf16(m):
+        if _bf16_linear_may_use_deep_gemm(m):
+            w = m.weight
+            if w.size() not in seen_dense_sizes:
+                total += len(_get_gemm_nt_m_values(w, max_tokens))
+                seen_dense_sizes.add(w.size())
+        elif _fused_moe_grouped_gemm_may_use_deep_gemm_bf16(m):
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
             if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
                 continue
@@ -1037,6 +1313,62 @@ def _count_warmup_iterations_fp4_masked(model: torch.nn.Module, max_tokens: int)
     return total
 
 
+def _count_warmup_iterations_w4a16(model: torch.nn.Module, max_tokens: int) -> int:
+    seen_grouped_sizes: set[torch.Size] = set(
+        GROUPED_W4A16_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
+    )
+
+    total = 0
+    for m in model.modules():
+        if _fused_moe_grouped_gemm_may_use_deep_gemm_w4a16(m):
+            w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
+            if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
+                continue
+            MAX_M, block_m, _, _ = _get_grouped_gemm_params(
+                w13, w2, num_topk, max_tokens
+            )
+            n_values = (MAX_M - block_m) // block_m + 1
+            if w13.size() not in seen_grouped_sizes:
+                total += n_values
+                seen_grouped_sizes.add(w13.size())
+            if w2.size() not in seen_grouped_sizes:
+                total += n_values
+                seen_grouped_sizes.add(w2.size())
+    return total
+
+
+def _count_warmup_iterations_w4a16_masked(model: torch.nn.Module, max_tokens: int) -> int:
+    seen_masked_sizes: set[torch.Size] = set(
+        GROUPED_W4A16_GEMM_NT_MASKED_WARMUP_CACHE
+    )
+
+    total = 0
+    for m in model.modules():
+        if _fused_moe_grouped_gemm_may_use_deep_gemm_w4a16(m, masked=True):
+            w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
+            if w13.size() in seen_masked_sizes and w2.size() in seen_masked_sizes:
+                continue
+            # Use _get_grouped_gemm_params for a consistent max-M calculation
+            _, block_m, _, _ = _get_grouped_gemm_params(
+                w13, w2, num_topk, max_tokens
+            )
+            num_experts = w13.size(0)
+            dp_world = get_dp_group().world_size
+            max_tokens_total = dp_world * max_tokens
+            max_tpe = math.ceil(
+                max(1, (max_tokens_total * num_topk + num_experts - 1) // num_experts)
+                / block_m
+            ) * block_m
+            n_values = max_tpe // block_m
+            if w13.size() not in seen_masked_sizes:
+                total += n_values
+                seen_masked_sizes.add(w13.size())
+            if w2.size() not in seen_masked_sizes:
+                total += n_values
+                seen_masked_sizes.add(w2.size())
+    return total
+
+
 @instrument(span_name="DeepGemm warmup")
 def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     total = _count_warmup_iterations(model, max_tokens)
@@ -1046,7 +1378,17 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
         _count_warmup_iterations_fp4(model, max_tokens)
         + _count_warmup_iterations_fp4_masked(model, max_tokens)
     )
-    if total == 0 and total_int8 == 0 and total_bf16 == 0 and total_fp4 == 0:
+    total_w4a16 = (
+        _count_warmup_iterations_w4a16(model, max_tokens)
+        + _count_warmup_iterations_w4a16_masked(model, max_tokens)
+    )
+    if (
+        total == 0
+        and total_int8 == 0
+        and total_bf16 == 0
+        and total_fp4 == 0
+        and total_w4a16 == 0
+    ):
         return
 
     start = time.time()
@@ -1063,11 +1405,14 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
                 deepgemm_int8_gemm_nt_warmup(model, max_tokens, pbar)
                 deepgemm_grouped_int8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             if total_bf16:
+                deepgemm_bf16_gemm_nt_warmup(model, max_tokens, pbar)
                 deepgemm_grouped_bf16_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             if total_fp4:
                 deepgemm_grouped_fp4_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
                 deepgemm_grouped_fp4_gemm_nt_masked_warmup(model, max_tokens, pbar)
-
+            if total_w4a16:
+                deepgemm_grouped_w4a16_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+                deepgemm_grouped_w4a16_gemm_nt_masked_warmup(model, max_tokens, pbar)
     else:
         if total:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
@@ -1076,10 +1421,14 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
             deepgemm_int8_gemm_nt_warmup(model, max_tokens, None)
             deepgemm_grouped_int8_gemm_nt_contiguous_warmup(model, max_tokens, None)
         if total_bf16:
+            deepgemm_bf16_gemm_nt_warmup(model, max_tokens, None)
             deepgemm_grouped_bf16_gemm_nt_contiguous_warmup(model, max_tokens, None)
         if total_fp4:
             deepgemm_grouped_fp4_gemm_nt_contiguous_warmup(model, max_tokens, None)
             deepgemm_grouped_fp4_gemm_nt_masked_warmup(model, max_tokens, None)
+        if total_w4a16:
+            deepgemm_grouped_w4a16_gemm_nt_contiguous_warmup(model, max_tokens, None)
+            deepgemm_grouped_w4a16_gemm_nt_masked_warmup(model, max_tokens, None)
     set_compile_mode(old_compile_mode)
     elapsed = time.time() - start
     logger.info(f"DeepGemm warmup elapsed time: {elapsed:.6f}s")  # noqa

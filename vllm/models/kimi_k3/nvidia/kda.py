@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
@@ -153,8 +154,10 @@ def is_fused_kda_decode_supported(
     ):
         return False
     # SM90 is architecture-specific; SM10x and SM12x use family binaries.
+    # PPU also supports fused_kda_decode.
     return (
-        current_platform.is_device_capability(90)
+        current_platform.is_ppu()
+        or current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(100)
         or current_platform.is_device_capability_family(120)
     )
@@ -169,8 +172,10 @@ def is_flashkda_supported(
         return False
     capability = current_platform.get_device_capability()
     return (
-        capability is not None
-        and capability.major in (9, 10, 12)
+        (
+            (current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA)
+            or (capability is not None and capability.major in (9, 10, 12))
+        )
         and head_dim == 128
         and dtype == torch.bfloat16
         and lower_bound is not None
@@ -192,6 +197,30 @@ def _flashkda_prefill(
     final_state: torch.Tensor,
     workspace: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA:
+        from pla.prefill.flashkdapro import flashkda_fwd
+
+        logger.info_once("Using PLA KDA kernel: flashkda_fwd")
+        out = torch.empty(v.shape, dtype=v.dtype, device=v.device)
+        final_state = torch.empty_like(initial_state)
+        B, T, H, D = q.shape
+        flashkda_fwd(
+            q=q.view(B * T, H, D),
+            k=k.view(B * T, H, D),
+            v=v.view(B * T, H, D),
+            g=g.view(B * T, H, D),
+            beta=beta.view(B * T, H),
+            A_log=A_log,
+            dt_bias=dt_bias,
+            out=out.view(B * T, H, D),
+            scale=q.shape[-1] ** -0.5,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            final_state=final_state,
+            cu_seqlens=cu_seqlens,
+        )
+        return out, final_state
+
     import vllm._flashkda_C  # noqa: F401
 
     # FlashKDA hardcodes dense Q/K/V/G strides. Beta may be row-strided because
@@ -580,6 +609,32 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and m.num_decodes > 0
         ):
             assert non_spec_state_indices_tensor is not None
+
+            if current_platform.is_ppu() and envs.VLLM_PPU_USE_PLA:
+                from pla.decode.kda import fused_kda_decode_mega_forward
+
+                logger.info_once(
+                    "Using PLA KDA kernel: fused_kda_decode_mega_forward"
+                )
+                fused_kda_decode_mega_forward(
+                    x=mixed_qkv,
+                    weight=self.decode_conv1d_weight,
+                    bias=self.conv1d.bias,
+                    conv_state=conv_state,
+                    raw_g=g1,
+                    raw_beta=beta,
+                    a_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                    state=recurrent_state,
+                    out=core_attn_out[:, :num_actual_tokens],
+                    lower_bound=self.gate_lower_bound,
+                    output_gate=g2[:num_actual_tokens],
+                    norm_weight=self.decode_norm_weight,
+                    norm_eps=self.o_norm.eps,
+                )
+                return
+
             ops.fused_kda_decode(
                 x=mixed_qkv,
                 weight=self.decode_conv1d_weight,

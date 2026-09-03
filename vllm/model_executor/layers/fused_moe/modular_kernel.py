@@ -606,6 +606,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif moe_config.has_bias and not cls._supports_bias():
+            return False, _make_reason("bias")
         return True, None
 
     @staticmethod
@@ -778,6 +780,13 @@ class FusedMoEExperts(ABC):
         to True and provides the per-forward LoRA state plumbing.
         """
         return False
+
+    @staticmethod
+    def _supports_bias() -> bool:
+        """
+        Whether the kernel supports bias.
+        """
+        return True
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """

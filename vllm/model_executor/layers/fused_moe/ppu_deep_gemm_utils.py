@@ -759,3 +759,34 @@ def deepgemm_unpermute_and_reduce(
         expert_map=expert_map,
         output_tensor=output,
     )
+
+
+def preprocess_mxfp4_w4a16_scales(scales_in):
+    scale_perm_fp4_mma = []
+    for i in range(8):
+        for j in range(8):
+            scale_perm_fp4_mma.extend([2 * i + j * 16, 2 * i + j * 16 + 1])
+
+    e, n, k = scales_in.shape
+    k = k * 32
+    assert (
+        n % 64 == 0 and k % 64 == 0
+    ), "w4fa16_mma requires n and k to be multiples of 64"
+    scales_out = torch.empty(
+        (e, n // 64, k * 2), dtype=torch.uint8, device=scales_in.device
+    )
+    for i in range(e):
+        scales = scales_in[i]
+        # [N,K/32] -> [N/64,64,K/64,2] -> [N/64,K/64,64,2] -> perm -> [N/64,K*2]
+        scales = (
+            scales.reshape(n // 64, 64, k // 64, 2)
+            .permute(0, 2, 1, 3)
+            .reshape(n // 64, k * 2)
+        )
+        scales = (
+            scales.reshape((-1, len(scale_perm_fp4_mma)))[:, scale_perm_fp4_mma]
+            .reshape(scales.shape)
+            .contiguous()
+        )
+        scales_out[i].copy_(scales)
+    return scales_out
