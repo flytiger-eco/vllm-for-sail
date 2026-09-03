@@ -35,8 +35,8 @@ PPU 整机仅一台 self-hosted runner，job 串行，因此 11 个 area 不能�
 
 | 档位 | Area | 触发方式 |
 | --- | --- | --- |
-| 快速档 | attention / model-executor / entrypoints / samplers | PR 路径过滤自动（约 14min） |
-| 标签档 | basic-correctness / entrypoints-llm / lora / models-basic / engine / kernels | PR 打 `ppu-full` 标签或 workflow_dispatch |
+| 快速档 | attention / model-executor / entrypoints / samplers | ci.yml 门禁链（precheck → smoke ∥ AI 评审）过后按 PR 路径过滤自动（约 14min），无人工审批 |
+| 标签档 | basic-correctness / entrypoints-llm / lora / models-basic / engine / kernels | PR 打 `ppu-full` 标签 → 完整门禁链（含 human-review 真人审批）→ ci.yml 以 workflow_call 调用；或 workflow_dispatch |
 | 定时档 | 标签档 6 个 + models-language | `nightly-ppu.yml`：工作日夜间跑短 area、周六跑长 area |
 
 各 area 的依赖路径清单均保留在 workflow 的 `check-changes` 里；标签档即使不跑也会在
@@ -97,7 +97,7 @@ PPU 整机仅一台 self-hosted runner，job 串行，因此 11 个 area 不能�
 
 ## Workflow 体验优化方向（参考其他仓库 CI 设计）
 
-1. **可复用 workflow（`workflow_call`）**：29 个 area 共用一套三段式模板（check-changes → ppu-test → ppu-\<area\>-finish），各 area 仅传参（area 名、shards、超时），参考 PyTorch `_linux-test.yml` 模式。**批次 2 的前置条件。**
+1. **可复用 workflow（`workflow_call`）**：29 个 area 共用一套三段式模板（check-changes → ppu-test → ppu-\<area\>-finish），各 area 仅传参（area 名、shards、超时），参考 PyTorch `_linux-test.yml` 模式。**批次 2 的前置条件。**（2026-09 进展：10 个 PR area 已加 `workflow_call` 入口，PR 触发收编到 `ci.yml` 在组织门禁链后统一调用；参数化单模板仍未做。）
 2. **统一门禁聚合 job**：目前每个 area 一个 `ppu-<area>-finish`（已从同名 `ppu-test-finish` 改为唯一名，否则分支保护无法区分）。后续可再汇聚为单个 `ppu-ci-success` required check，分支保护只配一条规则。
 3. **PR 路径过滤 + 手动全量**：`dorny/paths-filter` 按需触发（已具备）+ `workflow_dispatch` 已支持 `test_mode` / `pytest_args`；重量级 area 改为 `ppu-full` 标签触发（已具备）。
 4. **结果可读性**：junit XML 上传 artifact + `GITHUB_STEP_SUMMARY` Markdown 结果表 + 失败用例注解（已具备）。

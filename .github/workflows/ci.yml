@@ -1,0 +1,178 @@
+# flytiger-eco 组织统一 PR 门禁 + PPU per-PR CI 的统一编排入口。
+# 开发者使用说明见 scripts/ppu/docs/ppu-per-pr-ci-guide.md。
+#
+# 链（对齐组织门禁流水线）：
+#   precheck → (smoke-test ∥ ai-code-review) ──→ 快速档 PPU area ×4（无人工审批）
+#                                  └→ human-review → 标签档 PPU area ×6
+#                                     （仅 PR 带 ppu-full 标签时存在）
+#
+# - 三条组织门禁（precheck / ai-code-review / human-review）是
+#   flytiger-eco/.github 的 reusable workflow，逻辑集中维护、自带 permissions，
+#   本文件只做 uses + needs 编排。
+# - PPU area 测试经 workflow_call 调用本仓库 test-area-ppu-*.yml（这些文件已
+#   不接受 pull_request 直接触发）；路径/标签过滤仍在各自的 check-changes 里，
+#   被调时继承本文件的 PR 事件上下文，过滤逻辑不受影响。
+# - 不要加 pull_request_review 触发器：human-review 在同一个 run 内轮询捕获
+#   真人 approve；额外监听会让 approve 触发新 run，配合 cancel-in-progress
+#   取消旧 run 造成全量重跑。
+# - concurrency 按事件类型分组：打标签（labeled）派发的标签档 run 不会取消
+#   push 派发、正在跑的快速档 run（PPU 单 runner，两边各排各的 area）。
+name: CI Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && 'label' || 'push' }}
+  cancel-in-progress: true
+
+jobs:
+  # Stage 1: 密钥扫描预检（组织级 reusable workflow）
+  precheck:
+    name: Pre-check
+    uses: flytiger-eco/.github/.github/workflows/user-precheck.yml@main
+
+  # Stage 2: 冒烟测试 与 AI 评审 并行
+  smoke-test:
+    name: Smoke Test
+    needs: precheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # PPU CI 静态冒烟：shell/python 语法 + 排除项有效性。
+      # 不与现有 workflow 重复：pre-commit 全套检查由 pre-commit.yml 负责；
+      # check-exclusions 在 selfcheck 里有 paths 过滤，这里每个 PR 都跑。
+      - name: Static smoke checks
+        run: |
+          for f in scripts/ppu/*.sh; do bash -n "$f"; done
+          python3 -m py_compile scripts/ppu/check-exclusions.py
+          python3 scripts/ppu/check-exclusions.py
+
+  ai-code-review:
+    name: AI Code Review (Copilot Gate)
+    needs: precheck
+    uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
+    secrets: inherit
+
+  # ---- Stage 3a: 快速档（4 个 area，无人工审批）----
+  # labeled 事件不重复拉起快速档（打标签只派发标签档）；
+  # base 白名单对位原各 workflow 的 on.pull_request.branches。
+  ppu-attention:
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      github.event.action != 'labeled' &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    uses: ./.github/workflows/test-area-ppu-attention.yml
+    secrets: inherit
+
+  ppu-model-executor:
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      github.event.action != 'labeled' &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    uses: ./.github/workflows/test-area-ppu-model-executor.yml
+    secrets: inherit
+
+  ppu-entrypoints:
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      github.event.action != 'labeled' &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    uses: ./.github/workflows/test-area-ppu-entrypoints.yml
+    secrets: inherit
+
+  ppu-samplers:
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      github.event.action != 'labeled' &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    uses: ./.github/workflows/test-area-ppu-samplers.yml
+    secrets: inherit
+
+  # ---- Stage 3b: 人工审批门禁（仅 PR 带 ppu-full 标签时存在）----
+  human-review:
+    name: Human Review Gate
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'ppu-full') &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
+    secrets: inherit
+
+  # ---- Stage 4: 标签档（6 个 area）----
+  # human-review 被跳过（无 ppu-full 标签）时随 needs 级联自动跳过。
+  ppu-basic-correctness:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-basic-correctness.yml
+    secrets: inherit
+
+  ppu-entrypoints-llm:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-entrypoints-llm.yml
+    secrets: inherit
+
+  ppu-lora:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-lora.yml
+    secrets: inherit
+
+  ppu-models-basic:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-models-basic.yml
+    secrets: inherit
+
+  ppu-engine:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-engine.yml
+    secrets: inherit
+
+  ppu-kernels:
+    needs: human-review
+    uses: ./.github/workflows/test-area-ppu-kernels.yml
+    secrets: inherit
+
+  # ---- Stage 5: 聚合点（skipped 视为通过；供分支保护配单条 required check）----
+  ci:
+    name: Full CI
+    needs:
+      - precheck
+      - smoke-test
+      - ai-code-review
+      - human-review
+      - ppu-attention
+      - ppu-model-executor
+      - ppu-entrypoints
+      - ppu-samplers
+      - ppu-basic-correctness
+      - ppu-entrypoints-llm
+      - ppu-lora
+      - ppu-models-basic
+      - ppu-engine
+      - ppu-kernels
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              print('Failed jobs: ' + ','.join(failed))
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
