@@ -51,6 +51,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    _make_deepseek_v4_weights_mapper,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
 )
@@ -299,6 +300,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+    # load_dspark_model re-derives the draft quant config (get_draft_quant_config),
+    # so the fused-layer mapping and weight-name mapper must live on the model
+    # class for configure_quant_config to inject them; otherwise fused layers
+    # (gate_up_proj / fused_wqa_wkv) silently miss fp8_channelwise_layers and
+    # fall back to per-tensor FP8, which asserts on channelwise scales.
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
+    hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
