@@ -1,7 +1,8 @@
 # PPU CI 使用说明
 
-面向在 `v0.23.0` 上提 PR 的开发同学。一句话概括：**PR 上默认只跑 4 个轻量
-area（约 14 分钟），重的测试需要自己打标签或等夜间定时跑。**
+面向在 `v0.23.0` 上提 PR 的开发同学。一句话概括：**PR 上先过组织门禁链
+（密钥扫描 → 冒烟 ∥ Copilot 评审），随后默认只跑 4 个轻量
+area（约 14 分钟），重的测试需要自己打标签、等真人 approve，或等夜间定时跑。**
 
 ---
 
@@ -9,9 +10,10 @@ area（约 14 分钟），重的测试需要自己打标签或等夜间定时跑
 
 PPU 整机只有**一台** self-hosted runner，所有 job 串行排队，所以测试分三档。
 
-### 快速档 —— PR 自动触发
+### 快速档 —— PR 门禁过后自动触发（无人工审批）
 
-命中对应路径就自动跑，无需任何操作。
+组织门禁链（precheck 密钥扫描 → smoke ∥ AI 评审）通过后，命中对应路径就
+自动跑，无需任何操作。门禁链跑在 GitHub 托管 runner 上，不占 PPU 机器。
 
 | Area | 触发路径（除 CI 自身文件） | 首跑实测 |
 | --- | --- | --- |
@@ -24,7 +26,8 @@ PPU 整机只有**一台** self-hosted runner，所有 job 串行排队，所以
 
 ### 标签档 —— PR 上打 `ppu-full` 才跑
 
-在 PR 上加 `ppu-full` 标签，以下 6 个 area 会依次排队执行；标签是打上去就触发
+在 PR 上加 `ppu-full` 标签，门禁链会多出一道 Human Review Gate：至少 1 名
+真人 approve 后，以下 6 个 area 才依次排队执行。标签是打上去就触发
 （`labeled` 事件），不需要再 push 空提交。
 
 | Area | 首跑实测 |
@@ -68,7 +71,8 @@ PR 都堵住。改动触及 kernel、engine、模型加载这类底层逻辑时�
    不用翻日志就能看到是哪个 case 挂了。
 3. **Artifact**：job 页面下载 `ppu-<area>-test-results`，含 `test.xml`（合并后的
    junit）、`summary.md` 与各分片的 pytest 输出日志，保留 14 天。
-4. **门禁状态**：每个 area 有独立的聚合 check（`ppu-<area>-finish`）。试用期这些
+4. **门禁状态**：每个 area 的聚合 check（`ppu-<area>-finish`）显示在
+   `CI Pipeline` run 的嵌套 job 里，整条链另有 `Full CI` 聚合 check。试用期这些
    check **不阻塞合并**，先积累信噪比数据；两周后把快速档的 4 个转为 required。
 
 ---
@@ -119,6 +123,7 @@ PR 都堵住。改动触及 kernel、engine、模型加载这类底层逻辑时�
   `scripts/ppu/check-exclusions.py` 校验。失效的 `--ignore` 会被 pytest 静默吞掉，
   导致「以为排除了、其实在跑」或「以为在跑、其实没跑」。
 - 新增 area 前先做 `workflow_call` 模板化：当前 11 份 workflow / 脚本是同构拷贝，
-  再扩张会失控。详见 [`area-migration.md`](area-migration.md)。
+  PR 入口已收编到 `ci.yml`（新增 area 要同步在 ci.yml 里加调用 job），再扩张
+  会失控。详见 [`area-migration.md`](area-migration.md)。
 - fork 仓库发起的 PR 不会进 PPU runner（特权容器 + 设备直通 + 凭证），需要跑
   PPU 测试的话请在本仓库开分支。

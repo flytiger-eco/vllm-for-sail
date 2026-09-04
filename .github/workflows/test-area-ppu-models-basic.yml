@@ -11,10 +11,20 @@ on:
   # 重量级 area（PPU 整机仅一个 runner，job 串行；本档最长实测 2h14min）：
   # PR 上由 ppu-full 标签显式拉起，夜间/周末由 nightly-ppu.yml 兜底。
   # 依赖路径清单保留在下方 check-changes 的 dorny 过滤器中。
-  pull_request:
-    # feat/gha-ppu-test：开发期验证用，合入 v0.23.0 后移除
-    branches: [v0.23.0, feat/gha-ppu-test]
-    types: [opened, synchronize, reopened, labeled]
+  # PR 入口收编到 ci.yml：带 ppu-full 标签的 PR 走完完整门禁链
+  # （precheck → smoke-test ∥ ai-code-review → human-review）后以
+  # workflow_call 调用本 workflow；标签/base 判定在 ci.yml 侧，下方
+  # check-changes 的标签闸门仍生效（双保险）。
+  workflow_call:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       test_mode:

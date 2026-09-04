@@ -17,9 +17,19 @@ on:
       - "scripts/ppu/test-area-ppu-model-executor.sh"
       - "tests/model_executor/**"
       - "vllm/model_executor/**"
-  pull_request:
-    # feat/gha-ppu-test：开发期验证用，合入 v0.23.0 后移除
-    branches: [v0.23.0, feat/gha-ppu-test]
+  # PR 入口收编到 ci.yml：组织门禁链（precheck → smoke-test ∥ ai-code-review，
+  # 快速档无人工审批）通过后以 workflow_call 调用本 workflow；base 分支白名单
+  # 在 ci.yml 侧。push 触发保留，用于分支验证。
+  workflow_call:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       test_mode:
