@@ -100,6 +100,8 @@ jobs:
     name: Human Review Gate
     needs: [smoke-test, ai-code-review]
     if: >-
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'ppu-full') &&
       contains(github.event.pull_request.labels.*.name, 'ppu-full') &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
