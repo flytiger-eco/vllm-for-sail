@@ -99,6 +99,8 @@ jobs:
   human-review:
     name: Human Review Gate
     needs: [smoke-test, ai-code-review]
+    # labeled 事件只认 ppu-full 本身：PR 已带 ppu-full 时，打无关标签
+    # 不该重开 6 个重量级 area；synchronize/open 等行为不变。
     if: >-
       (github.event.action != 'labeled' ||
        github.event.label.name == 'ppu-full') &&

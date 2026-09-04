@@ -140,6 +140,3 @@ def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:
         return {"graph_partition": False}
     else:
         return {}
-
-
-# ppu ci smoke: fast-tier path-filter trigger (do not merge)

@@ -1042,6 +1042,3 @@ def subclass_attention_backend_with_overrides(
 ) -> type[AttentionBackend]:
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
     return type(name, (attention_backend_cls,), overrides)
-
-
-# ppu ci smoke: fast-tier path-filter trigger (do not merge)
