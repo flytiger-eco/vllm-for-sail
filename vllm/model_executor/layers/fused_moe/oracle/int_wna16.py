@@ -133,6 +133,9 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
             WNA16MoEBackend.BATCHED_PPU_DEEPGEMM,
             WNA16MoEBackend.MARLIN,
             WNA16MoEBackend.BATCHED_MARLIN,
+            WNA16MoEBackend.TRITON,
+            WNA16MoEBackend.HUMMING,
+            WNA16MoEBackend.EMULATION,
         ]
 
     return [
