@@ -30,12 +30,6 @@ PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
 DIST_DIR="dist"
 mkdir -p "${DIST_DIR}"
 
-# 并发参数默认值集中在这里兜底；workflow 侧可通过 env 覆盖。
-# PR #6 的 docker -e 透传行被注释掉了，workflow 里设的 MAX_JOBS/NVCC_THREADS
-# 实际进不了容器，本脚本修正为完整四层传递（workflow env → 脚本 → -e → setup.py）。
-MAX_JOBS="${MAX_JOBS:-64}"
-NVCC_THREADS="${NVCC_THREADS:-8}"
-
 echo "----------------------------------------"
 echo "Build configuration"
 echo "TARGET_VERSION: ${TARGET_VERSION}"
@@ -44,8 +38,6 @@ echo "CUDA_VERSION:   ${CUDA_VERSION}"
 echo "ARCH:           ${ARCH}"
 echo "BASE_IMG:       ${BASE_IMG}"
 echo "PYTHON_TAG:     ${PY_TAG}"
-echo "MAX_JOBS:       ${MAX_JOBS}"
-echo "NVCC_THREADS:   ${NVCC_THREADS}"
 echo "Output:         ${DIST_DIR}/"
 echo "----------------------------------------"
 
@@ -54,6 +46,10 @@ echo "----------------------------------------"
 # 实测 printf '%s\n%s' 传到容器里变成 printf %sn%s，版本比较恒走 else 分支。
 # 引号化 heredoc 不做任何宿主端展开，变量全靠下面的 -e 传入。
 # -i 是必需的：heredoc 走 stdin 喂进容器。
+# 与 PR #6 成功版本一致，先不把 workflow 的并发变量传入云端容器；setup.py
+# 因此按容器 cpu_count 决定并发。
+#   -e MAX_JOBS="${MAX_JOBS:-}" \
+#   -e NVCC_THREADS="${NVCC_THREADS:-}" \
 docker run --rm -i \
   --network=host \
   -v "$(pwd):/workspace" \
@@ -63,19 +59,19 @@ docker run --rm -i \
   -e PYTHON_VERSION="${PYTHON_VERSION}" \
   -e CUDA_VERSION="${CUDA_VERSION}" \
   -e VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}" \
-  -e MAX_JOBS="${MAX_JOBS}" \
-  -e NVCC_THREADS="${NVCC_THREADS}" \
   "${BASE_IMG}" \
   bash -s <<'INNER'
 set -ex
 
 apt update
 apt install -y protobuf-compiler
-
-# 不装 rustup：PR #6 里 rustup 安装与结尾的 VLLM_REQUIRE_RUST_FRONTEND=0 并存，
-# 前者是纯开销（PR 作者已在风险清单中标注待删）。本脚本确定不强制 Rust frontend，
-# 只保留 =0 这一处设置。
-export VLLM_REQUIRE_RUST_FRONTEND=0
+# 与 PR #6 成功版本一致，先保留 Rust 环境准备；是否删除作为后续独立优化验证。
+if [ ! -d "$HOME/.cargo" ]; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+fi
+source "$HOME/.cargo/env"
+rustc --version
+export VLLM_REQUIRE_RUST_FRONTEND=1
 
 if [ "$(printf '%s\n%s' "$TARGET_VERSION" "0.20.1" | sort -V | head -n1)" = "0.20.1" ]; then
     echo "Target version ($TARGET_VERSION) is >= 0.20.1. Install ppu requirements..."
@@ -124,6 +120,7 @@ python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/tor
 
 export HGGC_ENABLE_COMPRESS=1
 export NVCC_APPEND_FLAGS="-Xfatbin -compress-all"
+export VLLM_REQUIRE_RUST_FRONTEND=0
 # 只编 SM80 kernel（沿用 PR #6 的收窄）；PPU 目标硬件之外的消费者会失败，
 # 如需扩展硬件支持再放开。
 export TORCH_CUDA_ARCH_LIST="8.0"
