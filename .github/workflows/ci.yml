@@ -2,7 +2,7 @@
 # 开发者使用说明见 scripts/ppu/docs/ppu-per-pr-ci-guide.md。
 #
 # 链（对齐组织门禁流水线）：
-#   precheck → (smoke-test ∥ ai-code-review) ──→ 快速档 PPU area ×4（无人工审批）
+#   pr → precheck → (smoke-test ∥ ai-code-review) ──→ 快速档 PPU area ×4（无人工审批）
 #                                  └→ human-review → 标签档 PPU area ×6
 #                                     （仅 PR 带 ppu-full 标签时存在）
 #
@@ -12,11 +12,8 @@
 # - PPU area 测试经 workflow_call 调用本仓库 test-area-ppu-*.yml（这些文件已
 #   不接受 pull_request 直接触发）；路径/标签过滤仍在各自的 check-changes 里，
 #   被调时继承本文件的 PR 事件上下文，过滤逻辑不受影响。
-# - 不要加 pull_request_review 触发器：human-review 在同一个 run 内轮询捕获
-#   真人 approve；额外监听会让 approve 触发新 run，配合 cancel-in-progress
-#   取消旧 run 造成全量重跑。
-# - concurrency 按事件类型分组：打标签（labeled）派发的标签档 run 不会取消
-#   push 派发、正在跑的快速档 run（PPU 单 runner，两边各排各的 area）。
+# - concurrency 按事件类型分组：标签档 run 不会取消快速档 run。
+
 name: CI Pipeline
 
 on:
