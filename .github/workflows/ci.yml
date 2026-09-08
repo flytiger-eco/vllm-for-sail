@@ -2,9 +2,10 @@
 # 开发者使用说明见 scripts/ppu/docs/ppu-per-pr-ci-guide.md。
 #
 # 链（对齐组织门禁流水线）：
-#   pr → precheck → (smoke-test ∥ ai-code-review) ──→ 快速档 PPU area ×4（无人工审批）
-#                                  └→ human-review → 标签档 PPU area ×6
-#                                     （仅 PR 带 ppu-full 标签时存在）
+#   pr → precheck → (smoke-test ∥ ai-code-review ∥ build-wheel) 
+#                                   ├→ 快速档 PPU area ×4
+#                                   └→ human-review → 标签档 PPU area ×6
+#                                   （标签档仅 PR 带 ppu-full 标签时存在）
 #
 # - 三条组织门禁（precheck / ai-code-review / human-review）是
 #   flytiger-eco/.github 的 reusable workflow，逻辑集中维护、自带 permissions，
@@ -57,39 +58,54 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
+  # Stage 2b: PPU wheel 构建
+  # 经 workflow_call 复用 build-ppu-wheel.yml：产出 wheel artifact 供 10 个 area共用
+  build-wheel:
+    name: Build PPU Wheel
+    needs: precheck
+    uses: ./.github/workflows/build-ppu-wheel.yml
+
   # ---- Stage 3a: 快速档（4 个 area，无人工审批）----
   # labeled 事件不重复拉起快速档（打标签只派发标签档）；
   # base 白名单对位原各 workflow 的 on.pull_request.branches。
   ppu-attention:
-    needs: [smoke-test, ai-code-review]
+    needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
       github.event.action != 'labeled' &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-attention.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-model-executor:
-    needs: [smoke-test, ai-code-review]
+    needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
       github.event.action != 'labeled' &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-model-executor.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-entrypoints:
-    needs: [smoke-test, ai-code-review]
+    needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
       github.event.action != 'labeled' &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-entrypoints.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-samplers:
-    needs: [smoke-test, ai-code-review]
+    needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
       github.event.action != 'labeled' &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-samplers.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   # ---- Stage 3b: 人工审批门禁（仅 PR 带 ppu-full 标签时存在）----
@@ -109,33 +125,45 @@ jobs:
   # ---- Stage 4: 标签档（6 个 area）----
   # human-review 被跳过（无 ppu-full 标签）时随 needs 级联自动跳过。
   ppu-basic-correctness:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-basic-correctness.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-entrypoints-llm:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-entrypoints-llm.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-lora:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-lora.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-models-basic:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-models-basic.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-engine:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-engine.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-kernels:
-    needs: human-review
+    needs: [human-review, build-wheel]
     uses: ./.github/workflows/test-area-ppu-kernels.yml
+    with:
+      wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   # ---- Stage 5: 聚合点（skipped 视为通过；供分支保护配单条 required check）----
@@ -145,6 +173,7 @@ jobs:
       - precheck
       - smoke-test
       - ai-code-review
+      - build-wheel
       - human-review
       - ppu-attention
       - ppu-model-executor

@@ -1,24 +1,23 @@
 # 编译 PPU wheel 的开发期入口（feat/gha-ppu-test 分支携带版）。
 #
-# 移植自 PR #6（release-pypi-ppu-nightly.yml + scripts/build_ppu.sh），
-# 与 PR #6 的定位差异：
-#   PR #6（拟合入 main）：v0.23.0 / v0.20.1 两个维护分支的每日 nightly 构建
-#     + 自动发布 GitHub Release，构建脚本单点维护在默认分支（双 checkout）。
-#   本文件：本分支的开发验证构建，push（合入 main 前唯一触发入口）
-#     构建成功即发布 prerelease。脚本随分支携带（scripts/ppu/build-ppu-wheel.sh）。
+# 本文件：CI 构建入口，由 ci.yml（PR 门禁）经 workflow_call 复用，只产出
+#     wheel artifact 供 10 个 area 消费。脚本随分支携带（scripts/ppu/build-ppu-wheel.sh）。
 #     全部设计决策与差异见 scripts/ppu/docs/ppu-wheel-build.md。
 name: Build PPU Wheel
 
 on:
-  # push 是本文件合入 main 前唯一的真实触发入口。
-  # workflow_dispatch、schedule 只在默认分支生效，暂时不会触发
-  push:
-    branches: [feat/gha-ppu-test]
-    paths:
-      - ".github/workflows/build-ppu-wheel.yml"
-      - "scripts/ppu/build-ppu-wheel.sh"
-  # 未合入main，暂时触发不了
+  # PR 经 ci.yml → workflow_call 触发是唯一入口，构建产物只喂给本次 CI。
+  # workflow_dispatch 只在默认分支生效，暂时不会触发。
   workflow_dispatch:
+  # 被 ci.yml经 workflow_call 复用：跑构建，产出 artifact 供 10 个area 消费
+  workflow_call:
+    outputs:
+      artifact_name:
+        description: "上传的 wheel artifact 名（供调用方 download-artifact）"
+        value: ${{ jobs.build-wheel.outputs.artifact_name }}
+      wheel_version:
+        description: "构建的 wheel 版本号"
+        value: ${{ jobs.build-wheel.outputs.wheel_version }}
 
 # 排队不取消。
 concurrency:
@@ -38,19 +37,12 @@ jobs:
       matrix:
         python-version: ["3.12"]
         cuda-version: ["13.0"]
-        # build-ppu-wheel.sh 目前对 aarch64 直接 exit 1（无 aarch64 base image 与 SDK
-        # 包）。要加 aarch64 需同时补 runner 标签、base image 和 SDK tarball。
-        # 加值前另注意：matrix 多实例时 job outputs 会被最后完成的实例覆盖
         # （PR #6 同款限制），届时需按 PR #6 模式拆独立 job。
         arch: [x86_64]
     outputs:
       wheel_version: ${{ steps.version.outputs.wheel_version }}
-      commit_hash: ${{ steps.version.outputs.commit_hash }}
-      commit_sha: ${{ steps.version.outputs.commit_sha }}
-      build_date: ${{ steps.version.outputs.build_date }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
     steps:
-      # 与 PR #6 保持一致。ubuntu-latest 是临时 VM，通常没有残留；保留该步骤
-      # 是为了先复用已真实成功的路径，后续再单独验证是否可删。
       - name: Clean workspace (remove root-owned files from prior runs)
         run: |
           docker run --rm -v "${{ github.workspace }}:/workspace" alpine:3 \
@@ -68,16 +60,12 @@ jobs:
           TARGET_VERSION: "0.23.0"
         run: |
           BUILD_DATE_COMPACT=$(date -u +%Y%m%d)
-          BUILD_DATE_ISO=$(date -u +%Y-%m-%d)
-          COMMIT_SHA=$(git rev-parse HEAD)
           HASH=$(git rev-parse --short HEAD)
           WHEEL_VERSION="${TARGET_VERSION}.dev${BUILD_DATE_COMPACT}+g${HASH}"
           echo "Wheel version: ${WHEEL_VERSION}"
           {
             echo "wheel_version=${WHEEL_VERSION}"
-            echo "commit_hash=${HASH}"
-            echo "commit_sha=${COMMIT_SHA}"
-            echo "build_date=${BUILD_DATE_ISO}"
+            echo "artifact_name=wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_23_0"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build wheel
@@ -85,8 +73,7 @@ jobs:
           # 版本号经 workflow → 脚本 → docker -e → setup.py 四层传递，
           # 任一环节断掉会静默产出 setuptools_scm 推导版本，故下一步硬校验。
           VLLM_VERSION_OVERRIDE: ${{ steps.version.outputs.wheel_version }}
-          # 与 PR #6 保持一致；build_ppu.sh 中对应 docker -e 行被注释，当前不会
-          # 传入容器，实际并发仍由容器 cpu_count 决定。
+          # 与 PR #6 保持一致；
           MAX_JOBS: 64
           NVCC_THREADS: 8
         run: |
@@ -124,39 +111,3 @@ jobs:
           name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_23_0
           path: dist/*.whl
           if-no-files-found: error
-
-  # 构建成功即发布。拆独立 job：只转发 artifact，不 checkout、不跑构建，
-  # contents: write 令牌因此不会暴露给在容器里以 root 执行编译的那个 job。
-  release-wheel:
-    permissions:
-      contents: write
-    needs: build-wheel
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download wheel
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-          merge-multiple: true
-          pattern: wheel-*-v0_23_0
-
-      - name: List downloaded wheels
-        run: ls -lh dist/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          # tag 含分支标识与日期+sha，与 PR #6 的 nightly-* tag 命名隔离。
-          tag_name: dev-gha-ppu-test-${{ needs.build-wheel.outputs.build_date }}-${{ needs.build-wheel.outputs.commit_hash }}
-          # 指向实际被编译的 commit（本设计里即触发 commit
-          target_commitish: ${{ needs.build-wheel.outputs.commit_sha }}
-          name: Dev build feat/gha-ppu-test ${{ needs.build-wheel.outputs.build_date }} (${{ needs.build-wheel.outputs.commit_hash }})
-          prerelease: true
-          # glob 未命中时直接失败，不发布空 Release。
-          fail_on_unmatched_files: true
-          body: |
-            Dev wheel build from branch feat/gha-ppu-test, commit ${{ needs.build-wheel.outputs.commit_hash }}
-            Build date: ${{ needs.build-wheel.outputs.build_date }}
-            Version: ${{ needs.build-wheel.outputs.wheel_version }}
-          files: |
-            dist/*.whl

@@ -36,6 +36,20 @@ fi
 git config --global --add safe.directory "${REPO_ROOT}"
 
 # ------------------------------------------------------------------------------
+# [wheel] 安装构建的wheel
+# ------------------------------------------------------------------------------
+# dispatch/push → 跳过，沿用镜像预装 vllm（现状行为）。
+if [[ -n "${PPU_WHEEL_PATH:-}" ]]; then
+    if [[ ! -f "${PPU_WHEEL_PATH}" ]]; then
+        echo "[wheel] ERROR: PPU_WHEEL_PATH set but not found: ${PPU_WHEEL_PATH}" >&2
+        exit 1
+    fi
+    echo "========== [wheel] install CI-built wheel =========="
+    echo "[wheel] ${PPU_WHEEL_PATH}"
+    ${PIP_INSTALL} --force-reinstall --no-deps "${PPU_WHEEL_PATH}"
+fi
+
+# ------------------------------------------------------------------------------
 # [diag] 环境盘点：先看清镜像里已有什么，再决定装什么
 # ------------------------------------------------------------------------------
 echo "========== [diag] preinstalled stack =========="

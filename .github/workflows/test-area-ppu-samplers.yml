@@ -32,6 +32,10 @@ on:
         description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
         type: string
         default: ""
+      wheel_artifact:
+        description: "CI 构建的 wheel artifact 名（ci.yml 传入）；空则用镜像预装 vllm"
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       test_mode:
@@ -115,6 +119,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ci.yml 传入 wheel_artifact 时，下载 build-wheel job 的产物到 ci-wheel/，
+      # 由 ppu_install_dependency.sh 装它而非借镜像 .so；空则跳过（沿用现状）。
+      - name: Fetch CI-built wheel
+        if: inputs.wheel_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+      - name: Resolve wheel path
+        if: inputs.wheel_artifact != ''
+        run: |
+          whl="$(ls ci-wheel/*.whl | head -n1)"
+          echo "PPU_WHEEL_PATH=/workspace/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
+
       - name: Run PPU samplers tests
         timeout-minutes: 40
         env:
@@ -142,6 +160,7 @@ jobs:
             -e TEST_MODE \
             -e PYTEST_EXTRA_ARGS \
             -e PPU_DEVICE_LABEL=OAM-810E \
+            -e PPU_WHEEL_PATH \
             ${{ env.PPU_BASE_IMAGE }} \
             bash -c "
               cd /workspace && \
