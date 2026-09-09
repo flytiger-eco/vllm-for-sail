@@ -22,9 +22,38 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-PIP_INSTALL="python3 -m pip install --no-cache-dir"
+# --retries/--timeout：pip 默认只重试 5 次且无连接超时上限，显式收紧后
+# 单次调用不会在网络挂起时耗满 job timeout。
+PIP_INSTALL="python3 -m pip install --no-cache-dir --retries 5 --timeout 30"
 # SAIL SDK v2.1.1 PyPI source
 PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
+
+# 从私有 index 装包统一走这里。
+# 为什么在 pip --retries 之外再包一层：pip 的重试只覆盖连接层错误，索引
+# 返回空版本列表（"ERROR: ... (from versions: none)"）属应用层结果，pip
+# 视为确定性失败、不重试，而这恰好是并发拉包时的表现。
+# 实测依据（2026-09-09）：4 个 area 并发起 Pod 时全部卡在 pytest 工具链
+# 安装，报 pytest-asyncio from versions: none；而同一行代码在 3.5h 前单
+# area 跑成功，且 index 页面直连正常（HTTP 200、版本列表含所需版本、匿名
+# 可读）。既然包与权限都没问题，按可恢复的瞬时故障处理。
+# 退避带随机抖动：并发 Pod 若同步重试会再次撞在一起。
+_pip_retry() {
+    local max=4 n=1 wait_s
+    while true; do
+        # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）
+        if ${PIP_INSTALL} $@ -i "${PPU_PIP_INDEX}"; then
+            return 0
+        fi
+        if [[ ${n} -ge ${max} ]]; then
+            echo "[deps] ERROR: pip install failed after ${max} attempts: $*" >&2
+            return 1
+        fi
+        wait_s=$(( n * 15 + RANDOM % 20 ))
+        echo "[deps] pip install failed (attempt ${n}/${max}), retry in ${wait_s}s: $*" >&2
+        sleep "${wait_s}"
+        n=$(( n + 1 ))
+    done
+}
 
 # flytiger artifactory 凭证（GitHub Secrets 注入；镜像公开时可无）
 if [[ -n "${PPU_ARTIFACTORY_USER:-}" && -n "${PPU_ARTIFACTORY_PASSWORD:-}" ]]; then
@@ -72,7 +101,7 @@ _ensure_pip_pkg() {
     fi
     echo "[deps] installing ${pkg}==${ver}"
     # shellcheck disable=SC2086  # extra_args is intentionally word-split
-    ${PIP_INSTALL} "${pkg}==${ver}" ${extra_args} -i "${PPU_PIP_INDEX}"
+    _pip_retry "${pkg}==${ver}" ${extra_args}
 }
 
 # vllm 本体：不带 --no-deps（需解析依赖树）；其余 PPU 组件按指南 --no-deps
@@ -93,7 +122,7 @@ _ensure_pip_pkg "flash_attn" "2.7.4.post1" "--no-deps --force-reinstall"
 # pytest-shard: single 模式 --shard-id/--num-shards 需要
 # pyyaml: 备用通用依赖（用例选集已内联在 test-area-ppu-lora.sh，不解析 yaml）
 echo "========== [deps] pytest toolchain =========="
-${PIP_INSTALL} pytest pytest-asyncio tblib pytest-shard pyyaml -i "${PPU_PIP_INDEX}"
+_pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 
 # ------------------------------------------------------------------------------
 # [cext] 源码树补齐编译产物：镜像预装 vllm 的 C 扩展 → REPO_ROOT/vllm
