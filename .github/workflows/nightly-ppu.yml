@@ -18,18 +18,19 @@
 #   cron 为 UTC：18:00 UTC = 次日 02:00 北京时间，故 `0-4` = 周一~周五，
 #   `5` = 周六。schedule 仅在仓库默认分支生效，其他分支用 workflow_dispatch。
 #
-# 串行防抢卡：workflow 级 concurrency（排队不取消）+ matrix max-parallel: 1。
-#   改 K8s 调度后依旧必须串行，两个各自独立的理由：
-#   1) 抢卡：privileged Pod 能看到整机 16 张卡（实测 torch device_count=16），
-#      nproc_per_node 仅作调度侧资源申请、不做可见性隔离；而各 area 脚本
-#      硬编码 CUDA_VISIBLE_DEVICES=0，并发跑会全部挤到 0 号卡上互相干扰。
-#   2) 源码暂存目录冲突：ppu-distributed-action 的 NAS 暂存路径是
-#      /wl_nas/devops/${RUN_ID}-${ATTEMPT}/${GITHUB_JOB}/{stage,source.tar.gz}，
-#      只含 job key，matrix 各 leg 共享同一个值。并行时多个 leg 会往同一目录
-#      cp -a + tar czf + rm -rf，tar 读到被并发改写的文件即报
-#      "file changed as we read it" 并 exit 1（打包步骤跑在 bash -e 下）。
-#      实测于 run 34325180549（设备探针 workflow 的两个 matrix leg）。
-#      即使 1) 将来通过设备隔离解决，这一条仍然成立。
+# 串行：workflow 级 concurrency（排队不取消）+ matrix max-parallel: 1。
+#   抢卡已不是理由：worker Pod 去掉 privileged 后，PPU device plugin 只向
+#   容器注入分配到的 nproc_per_node 张卡并重编号为 0..N-1（实测见
+#   各 test-area-ppu-*.yml 的 container_options 注释），卡是真隔离的；
+#   且 K8s extended resource（alibabacloud.com/ppu）记账不超卖，超出节点
+#   容量的 Pod 会 Pending 排队。
+#   真正的理由是源码暂存目录冲突：ppu-distributed-action 的 NAS 暂存路径是
+#   /wl_nas/devops/${RUN_ID}-${ATTEMPT}/${GITHUB_JOB}/{stage,source.tar.gz}，
+#   只含 job key，matrix 各 leg 共享同一个值。并行时多个 leg 会往同一目录
+#   cp -a + tar czf + rm -rf，tar 读到被并发改写的文件即报
+#   "file changed as we read it" 并 exit 1（打包步骤跑在 bash -e 下）。
+#   实测于 run 34325180549（设备探针 workflow 的两个 matrix leg）。
+#   各 test-area-ppu-*.yml 是独立 workflow、独立 job key，不受此限，可并行。
 name: Nightly PPU test
 
 on:
@@ -100,7 +101,7 @@ jobs:
       image: ghcr.io/actions/actions-runner:latest
     strategy:
       fail-fast: false # 单 area 失败不影响其余 area 排队执行
-      max-parallel: 1 # 必须串行，理由见文件头「串行防抢卡」段
+      max-parallel: 1 # 必须串行（NAS 暂存目录冲突），理由见文件头「串行」段
       matrix:
         include: ${{ fromJson(needs.select-areas.outputs.matrix) }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -148,10 +149,16 @@ jobs:
           namespace: ppu-sched
           timeout_minutes: ${{ matrix.run_timeout }}
           cleanup_policy: always
-          # 对位自托管版 docker --privileged --ipc=host --shm-size=8g
-          #（--ulimit memlock=-1 无 K8s 等价物，privileged 下进程可自行提升）
+          # 刻意不开 privileged：特权容器会拿到宿主机全量 /dev，绕过 PPU device
+          # plugin 的设备注入。对照实测（run 34325790779，同节点同样申请 2 卡）：
+          # privileged 下 /dev 有 16 个 alixpu_ppu*、ppu-smi 列 16 张、
+          # torch device_count=16；unprivileged 下只注入分配到的 2 个设备节点
+          # 且重编号为 0..N-1（物理 0/3 → 容器内 0/1）、device_count=2。后者正合
+          # 各 area 脚本 CUDA_VISIBLE_DEVICES=0..N-1 的相对语义，且是 area 之间
+          # 能并行的前提。host_ipc/shm_size 对位 docker --ipc=host --shm-size=8g；
+          # docker 版的 --ulimit memlock=-1 无 K8s 等价物、unprivileged 下亦无法
+          # 自行提升，如遇 pinned memory 类失败需集群侧放宽 LimitMEMLOCK。
           container_options: |
-            privileged: true
             host_ipc: true
             shm_size: "8Gi"
           # extra_env 以逗号分隔 KEY=VAL，值内勿含逗号

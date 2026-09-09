@@ -11,7 +11,7 @@
 name: LoRA Test (PPU)
 
 on:
-  # 重量级 area（PPU 整机仅一个 runner，job 串行；本档最长实测 2h14min）：
+  # 重量级 area（耗时长，占 PPU 卡时间久；本档最长实测 2h14min）：
   # PR 上由 ppu-full 标签显式拉起，夜间/周末由 nightly-ppu.yml 兜底。
   # 依赖路径清单保留在下方 check-changes 的 dorny 过滤器中。
   # PR 入口收编到 ci.yml：带 ppu-full 标签的 PR 走完完整门禁链
@@ -188,10 +188,16 @@ jobs:
           # 对齐自托管版 in-pod 上限
           timeout_minutes: 90
           cleanup_policy: always
-          # 对位自托管版 docker --privileged --ipc=host --shm-size=8g
-          #（--ulimit memlock=-1 无 K8s 等价物，privileged 下进程可自行提升）
+          # 刻意不开 privileged：特权容器会拿到宿主机全量 /dev，绕过 PPU device
+          # plugin 的设备注入。对照实测（run 34325790779，同节点同样申请 2 卡）：
+          # privileged 下 /dev 有 16 个 alixpu_ppu*、ppu-smi 列 16 张、
+          # torch device_count=16；unprivileged 下只注入分配到的 2 个设备节点
+          # 且重编号为 0..N-1（物理 0/3 → 容器内 0/1）、device_count=2。后者正合
+          # 各 area 脚本 CUDA_VISIBLE_DEVICES=0..N-1 的相对语义，且是 area 之间
+          # 能并行的前提。host_ipc/shm_size 对位 docker --ipc=host --shm-size=8g；
+          # docker 版的 --ulimit memlock=-1 无 K8s 等价物、unprivileged 下亦无法
+          # 自行提升，如遇 pinned memory 类失败需集群侧放宽 LimitMEMLOCK。
           container_options: |
-            privileged: true
             host_ipc: true
             shm_size: "8Gi"
           extra_env: ${{ steps.payload.outputs.extra_env }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
