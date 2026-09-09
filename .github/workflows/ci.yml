@@ -9,11 +9,12 @@
 #
 # - 三条组织门禁（precheck / ai-code-review / human-review）是
 #   flytiger-eco/.github 的 reusable workflow，逻辑集中维护、自带 permissions，
-#   本文件只做 uses + needs 编排。
+#   本文件只做 uses + needs 编排。human-review 另有一条本地豁免通道，见 Stage 3b。
 # - PPU area 测试经 workflow_call 调用本仓库 test-area-ppu-*.yml（这些文件已
 #   不接受 pull_request 直接触发）；路径/标签过滤仍在各自的 check-changes 里，
 #   被调时继承本文件的 PR 事件上下文，过滤逻辑不受影响。
-# - concurrency 按事件类型分组：标签档 run 不会取消快速档 run。
+# - concurrency 单组互斥：同一 PR 任何时刻只有一个 CI run 在跑，且存活的 run
+#   必然覆盖全部 10 个 area（推导见下方 concurrency 注释）。
 
 name: CI Pipeline
 
@@ -26,7 +27,24 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && 'label' || 'push' }}
+  # 单组互斥，杜绝「同一 PR 两个 CI Pipeline run 并跑、6 个标签档重复跑两遍」。
+  #
+  # 为什么必须同组：创建 PR 时自带 ppu-full 会同时产生 opened 与 labeled 两个
+  # 事件、各自拉起一个 run。旧版按事件类型分成 push/label 两组并存，两个 run
+  # 都派发标签档，6 个重量级 area 白跑一遍。改为同组 + cancel-in-progress 后，
+  # 后到者取消先到者，最终只剩一个 run；再配合快速档不再排除 labeled(ppu-full)，
+  # 存活的那个 run 必然覆盖全部 10 个 area。
+  #
+  # 为什么给「无关标签」单开 noop 组：PR 已带 ppu-full、主 run 正在编译
+  # build-wheel 时，若有人打个无关标签（如 ready），新 run 的所有 job 都会被
+  # 下方闸门 skip 掉。这种空 run 进主组就会把正在跑的主 run 误取消、wheel
+  # 白编译，故隔离到 noop 组自生自灭。
+  #
+  # 两个「显式拉起」标签都归主组：ppu-full 拉起标签档，ppu-review-waived 放行
+  # 门禁。后者必须也走主组，否则「先 push 再打豁免标签」时新 run 会被归到 noop
+  # 组全 skip，主 run 仍卡在轮询门禁上，必须再 re-run 才能生效（隐形顺序陷阱）。
+  # 归主组后打豁免标签即拉起一个覆盖全 10 area 的新 run，无需关心操作顺序。
+  group: ci-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && !contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name) && 'noop' || 'main' }}
   cancel-in-progress: true
 
 jobs:
@@ -66,12 +84,16 @@ jobs:
     uses: ./.github/workflows/build-ppu-wheel.yml
 
   # ---- Stage 3a: 快速档（4 个 area，无人工审批）----
-  # labeled 事件不重复拉起快速档（打标签只派发标签档）；
+  # labeled 事件只认两个「显式拉起」标签（ppu-full / ppu-review-waived）。不能
+  # 像旧版那样整体排除 labeled：同组 concurrency 把「创建 PR 时自带标签」收敛成
+  # 单个 run 后，存活的很可能正是 labeled run，排除它就等于 4 个快速档整体丢失。
+  # 反之打无关标签的 run 由本闸门整体跳过，不会白占 PPU 卡。
   # base 白名单对位原各 workflow 的 on.pull_request.branches。
   ppu-attention:
     needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
-      github.event.action != 'labeled' &&
+      (github.event.action != 'labeled' ||
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-attention.yml
     with:
@@ -81,7 +103,8 @@ jobs:
   ppu-model-executor:
     needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
-      github.event.action != 'labeled' &&
+      (github.event.action != 'labeled' ||
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-model-executor.yml
     with:
@@ -91,7 +114,8 @@ jobs:
   ppu-entrypoints:
     needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
-      github.event.action != 'labeled' &&
+      (github.event.action != 'labeled' ||
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-entrypoints.yml
     with:
@@ -101,7 +125,8 @@ jobs:
   ppu-samplers:
     needs: [smoke-test, ai-code-review, build-wheel]
     if: >-
-      github.event.action != 'labeled' &&
+      (github.event.action != 'labeled' ||
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: ./.github/workflows/test-area-ppu-samplers.yml
     with:
@@ -109,58 +134,120 @@ jobs:
     secrets: inherit
 
   # ---- Stage 3b: 人工审批门禁（仅 PR 带 ppu-full 标签时存在）----
+  # 两条互斥通道：默认走组织 reusable 门禁轮询真人 APPROVED；PR 带
+  # ppu-review-waived 标签时改走下方的本地豁免 job。
   human-review:
     name: Human Review Gate
     needs: [smoke-test, ai-code-review]
-    # labeled 事件只认 ppu-full 本身：PR 已带 ppu-full 时，打无关标签
+    # labeled 事件只认两个拉起标签：PR 已带 ppu-full 时，打无关标签
     # 不该重开 6 个重量级 area；synchronize/open 等行为不变。
     if: >-
       (github.event.action != 'labeled' ||
-       github.event.label.name == 'ppu-full') &&
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
       contains(github.event.pull_request.labels.*.name, 'ppu-full') &&
+      !contains(github.event.pull_request.labels.*.name, 'ppu-review-waived') &&
       contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
     uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
     secrets: inherit
 
+  # 豁免通道：GitHub 平台禁止 PR 作者 approve 自己的 PR（UI / REST / GraphQL
+  # 一律返回 "Can not approve your own pull request"），而本仓库日常只有作者
+  # 一人提交，上面的轮询门禁于是成为结构性死锁：空等 6h 后 failure，6 个
+  # 标签档永不派发。带 ppu-review-waived 标签时由本 job 直接放行：打标签
+  # 本身即人工动作、需 triage 权限、在 PR 时间线留痕可审计，授权强度不弱于
+  # 一次 approve。job 名与 human-review 区分，避免 UI 上两个同名 job 混淆；
+  # 下游标签档以「两条通道任一 success」为放行条件，分支保护仍只需配 Full CI。
+  human-review-waived:
+    name: Human Review Gate (Waived)
+    needs: [smoke-test, ai-code-review]
+    if: >-
+      (github.event.action != 'labeled' ||
+       contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name)) &&
+      contains(github.event.pull_request.labels.*.name, 'ppu-full') &&
+      contains(github.event.pull_request.labels.*.name, 'ppu-review-waived') &&
+      contains(fromJSON('["v0.23.0", "feat/gha-ppu-test"]'), github.base_ref)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record waiver
+        run: |
+          echo "✅ human-review 已由 ppu-review-waived 标签豁免放行。"
+          echo "PR   : ${{ github.event.pull_request.html_url }}"
+          echo "base : ${{ github.base_ref }}   head: ${{ github.head_ref }}"
+          echo "依据：标签由具 triage 权限者添加，PR 时间线留痕可审计。"
+
   # ---- Stage 4: 标签档（6 个 area）----
-  # human-review 被跳过（无 ppu-full 标签）时随 needs 级联自动跳过。
+  # 放行条件 = build-wheel 成功 且 门禁两条通道任一 success。always() 是必需的：
+  # 未走的那条通道必然 skipped，而 needs 里有 skipped 时默认会级联跳过本 job。
+  # 显式判定 build-wheel 以保持「wheel 没出来就不跑 area」的原语义；两条通道都
+  # 被跳过（PR 无 ppu-full 标签）或门禁 failure/超时/cancelled 时，本档同样跳过。
   ppu-basic-correctness:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-basic-correctness.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-entrypoints-llm:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-entrypoints-llm.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-lora:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-lora.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-models-basic:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-models-basic.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-engine:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-engine.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-kernels:
-    needs: [human-review, build-wheel]
+    needs: [human-review, human-review-waived, build-wheel]
+    if: >-
+      always() &&
+      needs.build-wheel.result == 'success' &&
+      (needs.human-review.result == 'success' ||
+       needs.human-review-waived.result == 'success')
     uses: ./.github/workflows/test-area-ppu-kernels.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
@@ -175,6 +262,7 @@ jobs:
       - ai-code-review
       - build-wheel
       - human-review
+      - human-review-waived
       - ppu-attention
       - ppu-model-executor
       - ppu-entrypoints
