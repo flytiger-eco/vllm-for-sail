@@ -1,7 +1,7 @@
 # Aone CI `.aoneci/test-area-ppu-entrypoints-llm.yaml` 的 GitHub Actions 移植版
 # 结构：
 #   check-changes — 路径变更门禁（对位 Aone diff-guard）
-#   ppu-entrypoints-llm-test — PPU runner 上 docker 内装依赖 + 跑 pytest
+#   ppu-entrypoints-llm-test — K8s worker Pod 内装依赖 + 跑 pytest（编排壳 CPU-only，零占卡）
 #   ppu-entrypoints-llm-finish — 分支保护聚合点
 #
 # 测试选集见 scripts/ppu/test-area-ppu-entrypoints-llm.sh。
@@ -94,24 +94,24 @@ jobs:
   # ==================== PPU Entrypoints LLM ==================== #
   ppu-entrypoints-llm-test:
     needs: [check-changes]
-    # fork PR 不进特权 self-hosted runner（--privileged + 设备直通 +
+    # fork PR 不进特权 PPU worker Pod（privileged + 设备直通 +
     # NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码驱动）
     if: >-
       needs.check-changes.outputs.changes_exist == 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, ppu]
-    timeout-minutes: 60
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 75
     steps:
-      - name: Clean workspace
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            ${{ env.PPU_BASE_IMAGE }} \
-            bash -c "rm -rf /workspace/.??* /workspace/* 2>/dev/null; true"
-
+      # checkout 是 action 源码自动投递的前提：action 把 $GITHUB_WORKSPACE 打包
+      # 暂存到 NAS，worker Pod 内解压到 source_dir（默认 /workspace/source）。
+      # fetch-depth: 1 缩小 .git，减少打包体积与耗时。
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       # ci.yml 传入 wheel_artifact 时，下载 build-wheel job 的产物到 ci-wheel/，
       # 由 ppu_install_dependency.sh 装它而非借镜像 .so；空则跳过（沿用现状）。
@@ -125,80 +125,94 @@ jobs:
         if: inputs.wheel_artifact != ''
         run: |
           whl="$(ls ci-wheel/*.whl | head -n1)"
-          echo "PPU_WHEEL_PATH=/workspace/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
+          # ci-wheel/ 在 $GITHUB_WORKSPACE 内，随源码 tarball 一并投递进 Pod
+          echo "PPU_WHEEL_PATH=/workspace/source/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
 
-      - name: Run PPU entrypoints-llm tests
-        timeout-minutes: 50
+      - name: Build in-pod runner payload
+        id: payload
+        shell: bash
         env:
-          PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
-          PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
           TEST_MODE: ${{ inputs.test_mode || 'all' }}
           PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
         run: |
-          docker run --rm \
-            --privileged \
-            --network host \
-            --add-host="$(hostname):$(hostname -I | awk '{print $1}')" \
-            --device=/dev/alixpu_ctl \
-            --device=/dev/alixpu \
-            --ipc=host \
-            --init \
-            --shm-size=8g \
-            --ulimit memlock=-1 \
-            --ulimit stack=67108864 \
-            -v ${{ github.workspace }}:/workspace \
-            -v /nas_aisw:/nas_aisw \
-            -e HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub \
-            -e PPU_ARTIFACTORY_USER \
-            -e PPU_ARTIFACTORY_PASSWORD \
-            -e TEST_MODE \
-            -e PYTEST_EXTRA_ARGS \
-            -e PPU_DEVICE_LABEL=OAM-810E \
-            -e PPU_WHEEL_PATH \
-            ${{ env.PPU_BASE_IMAGE }} \
-            bash -c "
-              cd /workspace && \
-              bash scripts/ppu/ppu_install_dependency.sh && \
-              bash scripts/ppu/test-area-ppu-entrypoints-llm.sh
-            "
-
-      - name: Publish test summary
-        if: always()
-        run: |
-          f="test-results/summary.md"
-          if [ -f "$f" ]; then
-            cat "$f" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### Entrypoints LLM Test (PPU)"
-              echo ""
-              echo "summary.md not produced — the in-container script exited"
-              echo "before its EXIT trap fired (see 'Run PPU entrypoints-llm"
-              echo "tests' log)."
-            } >> "$GITHUB_STEP_SUMMARY"
+          # 为什么绕 base64：ppu-distributed-action 的「校验 inputs」步骤把
+          # inputs.command 直接文本插值进 `if [ -z "<command>" ]`，多行/含引号的
+          # command 会引发 shell syntax error。base64 后是单行且只含
+          # [A-Za-z0-9+/=]，被那对双引号整段吞掉，安全无副作用。
+          cat > /tmp/ppu-run.sh <<'RUNEOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /workspace/source
+          echo "[k8s-area] node=${NODE_NAME:-unknown} TEST_MODE=${TEST_MODE:-all}"
+          bash scripts/ppu/ppu_install_dependency.sh
+          bash scripts/ppu/test-area-ppu-entrypoints-llm.sh
+          RUNEOF
+          # 语法自检：runner 上早失败好过在 Pod 里烧一次调度
+          bash -n /tmp/ppu-run.sh
+          # tr 而非 base64 -w0：后者是 GNU 专有
+          echo "b64=$(base64 < /tmp/ppu-run.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          # extra_env 以逗号分隔 KEY=VAL，值内不能含逗号；空值项一律不下发
+          envs="HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E"
+          envs="${envs},TEST_MODE=${TEST_MODE:-all}"
+          if [ -n "${PYTEST_EXTRA_ARGS:-}" ]; then
+            envs="${envs},PYTEST_EXTRA_ARGS=${PYTEST_EXTRA_ARGS}"
           fi
+          if [ -n "${PPU_WHEEL_PATH:-}" ]; then
+            envs="${envs},PPU_WHEEL_PATH=${PPU_WHEEL_PATH}"
+          fi
+          echo "extra_env=${envs}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Run PPU entrypoints-llm tests
+        id: ppu
+        uses: flytiger-eco/ppu-distributed-action@main
         with:
-          name: ppu-entrypoints-llm-test-results
-          path: |
-            test-results/
-          if-no-files-found: warn
-          retention-days: 14
+          # 单机；nproc_per_node = 本 area 实际需要的 PPU 卡数
+          #（所有 step 均 CUDA_VISIBLE_DEVICES=0）
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=OAM-810E
+          # /nas_aisw、/mnt/wl_nas 由 action 默认挂载，无需传 host_volumes
+          image: ${{ env.PPU_BASE_IMAGE }}
+          namespace: ppu-sched
+          # 对齐自托管版 in-pod 上限
+          timeout_minutes: 50
+          cleanup_policy: always
+          # 对位自托管版 docker --privileged --ipc=host --shm-size=8g
+          #（--ulimit memlock=-1 无 K8s 等价物，privileged 下进程可自行提升）
+          container_options: |
+            privileged: true
+            host_ipc: true
+            shm_size: "8Gi"
+          extra_env: ${{ steps.payload.outputs.extra_env }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          # 必须单行、不含双引号，见上面 payload 步骤注释
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
 
-      - name: Annotate failed tests
+      # junit/summary 落在 Pod 内 /workspace/source/test-results/，Pod 回收即消失，
+      # 故不再走 upload-artifact + junit 注解；用例明细见上一步日志（action 全量
+      # 透传 Pod stdout，并另存为 log artifact）。
+      - name: Report action outputs
         if: always()
-        continue-on-error: true
-        uses: mikepenz/action-junit-report@v5
-        with:
-          report_paths: test-results/test.xml
-          check_name: PPU Entrypoints LLM Test Report
-          annotate_only: true
-          detailed_summary: true
-          fail_on_failure: false
-          require_tests: false
+        env:
+          OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
+          OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
+          OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
+          OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
+          OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
+          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+        run: |
+          {
+            echo "### Entrypoints LLM Test (PPU, K8s)"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| test_mode | ${TEST_MODE:-all} |"
+            echo "| image | \`${PPU_BASE_IMAGE}\` |"
+            echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
+            echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
+            echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
+            echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
+            echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ==================== 聚合点 ==================== #
   ppu-entrypoints-llm-finish:
