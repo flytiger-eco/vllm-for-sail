@@ -289,6 +289,17 @@ PYEOF
   cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
+  # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
+  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
+  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
+  if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
+    if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
+       cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
+      echo "[k8s-summary] summary.md -> ${PPU_SUMMARY_NAS_DIR}/summary.md"
+    else
+      echo "[k8s-summary] WARN: NAS 回传失败（${PPU_SUMMARY_NAS_DIR} 不可写？）"
+    fi
+  fi
 }
 trap _emit_junit EXIT
 

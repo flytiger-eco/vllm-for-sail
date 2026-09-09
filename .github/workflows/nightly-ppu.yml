@@ -162,15 +162,18 @@ jobs:
             host_ipc: true
             shm_size: "8Gi"
           # extra_env 以逗号分隔 KEY=VAL，值内勿含逗号
+          # summary.md 经 NAS 回传：worker Pod 挂 /mnt/wl_nas、runner 容器挂
+          # /wl_nas（同一 NAS）；matrix 各 leg 的 GITHUB_JOB 相同，以 area 名
+          # 再分一层目录，避免互相覆盖。
           extra_env: >-
-            HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,AREA=${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+            HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E,AREA=${{ matrix.area }},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
           # 必须单行、不含双引号，见上面 payload 步骤注释
           command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
 
-      # junit/summary 落在 Pod 内 /workspace/source/test-results/，Pod 回收即消失，
-      # 故不再走 upload-artifact；用例明细见上一步日志（action 全量透传 Pod
-      # stdout，并另存为 log artifact）。
-      - name: Report action outputs
+      # 用例明细：脚本在 Pod 内把 per-unit 统计表经 NAS 回传（PPU_SUMMARY_NAS_DIR，
+      # 路径含 matrix area 隔离），此处读回渲染；NAS 读不到时回退为作业元信息表，
+      # 明细仍可从 job 日志查看（action 全量透传 Pod stdout）。
+      - name: Publish test summary
         if: always()
         env:
           AREA: ${{ matrix.area }}
@@ -180,18 +183,27 @@ jobs:
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
         run: |
+          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/${AREA}/summary.md"
           {
-            echo "### Nightly PPU: ${AREA} (K8s)"
-            echo ""
-            echo "| item | value |"
-            echo "|---|---|"
-            echo "| nproc_per_node | ${{ matrix.nproc }} |"
-            echo "| image | \`${PPU_BASE_IMAGE}\` |"
-            echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
-            echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
-            echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
-            echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
-            echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+            if [ -f "${NAS_SUM}" ]; then
+              cat "${NAS_SUM}"
+              echo ""
+              echo "<sub>nproc: ${{ matrix.nproc }} · K8s job \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`</sub>"
+            else
+              echo "### Nightly PPU: ${AREA} (K8s)"
+              echo ""
+              echo "> summary.md 未回传（Pod 内脚本在 EXIT trap 前退出或 NAS 不可写），仅显示作业元信息；用例明细见上方 job 日志。"
+              echo ""
+              echo "| item | value |"
+              echo "|---|---|"
+              echo "| nproc_per_node | ${{ matrix.nproc }} |"
+              echo "| image | \`${PPU_BASE_IMAGE}\` |"
+              echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
+              echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
+              echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
+              echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
+              echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ==================== 聚合点 ==================== #

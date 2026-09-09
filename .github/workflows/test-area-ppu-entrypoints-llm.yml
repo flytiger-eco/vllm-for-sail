@@ -160,6 +160,9 @@ jobs:
           if [ -n "${PPU_WHEEL_PATH:-}" ]; then
             envs="${envs},PPU_WHEEL_PATH=${PPU_WHEEL_PATH}"
           fi
+          # summary.md 经 NAS 回传：worker Pod 挂 /mnt/wl_nas、runner 容器挂
+          # /wl_nas（同一 NAS），Publish test summary 步骤按同约定路径读取。
+          envs="${envs},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}"
           echo "extra_env=${envs}" >> "$GITHUB_OUTPUT"
 
       - name: Run PPU entrypoints-llm tests
@@ -193,10 +196,10 @@ jobs:
           # 必须单行、不含双引号，见上面 payload 步骤注释
           command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
 
-      # junit/summary 落在 Pod 内 /workspace/source/test-results/，Pod 回收即消失，
-      # 故不再走 upload-artifact + junit 注解；用例明细见上一步日志（action 全量
-      # 透传 Pod stdout，并另存为 log artifact）。
-      - name: Report action outputs
+      # 用例明细：脚本在 Pod 内把 per-unit 统计表经 NAS 回传（PPU_SUMMARY_NAS_DIR，
+      # 见 Build in-pod runner payload 步骤），此处读回渲染；NAS 读不到时回退为
+      # 作业元信息表，明细仍可从 job 日志查看（action 全量透传 Pod stdout）。
+      - name: Publish test summary
         if: always()
         env:
           OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
@@ -206,18 +209,27 @@ jobs:
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
           TEST_MODE: ${{ inputs.test_mode || 'all' }}
         run: |
+          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
           {
-            echo "### Entrypoints LLM Test (PPU, K8s)"
-            echo ""
-            echo "| item | value |"
-            echo "|---|---|"
-            echo "| test_mode | ${TEST_MODE:-all} |"
-            echo "| image | \`${PPU_BASE_IMAGE}\` |"
-            echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
-            echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
-            echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
-            echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
-            echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+            if [ -f "${NAS_SUM}" ]; then
+              cat "${NAS_SUM}"
+              echo ""
+              echo "<sub>mode: ${TEST_MODE:-all} · K8s job \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`</sub>"
+            else
+              echo "### Entrypoints LLM Test (PPU, K8s)"
+              echo ""
+              echo "> summary.md 未回传（Pod 内脚本在 EXIT trap 前退出或 NAS 不可写），仅显示作业元信息；用例明细见上方 job 日志。"
+              echo ""
+              echo "| item | value |"
+              echo "|---|---|"
+              echo "| test_mode | ${TEST_MODE:-all} |"
+              echo "| image | \`${PPU_BASE_IMAGE}\` |"
+              echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
+              echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
+              echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
+              echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
+              echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ==================== 聚合点 ==================== #
