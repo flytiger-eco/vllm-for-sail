@@ -68,10 +68,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      # 为什么绕 base64：action.yml 的「校验 inputs」把 ${{ inputs.command }}
-      # 直接文本插值进 `if [ -z "<command>" ]`，多行/含引号的 command 会引发
-      # shell syntax error（见 ppu-action-smoke.yml 的详细注释）。base64 后是
-      # 单行且只含 [A-Za-z0-9+/=]，被那对双引号整段吞掉，安全无副作用。
+      # 为什么绕 base64：ppu-distributed-action 的 action.yml「校验 inputs」步骤
+      # 把 ${{ inputs.command }} 直接文本插值进 `if [ -z "<command>" ]`，多行/含
+      # 引号的 command 会引发 shell syntax error。base64 后是单行且只含
+      # [A-Za-z0-9+/=]，被那对双引号整段吞掉，安全无副作用。
       - name: Build in-pod runner payload
         id: payload
         shell: bash
@@ -100,9 +100,8 @@ jobs:
           nnodes: 0            # 单机
           nproc_per_node: 1    # attention single 段限 1 卡
           node_selector: board-type=OAM-810E
-          # 左宿主机 / 右容器内。/nas_aisw、/mnt/wl_nas 默认已挂，这里显式写出
-          # 以对齐自托管版语义（重复的容器路径 action 会自动跳过）。
-          host_volumes: /nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas
+          # /nas_aisw、/mnt/wl_nas 由 action 默认挂载，无需传 host_volumes
+          # （重复指定相同容器路径会被自动跳过）
           image: ${{ env.PPU_BASE_IMAGE }}
           namespace: ppu-sched
           timeout_minutes: 40  # 对齐自托管版 in-pod 上限
