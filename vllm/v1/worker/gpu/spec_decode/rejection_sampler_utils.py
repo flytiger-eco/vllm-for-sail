@@ -1112,6 +1112,8 @@ def rejection_sample(
     )
 
     # Insert the resampled tokens into the output sampled.
+    # NOTE: num_warps=1 keeps the read-modify-write of num_sampled within a
+    # single warp, so no thread can observe another warp's increment.
     _insert_resampled_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
@@ -1125,5 +1127,6 @@ def rejection_sample(
         expanded_idx_mapping,
         temperature,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        num_warps=1,
     )
     return sampled, num_sampled
