@@ -18,18 +18,33 @@ PPU 整机只有**一台** self-hosted runner，所有 PPU job 串行排队。
 PR 上的流水线由 `ci.yml` 统一编排，对齐 flytiger-eco 组织门禁链：
 
 ```text
-precheck（TruffleHog 密钥扫描）
-    ↓
-smoke-test（静态冒烟） ∥ ai-code-review（Copilot 评审，最长等 8 分钟）
-    ↓
-快速档 4 个 PPU area（无人工审批，路径命中才跑）
-    ↓（PR 带 ppu-full 标签时，门禁链多一道）
-human-review（轮询等至少 1 名真人 approve）
-    ↓
-标签档 6 个 PPU area
-    ↓
-ci（Full CI 聚合点，skipped 视为通过）
+PR 事件（opened / synchronize / labeled / …）
+                    ↓
+     precheck（TruffleHog 密钥扫描）
+                    ↓
+   smoke-test ∥ ai-code-review（并行）
+                    ↓
+  ┌─────────────────┴────────────────────┐
+  【快速档】无人工介入               【标签档】两处人工动作
+  ↓                                       ↓
+  ① check-changes 路径门禁               ① 打 ppu-full 标签 ←〔人工〕
+     diff 命中该 area 路径才跑              labeled 事件只认 ppu-full 本身
+     （路径清单见 §3）                      （需 triage 权限，§8）
+  ↓                                      ↓
+  ② attention / model-executor           ② human-review Gate（轮询等待）
+     entrypoints / samplers                 ←〔人工〕真人 approve PR
+     全绿约 14 min                           上限 6h，超时变红
+                                         ↓
+                                         ③basic-correctness / entrypoints-llm
+                                            lora / models-basic / engine / kernels
+                                            全开 5h+，白天慎用
+  └─────────────────┬────────────────────┘
+                    ↓
+ ci（Full CI 聚合点，skipped 视为通过）
 ```
+
+两条线共用前置门禁，分叉后各自排队上 PPU，最后汇入 Full CI 聚合点；
+线 B 的①（打标签）与②（approve）是两处**必需的人工动作**，不做就停在原地。
 
 三条组织门禁（precheck / ai-code-review / human-review）是组织仓库
 `flytiger-eco/.github` 的 reusable workflow，逻辑集中维护、版本升级对本仓库
@@ -40,7 +55,7 @@ ci（Full CI 聚合点，skipped 视为通过）
 
 1. **快速档（4 个，门禁过后自动跑，无人工审批）**：`attention` /
    `model-executor` / `entrypoints` / `samplers`。
-   precheck、smoke-test、ai-code-review 通过后自动排队上 PPU；
+   precheck -> (smoke-test//ai-code-review) 都通过后自动排队上 PPU；
    `check-changes` 用 `dorny/paths-filter` 判断 diff 是否命中该 area 的依赖路径，命中才放行进 PPU runner。
 2. **标签档（6 个，打 `ppu-full` + 真人 approve 才跑）**：`basic-correctness` /
    `entrypoints-llm` / `lora` / `models-basic` / `engine` / `kernels`。
@@ -48,9 +63,7 @@ ci（Full CI 聚合点，skipped 视为通过）
    审批通过后 6 个 area 才放行。此档
    `check-changes` **只看标签不看路径**，打上标签即可跑（即使没有修改代码，只要打上这个标签就会自动跑）。
 3. **不在 per-PR 范围（1 个）**：`models-language` 只有 `workflow_dispatch`与nightly
-   入口，PR 上无论如何都不会跑；需要时手动触发（§2.2）。
-
-手动触发（`workflow_dispatch`）不受路径过滤、标签闸门与门禁链限制，可以直接跑。
+   入口，PR 上不会跑。
 
 安全闸门：fork 仓库发起的 PR 一律不进 PPU runner —— 测试容器带
 `--privileged` + 设备直通 + NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码
@@ -87,13 +100,9 @@ PPU 测试一个不跑，而且不会报错。
 
 ### 2.1 提了 PR 之后会发生什么
 
-1. **门禁链先跑（GitHub 托管 runner，不占 PPU 机器）**：precheck 密钥扫描 →
-   smoke-test 与 ai-code-review 并行（等 Copilot 评审，最长 8 分钟）。
-2. **快速档 4 个 area：门禁过后自动跑。** 只有改动碰到它们的路径
-   （清单见 §3）才跑；没碰到就全部 skip，check 记绿。全绿约 14 分钟
-   （PPU 排队时间另计）。
-3. **标签档 6 个 area：默认不跑，要打标签 + 等审批。** 改了 kernel、engine、
-   模型加载这类底层代码时，给 PR 打上 `ppu-full` 标签 → 该 run 的门禁链里出现
+1. 门禁：precheck  → (smoke-test//ai-code-review)
+2. **快速档 4 个 area：门禁通过且改动命中各自的路径（清单见 §3）后跑。** 没碰到就全部 skip，check 记绿。全绿约 14 分钟。
+3. **标签档 6 个 area：默认不跑，要门禁 + 打标签(ppu-full) + 等人工审批。** 改了 kernel、engine、模型加载这类底层代码时，给 PR 打上 `ppu-full` 标签 → 该 run 的门禁链里出现
    Human Review Gate → 至少 1 名真人 approve 后 6 个 area 排队跑。全开要
    5 小时以上。
 4. **结果：** PR 页面上方是门禁链 checks（Pre-check / Smoke Test /
@@ -105,7 +114,7 @@ PPU 测试一个不跑，而且不会报错。
 | 方式 | 操作 |
 | --- | --- |
 | GitHub 网页 | PR 右侧 Labels 勾选 `ppu-full` |
-| 命令行 | `gh pr edit <PR号> --add-label ppu-full` |
+| 命令行 | `gh pr edit <PR号> --repo flytiger-eco/vllm-for-sail --add-label ppu-full` |
 
 标签就是普通的 GitHub label，需要本仓库 triage 及以上权限。没权限找maintainer 代打。
 
@@ -121,7 +130,7 @@ PPU 测试一个不跑，而且不会报错。
   摘掉重打标签即可重新派发。作者不能 approve 自己的 PR（GitHub 限制），
   需其他有 read 权限的成员 approve。
 
-### 2.2 手动跑（不开 PR 也能跑）
+### 2.2 手动跑（暂未合入默认分支，触发不了）
 
 网页操作：打开 [Actions 页](https://github.com/flytiger-eco/vllm-for-sail/actions)
 → 左侧选一个 area → 右上角 **Run workflow** → 分支选你的分支 → Run。
@@ -144,8 +153,6 @@ gh workflow run test-area-ppu-attention.yml --ref <你的分支>
 
 ## 3. 触发路径范围
 
-`check-changes` 用 `dorny/paths-filter` 判断 PR diff（头分支对基线分支的完整
-差异），在 ci.yml 以 `workflow_call` 调用各 area 后仍由各 area 自己判定。
 除下表外，每个 area 的清单都还包含自身的三个 CI 文件：
 `.github/workflows/test-area-ppu-<area>.yml`、`scripts/ppu/ppu_install_dependency.sh`、`scripts/ppu/test-area-ppu-<area>.sh`。
 
@@ -229,7 +236,7 @@ gh workflow run test-area-ppu-attention.yml --ref <你的分支>
 
 ## 7. 已知问题与注意事项
 
-1. **试用期 base 只能填 `feat/gha-ppu-test`。** base 白名单现在两处：`ci.yml`
+1. **试用期 base 填 `feat/gha-ppu-test`。** base 白名单现在两处：`ci.yml`
    里 PPU 调用 job 的 `if` 条件，与各 area workflow 的 `push.branches`，都是
    `[v0.23.0, feat/gha-ppu-test]`；合入 v0.23.0 后请把试用分支从这两处摘掉。
 2. **Run workflow 的分支下拉会列出跑不了的分支。** 默认分支（`main`）与各

@@ -25,6 +25,10 @@ on:
         description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
         type: string
         default: ""
+      wheel_artifact:
+        description: "CI 构建的 wheel artifact 名（ci.yml 传入）；空则用镜像预装 vllm"
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       test_mode:
@@ -69,9 +73,10 @@ jobs:
               - "scripts/ppu/ppu_install_dependency.sh"
               - "scripts/ppu/test-area-ppu-kernels.sh"
               - "tests/kernels/**"
-              # csrc/** 刻意不列：ppu_install_dependency.sh 的 [cext] 段借用镜像
-              # 预编译 .so，改 C++ 源码在 CI 里不会重新编译，绿灯是假绿。恢复
-              # 条件：接上 PPU wheel 构建后再放回。
+              # csrc/** 已放回：接上 PPU wheel 构建（ci.yml build-wheel job →
+              # ppu_install_dependency.sh 的 [wheel] 段装本次构建）后，改 C++ 源码
+              # 会重新编译并参与测试，不再是假绿。
+              - "csrc/**"
               - "tools/install_deepgemm.sh"
               - "vllm/config.py"
               - "vllm/config/**"
@@ -125,6 +130,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ci.yml 传入 wheel_artifact 时，下载 build-wheel job 的产物到 ci-wheel/，
+      # 由 ppu_install_dependency.sh 装它而非借镜像 .so；空则跳过（沿用现状）。
+      - name: Fetch CI-built wheel
+        if: inputs.wheel_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+      - name: Resolve wheel path
+        if: inputs.wheel_artifact != ''
+        run: |
+          whl="$(ls ci-wheel/*.whl | head -n1)"
+          echo "PPU_WHEEL_PATH=/workspace/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
+
       - name: Run PPU kernels tests
         timeout-minutes: 350
         env:
@@ -152,6 +171,7 @@ jobs:
             -e TEST_MODE \
             -e PYTEST_EXTRA_ARGS \
             -e PPU_DEVICE_LABEL=OAM-810E \
+            -e PPU_WHEEL_PATH \
             ${{ env.PPU_BASE_IMAGE }} \
             bash -c "
               cd /workspace && \
