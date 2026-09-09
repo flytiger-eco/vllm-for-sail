@@ -34,6 +34,13 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # 必须串行：action 的 NAS 源码暂存路径是
+      #   /wl_nas/devops/${RUN_ID}-${ATTEMPT}/${GITHUB_JOB}/{stage,source.tar.gz}
+      # 只含 job key，matrix 各 leg 共享同一个值。两个 leg 并行时会往同一目录
+      # cp -a + tar czf + rm -rf，互相踩到 tar 报 "file changed as we read it"
+      # 并以 exit 1 结束（action 的打包步骤跑在 bash -e 下）。实测于
+      # run 34325180549：两个 leg 的暂存路径同为 .../34325180549-1/probe/。
+      max-parallel: 1
       matrix:
         include:
           - name: privileged

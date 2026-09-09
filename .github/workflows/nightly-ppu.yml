@@ -19,10 +19,17 @@
 #   `5` = 周六。schedule 仅在仓库默认分支生效，其他分支用 workflow_dispatch。
 #
 # 串行防抢卡：workflow 级 concurrency（排队不取消）+ matrix max-parallel: 1。
-#   改 K8s 调度后依旧必须串行：privileged Pod 能看到整机 16 张卡（实测
-#   torch device_count=16），nproc_per_node 仅作调度侧资源申请、不做可见性
-#   隔离；而各 area 脚本硬编码 CUDA_VISIBLE_DEVICES=0，并发跑会全部挤到
-#   0 号卡上互相干扰。
+#   改 K8s 调度后依旧必须串行，两个各自独立的理由：
+#   1) 抢卡：privileged Pod 能看到整机 16 张卡（实测 torch device_count=16），
+#      nproc_per_node 仅作调度侧资源申请、不做可见性隔离；而各 area 脚本
+#      硬编码 CUDA_VISIBLE_DEVICES=0，并发跑会全部挤到 0 号卡上互相干扰。
+#   2) 源码暂存目录冲突：ppu-distributed-action 的 NAS 暂存路径是
+#      /wl_nas/devops/${RUN_ID}-${ATTEMPT}/${GITHUB_JOB}/{stage,source.tar.gz}，
+#      只含 job key，matrix 各 leg 共享同一个值。并行时多个 leg 会往同一目录
+#      cp -a + tar czf + rm -rf，tar 读到被并发改写的文件即报
+#      "file changed as we read it" 并 exit 1（打包步骤跑在 bash -e 下）。
+#      实测于 run 34325180549（设备探针 workflow 的两个 matrix leg）。
+#      即使 1) 将来通过设备隔离解决，这一条仍然成立。
 name: Nightly PPU test
 
 on:
