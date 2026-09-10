@@ -4,15 +4,18 @@
 # 背景（2026-09-10 run 34440797915）：engine + quantization/misc/
 # e2e-integration/expert-parallelism 共 5 个 Pod 被调度到
 # na131t-ppu810e-test002 后 running=0 直至 action 超时（同批 test001 上的
-# 5 个 Pod 全部正常拉起），怀疑 test002 节点侧故障（镜像拉取 / device
-# plugin / NAS 挂载三选一）。
+# 5 个 Pod 全部正常拉起）。
+#
+# 根因已实锤（本 workflow 首轮 run 34466091018 诊断）：test002 kubelet 拉取
+# llm:v2.1.1 镜像 403 Forbidden → ImagePullBackOff（3h15m 重试 842 次），
+# test001 可正常拉取——test002 对私有 registry 的认证失效，需 owner 修。
 #
 # 三步验证（对应排查结论的处置建议）：
-#   ① 诊断留证：describe 卡住的 engine Pod（若未清理）+ test002 节点状态；
-#   ② cordon test002：防止新 Pod 再被绑到坏节点（cordon 保持，待集群 owner
-#     修复后手动 uncordon）；
-#   ③ 重跑 engine（TEST_MODE=single，分钟级）：验证新 Pod 调度到健康节点
-#     并正常执行——action 日志里的 "→ Node" 行应为 test001。
+#   ① 诊断留证：describe 卡住的 engine Pod + 节点状态（runner SA 无 cluster
+#     权限，nodes 查询会 403，全部容错不中断）；
+#   ② cordon test002：同上权限受限，降级为 best-effort + 提示 owner 手动执行；
+#   ③ 重跑 engine（TEST_MODE=single，分钟级）：node_selector 钉健康节点
+#     test001，验证 Pod 拉起与测试执行恢复正常。
 #
 # 触发：push 到 feat/gha-ppu-test / 手动 dispatch。
 # ==============================================================================
@@ -58,19 +61,22 @@ jobs:
           echo; echo "===== ② Pod Events（卡在 Pulling/设备分配/挂载哪一步） ====="
           kubectl -n "${NS}" describe pod "${STUCK_POD}" 2>/dev/null | tail -40 || true
           echo "===== ③ test002 节点状态与 PPU 资源分配 ====="
-          kubectl get node "${BAD_NODE}" -o wide
-          kubectl describe node "${BAD_NODE}" | sed -n '/Allocated resources/,/Events/p' || true
+          # runner SA（arc-runners:arc-runner-cpu）无 cluster 级权限，nodes
+          # 查询会 403——容错跳过，不因权限问题中断留证
+          kubectl get node "${BAD_NODE}" -o wide 2>&1 || true
+          kubectl describe node "${BAD_NODE}" 2>&1 | \
+            sed -n '/Allocated resources/,/Events/p' || true
           echo "===== ④ test002 上当前滞留的 Pod ====="
           kubectl -n "${NS}" get pods -o wide \
             --field-selector "spec.nodeName=${BAD_NODE}" || true
 
       - name: Step2 cordon test002
         run: |
-          # SA 若无节点级权限会在此 403——这本身也是验证结论的一部分
-          # （cordon 需 owner 执行），失败则步骤红、日志可见
-          kubectl cordon "${BAD_NODE}"
-          kubectl get node "${BAD_NODE}" | grep -q 'SchedulingDisabled' && \
-            echo "cordon OK: ${BAD_NODE} 已 SchedulingDisabled"
+          # runner SA 无 cluster 级权限，cordon 会 403——降级为提示 owner
+          # 手动执行，不阻塞步骤③（rerun 已用 node_selector 钉 test001，
+          # 不依赖 cordon 生效）
+          kubectl cordon "${BAD_NODE}" 2>&1 || \
+            echo "::warning::cordon 需 owner 手动执行: kubectl cordon ${BAD_NODE}"
 
   # ---- 步骤③：重跑 engine（single）验证调度恢复健康 ----
   rerun-engine:
@@ -104,15 +110,17 @@ jobs:
           envs="${envs},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}"
           echo "extra_env=${envs}" >> "$GITHUB_OUTPUT"
 
-      # 验证点：本步骤日志里 "→ Node" 应为 test001（cordon 后不再分到
-      # test002），且 [worker-0] 输出应进入 deps/pytest 阶段而非 running=0
+      # 验证点：[worker-0] 输出应进入 deps/pytest 阶段（而非 running=0
+      # 直至超时）
       - name: Run PPU engine tests (single)
         id: ppu
         uses: flytiger-eco/ppu-distributed-action@main
         with:
           nnodes: 0
           nproc_per_node: 1
-          node_selector: board-type=OAM-810E
+          # 钉健康节点 test001（test002 镜像 403 修复前绕开；修复后改回
+          # board-type=OAM-810E）
+          node_selector: kubernetes.io/hostname=na131t-ppu810e-test001.eng.t-head.cn
           image: ${{ env.PPU_BASE_IMAGE }}
           namespace: ppu-sched
           timeout_minutes: 45
