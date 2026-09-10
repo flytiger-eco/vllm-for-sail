@@ -2,19 +2,23 @@
 #
 # 与 PR 门禁的分工（详见 scripts/ppu/docs/ppu-ci-usage.md）：
 #   PR 自动触发档：attention / model-executor / entrypoints / samplers（约 14min）
-#   PR 标签触发档（ppu-full）：其余 7 个重量级 area，不自动跑
-#   本 workflow：把标签触发档的 7 个 area 定时补跑一遍，保证即使没人打标签
-#   也有每日/每周的回归基线。
+#   PR 标签触发档（ppu-full）：其余 18 个重量级 area，不自动跑
+#   本 workflow：把标签触发档的 18 个 area 连同 3 个 nightly-only area
+#   （models-language / models-distributed / models-multimodal）定时补跑一遍，
+#   保证即使没人打标签也有每日/每周的回归基线。
+#   注：spec-decode 仅 workflow_dispatch 手动入口（依赖模型未入库），不在本档。
 #
 # 为什么拆两档 cron：area 之间必须串行（理由见下方 max-parallel）。
-#   7 个 area 连跑，已标定的 4 个就已占 4h46min（kernels 2h14min +
-#   engine 1h32min + models-basic 48min + entrypoints-llm 12min，数据源：批次 1
-#   首跑报告），再加 basic-correctness / lora / models-language 三个未标定的，
-#   会一直占用到工作时段、把白天的 PR 快速集堵在队列里。故按时长拆分：
+#   已标定的 4 个就已占 4h46min（kernels 2h14min + engine 1h32min +
+#   models-basic 48min + entrypoints-llm 12min，数据源：批次 1 首跑报告），
+#   全量连跑会一直占用到工作时段、把白天的 PR 快速集堵在队列里。故按时长拆分：
 #     - 工作日夜间集：basic-correctness / entrypoints-llm / lora / models-basic
-#       （已标定部分 1h 以内，剩下两个按 timeout 上限 100min 预留）
-#     - 周末集：engine / kernels / models-language（已知最长的两个 + 未标定的
-#       models-language），周六 02:00 起跑，跑到白天也不影响开发
+#       （已标定部分 1h 以内，另两个按 timeout 上限预留；worst-case ≈7h 已贴近
+#       夜间窗口上限，不再往里加新 area）
+#     - 周末集：engine / kernels / models-language + 批次 2 新增的 14 个未标定
+#       area（含 nightly-only 的 models-distributed / models-multimodal；spec-decode
+#       为 dispatch-only 不在此列）。周六 02:00 起跑，worst-case ≈43h 仍在周末
+#       窗口内，首跑标定后再按实测时长在两档间回摆
 #   cron 为 UTC：18:00 UTC = 次日 02:00 北京时间，故 `0-4` = 周一~周五，
 #   `5` = 周六。schedule 仅在仓库默认分支生效，其他分支用 workflow_dispatch。
 #
@@ -71,15 +75,19 @@ jobs:
         run: |
           # run_timeout = in-pod 上限（已标定的按首跑实测收紧：entrypoints-llm
           # 11m34s → 50，models-basic 48m07s → 110；basic-correctness / lora /
-          # models-language 未标定，暂留 PR 版上限，首次定时跑完后回写）。
+          # models-language 与批次 2 的 14 个新 area 未标定，暂留 PR 版上限 90，
+          # 首次定时跑完后回写）。
           # timeout = job 上限 = run_timeout + 25，含 K8s 调度 + 镜像准备开销
           #（实测约 210s），与各 test-area-ppu-*.yml 取值一致。
-          # nproc = 本 area 实际需要的 PPU 卡数，依据是脚本里 _run_step 的
-          # shards 与 CUDA_VISIBLE_DEVICES 用法：lora 的 lora_full 跑 4 shards
-          #（每 shard 独占 1 卡），basic-correctness 的 distributed 内部 TP=2，
-          # models-language 的 extra_standard / hybrid 各 2 shards，其余均单卡。
+          # nproc = 本 area 实际需要的 PPU 卡数，与各 test-area-ppu-*.yml 的
+          # nproc_per_node 一致（依据是脚本里 _run_step 的 shards 与
+          # CUDA_VISIBLE_DEVICES 用法：lora 的 lora_full 跑 4 shards（每 shard
+          # 独占 1 卡），e2e-integration / lm-eval 各 4 卡，basic-correctness 的
+          # distributed 内部 TP=2，compile / distributed / expert-parallelism /
+          # model-runner-v2 / models-distributed / weight-loading 各 2 卡，
+          # models-language 的 extra_standard / hybrid 各 2 shards，其余均单卡）。
           nightly='[{"area":"basic-correctness","nproc":2,"timeout":115,"run_timeout":90},{"area":"entrypoints-llm","nproc":1,"timeout":75,"run_timeout":50},{"area":"lora","nproc":4,"timeout":115,"run_timeout":90},{"area":"models-basic","nproc":1,"timeout":135,"run_timeout":110}]'
-          weekend='[{"area":"engine","nproc":1,"timeout":315,"run_timeout":290},{"area":"kernels","nproc":1,"timeout":375,"run_timeout":350},{"area":"models-language","nproc":2,"timeout":315,"run_timeout":290}]'
+          weekend='[{"area":"engine","nproc":1,"timeout":315,"run_timeout":290},{"area":"kernels","nproc":1,"timeout":375,"run_timeout":350},{"area":"models-language","nproc":2,"timeout":315,"run_timeout":290},{"area":"benchmarks","nproc":1,"timeout":115,"run_timeout":90},{"area":"compile","nproc":2,"timeout":115,"run_timeout":90},{"area":"cuda","nproc":1,"timeout":115,"run_timeout":90},{"area":"distributed","nproc":2,"timeout":115,"run_timeout":90},{"area":"e2e-integration","nproc":4,"timeout":115,"run_timeout":90},{"area":"expert-parallelism","nproc":2,"timeout":115,"run_timeout":90},{"area":"lm-eval","nproc":4,"timeout":115,"run_timeout":90},{"area":"misc","nproc":1,"timeout":115,"run_timeout":90},{"area":"model-runner-v2","nproc":2,"timeout":115,"run_timeout":90},{"area":"models-distributed","nproc":2,"timeout":115,"run_timeout":90},{"area":"models-multimodal","nproc":1,"timeout":115,"run_timeout":90},{"area":"pytorch","nproc":1,"timeout":115,"run_timeout":90},{"area":"quantization","nproc":1,"timeout":115,"run_timeout":90},{"area":"weight-loading","nproc":2,"timeout":115,"run_timeout":90}]'
           case "${AREA_SET}" in
             nightly) sel="${nightly}" ;;
             weekend) sel="${weekend}" ;;
