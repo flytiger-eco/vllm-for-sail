@@ -28,12 +28,16 @@ PR 事件（opened / synchronize / labeled / …）
   【快速档】无人工介入               【标签档】两处人工动作
   ↓                                       ↓
   ① check-changes 路径门禁               ① 打 ppu-full 标签 ←〔人工〕
-     diff 命中该 area 路径才跑              labeled 事件只认 ppu-full 本身
-     （路径清单见 §3）                      （需 triage 权限，§8）
-  ↓                                      ↓
-  ② attention / model-executor           ② human-review Gate（轮询等待）
-     entrypoints / samplers                 ←〔人工〕真人 approve PR
-     全绿约 14 min                           上限 6h，超时变红
+     diff 命中该 area 路径才跑              labeled 只认 ppu-full 与
+     （路径清单见 §3）                      ppu-review-waived 两个拉起标签
+  ↓                                         （需 triage 权限，§8）
+  ② attention / model-executor           ↓
+     entrypoints / samplers              ② human-review Gate，二选一放行：
+     全绿约 14 min                          a〔人工〕真人 approve PR（轮询等，
+                                               上限 6h，超时变红）
+                                            b〔人工〕打 ppu-review-waived 标签
+                                               直接豁免（作者无法 approve 自己
+                                               的 PR，单人开发走这条）
                                          ↓
                                          ③basic-correctness / entrypoints-llm
                                             lora / models-basic / engine / kernels
@@ -43,8 +47,10 @@ PR 事件（opened / synchronize / labeled / …）
  ci（Full CI 聚合点，skipped 视为通过）
 ```
 
-两条线共用前置门禁，分叉后各自排队上 PPU，最后汇入 Full CI 聚合点；
-线 B 的①（打标签）与②（approve）是两处**必需的人工动作**，不做就停在原地。
+两条线共用前置门禁、也共用**同一个 CI run**（单组 concurrency，见 §4），分叉后
+各自排队上 PPU，最后汇入 Full CI 聚合点；线 B 的①（打 `ppu-full`）与
+②（真人 approve 或打 `ppu-review-waived` 豁免）是两处**必需的人工动作**，
+不做就停在原地。
 
 三条组织门禁（precheck / ai-code-review / human-review）是组织仓库
 `flytiger-eco/.github` 的 reusable workflow，逻辑集中维护、版本升级对本仓库
@@ -57,10 +63,12 @@ PR 事件（opened / synchronize / labeled / …）
    `model-executor` / `entrypoints` / `samplers`。
    precheck -> (smoke-test//ai-code-review) 都通过后自动排队上 PPU；
    `check-changes` 用 `dorny/paths-filter` 判断 diff 是否命中该 area 的依赖路径，命中才放行进 PPU runner。
-2. **标签档（6 个，打 `ppu-full` + 真人 approve 才跑）**：`basic-correctness` /
+2. **标签档（6 个，打 `ppu-full` + 过审批才跑）**：`basic-correctness` /
    `entrypoints-llm` / `lora` / `models-basic` / `engine` / `kernels`。
-   PR 带 `ppu-full` 标签时，门禁链里出现 human-review（轮询等 approve），
-   审批通过后 6 个 area 才放行。此档
+   PR 带 `ppu-full` 标签时门禁链里出现 human-review，两条放行通道二选一：
+   真人 approve（轮询等待），或再打一个 `ppu-review-waived` 标签直接豁免
+   （GitHub 禁止作者 approve 自己的 PR，单人提交时只能走这条，详见 §2.1）。
+   放行后 6 个 area 才开跑。此档
    `check-changes` **只看标签不看路径**，打上标签即可跑（即使没有修改代码，只要打上这个标签就会自动跑）。
 3. **不在 per-PR 范围（1 个）**：`models-language` 只有 `workflow_dispatch`与nightly
    入口，PR 上不会跑。
@@ -102,33 +110,45 @@ PPU 测试一个不跑，而且不会报错。
 
 1. 门禁：precheck  → (smoke-test//ai-code-review)
 2. **快速档 4 个 area：门禁通过且改动命中各自的路径（清单见 §3）后跑。** 没碰到就全部 skip，check 记绿。全绿约 14 分钟。
-3. **标签档 6 个 area：默认不跑，要门禁 + 打标签(ppu-full) + 等人工审批。** 改了 kernel、engine、模型加载这类底层代码时，给 PR 打上 `ppu-full` 标签 → 该 run 的门禁链里出现
-   Human Review Gate → 至少 1 名真人 approve 后 6 个 area 排队跑。全开要
-   5 小时以上。
+3. **标签档 6 个 area：默认不跑，要门禁 + 打标签(ppu-full) + 过审批。** 改了 kernel、engine、模型加载这类底层代码时，给 PR 打上 `ppu-full` 标签 → 该 run 的门禁链里出现
+   Human Review Gate → 放行后 6 个 area 排队跑。全开要
+   5 小时以上。放行有两条互斥通道：真人 approve（job 名 `Human Review Gate`），
+   或打 `ppu-review-waived` 标签豁免（job 名 `Human Review Gate (Waived)`），
+   任一 success 即放行，另一个显示 skipped 属正常。
 4. **结果：** PR 页面上方是门禁链 checks（Pre-check / Smoke Test /
-   AI Code Review / Human Review Gate / Full CI）；每个 PPU area 的聚合 check
+   AI Code Review / Human Review Gate 或 Human Review Gate (Waived) /
+   Full CI）；每个 PPU area 的聚合 check
    `ppu-<area>-finish` 作为 CI Pipeline run 的嵌套 job 显示。
 
-打标签两种方式，效果一样：
+打标签两种方式，效果一样；想连审批一起免掉就把两个标签一次带上：
 
-| 方式 | 操作 |
+| 目的 | 操作 |
 | --- | --- |
-| GitHub 网页 | PR 右侧 Labels 勾选 `ppu-full` |
-| 命令行 | `gh pr edit <PR号> --repo flytiger-eco/vllm-for-sail --add-label ppu-full` |
+| 只拉起标签档（仍需真人 approve） | 网页勾选 `ppu-full`，或 `gh pr edit <PR号> --repo flytiger-eco/vllm-for-sail --add-label ppu-full` |
+| 拉起标签档 + 豁免审批 | 再勾 `ppu-review-waived`，或 `gh pr edit <PR号> --repo flytiger-eco/vllm-for-sail --add-label ppu-full,ppu-review-waived` |
 
 标签就是普通的 GitHub label，需要本仓库 triage 及以上权限。没权限找maintainer 代打。
+建 PR 时也可以直接带上，省一次事件：`gh pr create --label ppu-full --label ppu-review-waived …`
+——opened 与两个 labeled 事件会同组收敛成一个 run，不会重复跑（§4）。
 
 打标签后注意：
 
-- 标签档 run 与快速档 run 是**两条独立并发线**：打标签不会取消正在跑的
-  快速档，push 新提交也不会取消正在等审批/在跑的标签档。
+- **同一 PR 任何时刻只有一个 CI run**：`ppu-full` / `ppu-review-waived` 与 push 类
+  事件同属一个并发组，后到者取消先到者（旧版分成两条独立并发线，会让
+  6 个标签档重复跑两遍，已修）。存活的那个 run 必然覆盖全部 10 个 area。
+- 打**无关**标签（如 `ready`）另属 noop 组，产生的 run 整体 skip，不会误取消
+  正在跑的主 run。
+- 因此打拉起标签**会**取消正在编译的 build-wheel、从头来一遍；别连着打、
+  别打完马上又 push。
 - 标签已在场时再勾一次不会派发新 run；想重跑标签档，先摘掉再重新打上
   （补发 `labeled` 事件）。
 - **摘掉标签不会取消已经在跑的 job**，要取消只能去 Actions 页手动 cancel。
-- 打标签时若 PR 还没人 approve，Human Review Gate 黄色等待是**预期行为**，
-  审批通过后标签档自动开跑。单 job 上限约 6 小时，等不到审批超时失败后，
-  摘掉重打标签即可重新派发。作者不能 approve 自己的 PR（GitHub 限制），
-  需其他有 read 权限的成员 approve。
+- 没打 `ppu-review-waived` 时，Human Review Gate 黄色等待是**预期行为**，真人
+  approve 后标签档自动开跑；单 job 上限约 6 小时，超时失败后摘掉重打标签
+  即可重新派发。**作者不能 approve 自己的 PR**（GitHub 平台限制，网页 / `gh` /
+  API 一律返回 "Can not approve your own pull request"），要么找其他有 read
+  权限的成员 approve，要么直接打 `ppu-review-waived` 豁免——后者是单人开发
+  时的常规做法（打标签需 triage 权限、在 PR 时间线留痕，可审计）。
 
 ### 2.2 手动跑（暂未合入默认分支，触发不了）
 
@@ -198,8 +218,13 @@ gh workflow run test-area-ppu-attention.yml --ref <你的分支>
 
 - 一台 runner 全仓库共享，所有 PPU job 排队串行；标签档全开会把机器占满
   5 小时以上，白天慎用。
-- **push 新提交会取消你同 PR 正在跑的门禁链 + 快速档 run**；标签档 run 走
-  独立的并发分组（打标签派发），不受 push 取消影响。
+- **单组互斥：同一 PR 任何时刻只有一个 CI Pipeline run。** push 新提交、打
+  `ppu-full`、打 `ppu-review-waived` 都归 `ci-<PR号>-main` 组，后到者取消先到
+  者；存活的那个 run 必然覆盖全部 10 个 area（快速档已不再排除 labeled
+  事件，否则收敛后存活的 labeled run 会丢掉 4 个快速档）。
+- 打**无关**标签（既非 `ppu-full` 也非 `ppu-review-waived`）归 `ci-<PR号>-noop`
+  组：这种 run 的所有 job 都会被闸门 skip，隔离出来才不会把正在编译 wheel
+  的主 run 误取消。
 
 ## 5. 构建与依赖链路
 
@@ -227,11 +252,11 @@ gh workflow run test-area-ppu-attention.yml --ref <你的分支>
 - 失败重跑：Actions 页面对应 run 的 **Re-run failed jobs**。⚠️ Re-run 总是用
   原触发提交的代码与 workflow，**不能用来验证你刚推的修复** —— 验证修复请
   push 新提交或重新 dispatch，并核对 run 页的 commit SHA。
-- 完整重跑：push 一个提交。注意会取消同 PR 正在跑的门禁链 + 快速档旧
-  run（§4）。
+- 完整重跑：push 一个提交。注意会取消同 PR 正在跑的整个旧 run（含标签档，
+  单组互斥，§4）。
 - 标签档重跑：摘除 `ppu-full` 后重新添加（补发 `labeled` 事件）。
 - human-review 超时失败（约 6 小时上限）：重打标签或 push 触发新 run 即可，
-  审批状态不会丢。
+  审批状态不会丢；不想等审批就直接打 `ppu-review-waived`。
 - 缩小范围重跑：workflow_dispatch + `pytest_args`（§2.2）。
 
 ## 7. 已知问题与注意事项
@@ -246,19 +271,23 @@ gh workflow run test-area-ppu-attention.yml --ref <你的分支>
    别连打标签、别频繁空 push。
 4. **fork PR 不跑 PPU**（安全设计，§1）：门禁链照跑，PPU job 跳过。需要 PPU
    验证请在本仓库开分支提 PR。
-5. **门禁链常见问题**：Human Review Gate 黄色等待 = 等真人 approve（预期）；
-   单 job 约 6 小时超时后重打标签或 push；AI Code Review 最长等 Copilot
-   8 分钟，超时失败可稍后重跑；门禁 job 报 startup_failure 说明组织仓库
-   `flytiger-eco/.github` 的 Actions access 未对本仓库放开，联系维护者。
+5. **门禁链常见问题**：`Human Review Gate` 黄色等待 = 等真人 approve（预期），
+   单 job 约 6 小时超时后重打标签或 push，或直接打 `ppu-review-waived` 豁免
+   （豁免时生效的是 `Human Review Gate (Waived)`，前者显示 skipped 属正常）；
+   AI Code Review 最长等 Copilot 8 分钟，超时失败可稍后重跑；门禁 job 报
+   startup_failure 说明组织仓库 `flytiger-eco/.github` 的 Actions access 未对
+   本仓库放开，联系维护者。
 6. **关键字合规不在线上查**：`alibaba-inc.com`、`t-head`、`aone` 等禁用关键字
    由开发者本地 git 钩子在提交前拦截，配置方法见组织门禁接入说明
    （`flytiger-eco/.github` 仓库）。
 
 ## 8. 权限与联系人
 
-- 打 `ppu-full` 标签：需要本仓库 triage 及以上权限；无权限请找 maintainer
-  代打。
-- approve PR（解开 Human Review Gate）：任何有 read 权限的非作者成员。
+- 打 `ppu-full` / `ppu-review-waived` 标签：需要本仓库 triage 及以上权限；
+  无权限请找 maintainer 代打。
+- approve PR（解开 Human Review Gate）：任何有 read 权限的**非作者**成员。
+  作者无法 approve 自己的 PR（GitHub 平台限制），单人开发时用
+  `ppu-review-waived` 标签豁免替代。
 - workflow_dispatch 手动触发：需要本仓库 write 权限。
 - 新增权限、runner/镜像/NAS 等 CI 基础设施问题：联系 PPU CI 维护者（仓库
   maintainer）。
