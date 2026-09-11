@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-expert-parallelism.sh — PPU Expert Parallelism 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
