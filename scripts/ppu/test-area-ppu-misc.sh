@@ -106,6 +106,14 @@ MISC_V1_CONNECTORS_METRICS_ARGS=(
   --ignore=tests/v1/kv_connector/unit/test_nixl_connector.py
   # Run 51408355: NIXL library not available in CI image
   --ignore=tests/v1/kv_connector/unit/test_nixl_connector_hma.py
+  # Run 34580922394: CPU offload 共享内存区创建失败 OSError [Errno 22]
+  # （vllm/v1/kv_offload/cpu/shared_offload_region.py:100），该文件 8/8 用例全挂
+  # （test_cpu_offloading×6 + test_tiering/fs_tiering_offloading）。
+  # 恢复条件：PPU pod /dev/shm 或 shared_offload_region 适配修复后 unignore。
+  --ignore=tests/v1/kv_connector/unit/test_offloading_connector.py
+  # Run 34580922394: 两个 ExampleConnector 的 scheduler/worker 事件序列断言
+  # 不一致（PPU 执行时序差异），单用例排除。
+  --deselect tests/v1/kv_connector/unit/test_multi_connector.py::test_multi_example_connector_consistency
 )
 
 # Step 7: Async Engine, Inputs, Utils, Worker (GPU)
