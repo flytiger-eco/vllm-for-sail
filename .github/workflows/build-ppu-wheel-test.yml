@@ -41,10 +41,10 @@ jobs:
     outputs:
       wheel_version: ${{ steps.version.outputs.wheel_version }}
       artifact_name: ${{ steps.version.outputs.artifact_name }}
-    env:
-      # 宿主侧 ccache 目录：用 runner.temp（绝对路径,workspace 之外,不被 Clean
-      # workspace/checkout 清掉;docker -v 也要求绝对路径）。
-      HOST_CCACHE_DIR: ${{ runner.temp }}/ppu-ccache
+    # 宿主侧 ccache 目录统一为 $RUNNER_TEMP/ppu-ccache（绝对路径,workspace 之外,
+    # 不被 Clean workspace/checkout 清掉;docker -v 也要求绝对路径）。runner 上下文
+    # 只在 step 内可用,故不放 job 级 env——step 里 with: 用 ${{ runner.temp }}、
+    # shell 里用 $RUNNER_TEMP,二者同值。
     steps:
       - name: Clean workspace (remove root-owned files from prior runs)
         run: |
@@ -61,7 +61,7 @@ jobs:
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.HOST_CCACHE_DIR }}
+          path: ${{ runner.temp }}/ppu-ccache
           key: ppu-ccache-${{ runner.os }}-cu13.0-${{ github.sha }}
           restore-keys: |
             ppu-ccache-${{ runner.os }}-cu13.0-
@@ -88,7 +88,7 @@ jobs:
           # 不过度订阅内存。换大核 runner 时无需改脚本，nproc 自动放大。
           export MAX_JOBS="$(nproc)"
           export NVCC_THREADS=1
-          export HOST_CCACHE_DIR="${{ env.HOST_CCACHE_DIR }}"
+          export HOST_CCACHE_DIR="$RUNNER_TEMP/ppu-ccache"
           mkdir -p "${HOST_CCACHE_DIR}"
           bash scripts/ppu/build-ppu-wheel-test.sh \
             "0.23.0" \
@@ -100,13 +100,13 @@ jobs:
       - name: Fix ccache ownership for save
         if: always()
         run: |
-          sudo chown -R "$(id -u):$(id -g)" "${{ env.HOST_CCACHE_DIR }}" || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/ppu-ccache" || true
 
       - name: Save ccache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.HOST_CCACHE_DIR }}
+          path: ${{ runner.temp }}/ppu-ccache
           key: ppu-ccache-${{ runner.os }}-cu13.0-${{ github.sha }}
 
       - name: Verify wheel version
