@@ -1,0 +1,6 @@
+model_name: "deepseek-ai/DeepSeek-V2-Lite"
+accuracy_threshold: 0.25
+num_questions: 200
+num_fewshot: 5
+server_args: "--max-model-len 2048 --offload-group-size 8 --offload-num-in-group 2 --offload-prefetch-step 1 --offload-params w13_weight w2_weight"
+startup_max_wait_seconds: 600

@@ -1,0 +1,6 @@
+model_name: "deepseek-ai/DeepSeek-V2-Lite"
+accuracy_threshold: 0.25
+num_questions: 200
+num_fewshot: 5
+server_args: "--enforce-eager --tensor-parallel-size 2 --data-parallel-size 2 --enable-expert-parallel --enable-eplb --max-model-len 2048"
+startup_max_wait_seconds: 600
