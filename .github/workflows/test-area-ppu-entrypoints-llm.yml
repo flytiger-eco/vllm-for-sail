@@ -9,12 +9,12 @@ name: Entrypoints LLM Test (PPU)
 
 on:
   # 重量级 area（耗时长，占 PPU 卡时间久；本档最长实测 2h14min）：
-  # PR 上由 ppu-full 标签显式拉起，夜间/周末由 nightly-ppu.yml 兜底。
+  # PR 上按路径变更自动触发（打 run-all 标签则强制全跑），夜间/周末由 nightly-ppu.yml 兜底。
   # 依赖路径清单保留在下方 check-changes 的 dorny 过滤器中。
-  # PR 入口收编到 ci.yml：带 ppu-full 标签的 PR 走完完整门禁链
+  # PR 入口收编到 ci.yml：PR（无需标签）走完完整门禁链
   # （precheck → smoke-test ∥ ai-code-review → human-review）后以
-  # workflow_call 调用本 workflow；标签/base 判定在 ci.yml 侧，下方
-  # check-changes 的标签闸门仍生效（双保险）。
+  # workflow_call 调用本 workflow；base 判定在 ci.yml 侧，下方
+  # check-changes 的路径过滤仍生效，run-all 标签可强制全跑。
   workflow_call:
     inputs:
       test_mode:
@@ -79,15 +79,19 @@ jobs:
         id: decide
         env:
           FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
-          HAS_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ppu-full') }}
+          HAS_RUN_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'run-all') }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # 重量级 area 在 PR 上默认不跑，需显式打 ppu-full 标签；
-            # 路径命中结果仅记录，作为后续提升为自动触发档的观测数据。
-            echo "[gate] paths_hit=${FILTER_HIT:-false} ppu_full_label=${HAS_FULL_LABEL}"
-            echo "changes_exist=${HAS_FULL_LABEL}" >> "$GITHUB_OUTPUT"
+            # PR：默认按路径变更决定;打 run-all 标签则无条件执行本 area
+            if [[ "${HAS_RUN_ALL_LABEL}" == "true" ]]; then
+              echo "[gate] run-all 标签命中 -> 强制执行本 area"
+              echo "changes_exist=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "[gate] paths_hit=${FILTER_HIT:-false}"
+              echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
+            fi
           else
-            # 手动触发（workflow_dispatch）：必跑
+            # push / 手动触发（workflow_dispatch）：必跑
             echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
 

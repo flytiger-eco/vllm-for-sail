@@ -1,11 +1,12 @@
 # 定时 PPU 回归——重量级 area 的兜底覆盖。
 #
 # 与 PR 门禁的分工（详见 scripts/ppu/docs/ppu-ci-usage.md）：
-#   PR 自动触发档：attention / model-executor / entrypoints / samplers（约 14min）
-#   PR 标签触发档（ppu-full）：其余 18 个重量级 area，不自动跑
-#   本 workflow：把标签触发档的 18 个 area 连同 3 个 nightly-only area
-#   （models-language / models-distributed / models-multimodal）定时补跑一遍，
-#   保证即使没人打标签也有每日/每周的回归基线。
+#   PR 门禁：全部 area 按路径变更自动触发（打 run-all 标签则强制全跑），
+#   走完 precheck → smoke ∥ ai-review → human-review 后各自派发；只有改到
+#   对应路径的 area 才真正上卡。
+#   本 workflow：把重量级 area 连同 3 个 nightly-only area（models-language /
+#   models-distributed / models-multimodal）按夜间/周末两档定时补跑一遍，
+#   保证即使 PR 未改到相关路径也有每日/每周的回归基线。
 #   注：spec-decode 仅 workflow_dispatch 手动入口（依赖模型未入库），不在本档。
 #
 # 为什么拆两档 cron：area 之间必须串行（理由见下方 max-parallel）。
