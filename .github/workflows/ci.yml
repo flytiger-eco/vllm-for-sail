@@ -66,12 +66,36 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
-  # Stage 2b: PPU wheel 构建
-  # 经 workflow_call 复用 build-ppu-wheel.yml：产出 wheel artifact 供 22 个 area 共用
+  # ---- Stage 2b: PPU wheel 构建 ----
+  # [ci-smoke] 本验证分支临时改为「转存现成 wheel」：复用 build-ppu-wheel-test
+  # run 34571583490 的产物（构建于 feat/gha-ppu-test HEAD，vllm 源码与本分支
+  # 零 diff），跨 run 下载后以生产 artifact 名重新上传，下游 area 无感知。
+  # 省约 90min 生产构建；正式链路仍是 uses: ./.github/workflows/build-ppu-wheel.yml。
   build-wheel:
     name: Build PPU Wheel
     needs: precheck
-    uses: ./.github/workflows/build-ppu-wheel.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read # 跨 run 下载 artifact
+    outputs:
+      artifact_name: wheel-py3.12-cu13.0-x86_64-v0_23_0
+    steps:
+      - name: Fetch prebuilt wheel from build-ppu-wheel-test run
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-test-py3.12-cu13.0-x86_64-v0_23_0
+          repository: flytiger-eco/vllm-for-sail
+          run-id: 34571583490
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ci-wheel
+      - name: Re-upload as CI wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py3.12-cu13.0-x86_64-v0_23_0
+          path: ci-wheel/*.whl
+          retention-days: 1
+          if-no-files-found: error
 
   # ---- Stage 3: 人工审批门禁 ----
   # 普通 PR 默认走组织 reusable 门禁轮询真人 APPROVED；PR 带 skip-human-review
