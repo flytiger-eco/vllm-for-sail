@@ -33,23 +33,49 @@ PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simp
 # 为什么在 pip --retries 之外再包一层：pip 的重试只覆盖连接层错误，索引
 # 返回空版本列表（"ERROR: ... (from versions: none)"）属应用层结果，pip
 # 视为确定性失败、不重试，而这恰好是并发拉包时的表现。
-# 实测依据（2026-09-09）：4 个 area 并发起 Pod 时全部卡在 pytest 工具链
-# 安装，报 pytest-asyncio from versions: none；而同一行代码在 3.5h 前单
-# area 跑成功，且 index 页面直连正常（HTTP 200、版本列表含所需版本、匿名
-# 可读）。既然包与权限都没问题，按可恢复的瞬时故障处理。
+# 实测依据：
+# - 2026-09-09：4 个 area 并发起 Pod 时全部卡在 pytest 工具链安装，报
+#   pytest-asyncio from versions: none；当时索引页直连正常，按瞬时故障处理。
+# - 2026-09-10（run 34440797915）：故障升级为分钟级——benchmarks/pytorch/cuda
+#   的 pytest-asyncio 空页持续 ≥5min，旧窗口（4 次 × ~35s ≈ 2min）盖不住，
+#   三个 area 全灭（老 area models-basic/samplers/kernels 同款）。故窗口拉长到
+#   ~10min，并加 NAS wheelhouse 兜底。
+# NAS wheelhouse（--find-links 常挂）：mirror 空页时 pip 仍能从 NAS 的 wheel
+# 解析出版本，不等重试直接免疫；装成功后顺手回写（自愈播种）。目录不存在
+# 则自动跳过，无硬依赖。首次播种（任一可写 NAS 的机器执行一次）：
+#   mkdir -p /nas_aisw/devops/pip-wheelhouse && \
+#   python3 -m pip download --no-deps pytest pytest-asyncio tblib \
+#     pytest-shard pyyaml -d /nas_aisw/devops/pip-wheelhouse \
+#     -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
 # 退避带随机抖动：并发 Pod 若同步重试会再次撞在一起。
+PPU_WHEELHOUSE="${PPU_WHEELHOUSE:-/nas_aisw/devops/pip-wheelhouse}"
 _pip_retry() {
-    local max=4 n=1 wait_s
+    local max=8 n=1 wait_s
+    local wh_args=()
+    if [[ -d "${PPU_WHEELHOUSE}" ]]; then
+        wh_args=(--find-links "${PPU_WHEELHOUSE}")
+    fi
     while true; do
         # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）
-        if ${PIP_INSTALL} $@ -i "${PPU_PIP_INDEX}"; then
+        if ${PIP_INSTALL} $@ -i "${PPU_PIP_INDEX}" "${wh_args[@]}"; then
+            # 自愈回写（best-effort，失败不影响主流程）：装成功的包沉淀到
+            # wheelhouse，供后续 mirror 空页时 --find-links 命中
+            if [[ -d "${PPU_WHEELHOUSE}" ]] && touch "${PPU_WHEELHOUSE}/.rw_probe" 2>/dev/null; then
+                rm -f "${PPU_WHEELHOUSE}/.rw_probe"
+                local pkgs=() a
+                for a in "$@"; do [[ "${a}" == -* ]] || pkgs+=("${a}"); done
+                python3 -m pip download --no-cache-dir --no-deps -q \
+                    "${pkgs[@]}" -d "${PPU_WHEELHOUSE}" -i "${PPU_PIP_INDEX}" \
+                    2>/dev/null || true
+            fi
             return 0
         fi
         if [[ ${n} -ge ${max} ]]; then
             echo "[deps] ERROR: pip install failed after ${max} attempts: $*" >&2
             return 1
         fi
-        wait_s=$(( n * 15 + RANDOM % 20 ))
+        wait_s=$(( n * 30 > 90 ? 90 : n * 30 ))
+        wait_s=$(( wait_s + RANDOM % 30 ))
         echo "[deps] pip install failed (attempt ${n}/${max}), retry in ${wait_s}s: $*" >&2
         sleep "${wait_s}"
         n=$(( n + 1 ))

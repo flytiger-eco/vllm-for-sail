@@ -27,23 +27,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # 单组互斥，杜绝「同一 PR 两个 CI Pipeline run 并跑、18 个标签档重复跑两遍」。
-  #
-  # 为什么必须同组：创建 PR 时自带 ppu-full 会同时产生 opened 与 labeled 两个
-  # 事件、各自拉起一个 run。旧版按事件类型分成 push/label 两组并存，两个 run
-  # 都派发标签档，18 个重量级 area 白跑一遍。改为同组 + cancel-in-progress 后，
-  # 后到者取消先到者，最终只剩一个 run；再配合快速档不再排除 labeled(ppu-full)，
-  # 存活的那个 run 必然覆盖全部 22 个 area。
-  #
-  # 为什么给「无关标签」单开 noop 组：PR 已带 ppu-full、主 run 正在编译
-  # build-wheel 时，若有人打个无关标签（如 ready），新 run 的所有 job 都会被
-  # 下方闸门 skip 掉。这种空 run 进主组就会把正在跑的主 run 误取消、wheel
-  # 白编译，故隔离到 noop 组自生自灭。
-  #
-  # 两个「显式拉起」标签都归主组：ppu-full 拉起标签档，ppu-review-waived 放行
-  # 门禁。后者必须也走主组，否则「先 push 再打豁免标签」时新 run 会被归到 noop
-  # 组全 skip，主 run 仍卡在轮询门禁上，必须再 re-run 才能生效（隐形顺序陷阱）。
-  # 归主组后打豁免标签即拉起一个覆盖全 22 area 的新 run，无需关心操作顺序。
+  # 单组互斥，保证只有一个 run覆盖全部 22 个 area。
   group: ci-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && !contains(fromJSON('["ppu-full", "ppu-review-waived"]'), github.event.label.name) && 'noop' || 'main' }}
   cancel-in-progress: true
 

@@ -5,18 +5,10 @@
 # 调用方：.github/workflows/test-area-ppu-entrypoints-llm.yml（容器内，
 # cwd = /workspace）。
 #
-# 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/entrypoints_llm.yaml
-# 的迁移快照（见下方 EP_LLM_SINGLE_*_ARGS / EP_LLM_MULTI_RPC_ARGS，调整用例
-# 直接改这里）。模型走 /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw +
-# HF_HUB_CACHE）。
-#
 # 环境变量：
 #   TEST_MODE   all(默认) | single | multi — 本 area 原有 multi 段（2 卡
 #               TP=2），2026-08-27 起停用（FlexAttention OOM，见下），
 #               当前仅 single 段有用例
-#
-# 机制移植自 aone_ci/scripts/test_area_ppu_entrypoints_llm.sh（AUTO-GENERATED
-# 不可手改，故在此复刻）：junit EXIT trap 合并 + 崩溃补 error case。
 # ==============================================================================
 
 set -euo pipefail
@@ -45,7 +37,7 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # 子集（单 file 拆细）；其他 entrypoints step 归 entrypoints area。
 #
 # Step 1: test_chat — 跳过 vision(Phi-3.5) + thinking(Qwen3-0.6B) fixture
-# 相关 tests（原 yaml 注释）；两 fixture 均为函数级、仅服务被排除用例，
+# 相关 tests；两 fixture 均为函数级、仅服务被排除用例，
 # -k 排除后不实例化，故无需为其建 symlink
 EP_LLM_SINGLE_CHAT_ARGS=(
   tests/entrypoints/llm/test_chat.py
@@ -93,10 +85,6 @@ EP_LLM_MULTI_RPC_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True（上游
-# TP 场景的 CUDA VMM workaround）——PPU 兼容层疑不支持 VMM API，是虚假
-# OOM 头号嫌疑（详见 test-area-ppu-basic-correctness.sh 同段注释；
-# Aone 侧从不设它且全绿）
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -131,8 +119,7 @@ fi
 # ------------------------------------------------------------------------------
 # 路径优先取红区已存模型清单 scripts/ppu/model_alises/*.json 的 path 字段
 # （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的取 Aone 侧
-# ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时
-# WARN 并跳过（该模型的用例会失败，日志里可见原因）。
+# ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时 WARN 并跳过。
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -226,15 +213,11 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）。合并 test.xml 的
-# testsuite name 已被改写为 label（丢失 shard 维度），故此处从原始
-# shard xml 提取。宿主 workflow 把本文件 cat 进 GITHUB_STEP_SUMMARY，
-# 在 run 的 Summary 页直接渲染（容器内拿不到该 env，需 workflow 接力）
+# ---- step summary：分 shard 统计表（markdown）
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
 def _stats(path):
-    # junit 根节点 pytest 新旧版可能为 <testsuites> 或 <testsuite>
     root_ = ET.parse(path).getroot()
     suites = [root_] if root_.tag == "testsuite" else list(root_.iter("testsuite"))
     agg = dict.fromkeys(COLS, 0.0)
@@ -288,8 +271,6 @@ PYEOF
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
   # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
-  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
-  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
@@ -328,9 +309,6 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
-      # 表达式返回 1，若它是函数/分支的最后一条命令，函数返回码变成 1，
-      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done

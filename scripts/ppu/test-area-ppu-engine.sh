@@ -4,22 +4,9 @@
 # ------------------------------------------------------------------------------
 # 调用方：.github/workflows/test-area-ppu-engine.yml（容器内，cwd = /workspace）。
 #
-# 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/engine.yaml 的
-# 迁移快照（见下方 ENGINE_SINGLE_*，调整用例直接改这里）。
-# 模型走 /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw + HF_HUB_CACHE）。
-#
 # 环境变量：
 #   TEST_MODE   all(默认) | single   — 本 area 无 multi 段（上游 V1 e2e 2/4 GPU
 #                                      step 跑 spec_decode，PPU 单卡不适用）
-#
-# 机制移植自 aone_ci/scripts/test_area_ppu_engine.sh（该文件 AUTO-GENERATED
-# 不可手改，故在此复刻）：
-#   - single: 单进程 × 3 step（engine_basic / v1_engine / v1_e2e_general），
-#     均限制可见 1 卡（对齐 Aone 1-PPU pod 语义：multi_gpu_test 用例在 1 卡下
-#     自动 skip——test_engine_core_client.py num_gpus=4、test_engine_core.py
-#     num_gpus=2 均靠此机制跳过）
-#   - junit:  每 step 落 xml，EXIT trap 合并到 test-results/test.xml，
-#     pytest 崩溃时也要补 error case（不能让 CI 信号失真）
 # ==============================================================================
 
 set -euo pipefail
@@ -46,7 +33,7 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # ------------------------------------------------------------------------------
 # Step 1: engine_basic — tests/engine/test_arg_utils.py + 根目录
 #   test_sequence/logger/vllm_port（均为无 GPU 用例）。
-#   快照时只取 test_arg_utils.py 而非整个 tests/engine/ 目录，原因（原 yaml 注释）：
+#   快照时只取 test_arg_utils.py 而非整个 tests/engine/ 目录，原因：
 #   - test_short_mm_context.py → llava-hf/llava-1.5-7b-hf 多模态，暂不覆盖
 #   - test_config.py → 大量 ModelConfig() 调用下载 HF config，红区依赖重
 ENGINE_SINGLE_BASIC_ARGS=(
@@ -93,11 +80,11 @@ ENGINE_SINGLE_V1_ARGS=(
 #   streaming、context_length、sliding_window、cascade_attention）
 ENGINE_SINGLE_E2E_ARGS=(
   tests/v1/e2e/general/
-  # gemma-3n-E2B-it 模型较大，首版不覆盖（原 yaml 注释）
+  # gemma-3n-E2B-it 模型较大，首版不覆盖
   --ignore=tests/v1/e2e/general/test_kv_sharing_fast_prefill.py
-  # Qwen3-Next-80B-A3B-Instruct-FP8，PPU 单卡跑不了 80B（原 yaml 注释）
+  # Qwen3-Next-80B-A3B-Instruct-FP8，PPU 单卡跑不了 80B
   --ignore=tests/v1/e2e/general/test_mamba_prefix_cache.py
-  # Qwen3-Embedding-0.6B embedding model，首版 defer（原 yaml 注释）
+  # Qwen3-Embedding-0.6B embedding model，首版 defer
   --ignore=tests/v1/e2e/general/test_pooling_chunked_prefill.py
   # JackFram/llama-160m 未入库红区（GHA 清单与 Aone aliases 均 MISS）；
   # 该文件仅 test_decoder_max_context_length_validation 一个参数化用例，
@@ -113,10 +100,6 @@ ENGINE_SINGLE_E2E_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True（上游
-# TP 场景的 CUDA VMM workaround）——PPU 兼容层疑不支持 VMM API，是虚假
-# OOM 头号嫌疑（详见 test-area-ppu-basic-correctness.sh 同段注释；
-# Aone 侧从不设它且全绿）
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -151,8 +134,7 @@ fi
 # ------------------------------------------------------------------------------
 # 路径优先取红区已存模型清单 scripts/ppu/model_alises/*.json 的 path 字段
 # （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的取 Aone 侧
-# ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时
-# WARN 并跳过（该模型的用例会失败，日志里可见原因）。
+# ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时 WARN 并跳过。
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -275,15 +257,11 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）。合并 test.xml 的
-# testsuite name 已被改写为 label（丢失 shard 维度），故此处从原始
-# shard xml 提取。宿主 workflow 把本文件 cat 进 GITHUB_STEP_SUMMARY，
-# 在 run 的 Summary 页直接渲染（容器内拿不到该 env，需 workflow 接力）
+# ---- step summary：分 shard 统计表（markdown）
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
 def _stats(path):
-    # junit 根节点 pytest 新旧版可能为 <testsuites> 或 <testsuite>
     root_ = ET.parse(path).getroot()
     suites = [root_] if root_.tag == "testsuite" else list(root_.iter("testsuite"))
     agg = dict.fromkeys(COLS, 0.0)
@@ -337,8 +315,6 @@ PYEOF
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
   # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
-  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
-  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
@@ -377,9 +353,6 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
-      # 表达式返回 1，若它是函数/分支的最后一条命令，函数返回码变成 1，
-      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done

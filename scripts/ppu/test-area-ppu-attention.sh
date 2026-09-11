@@ -2,8 +2,6 @@
 # ==============================================================================
 # scripts/ppu/test-area-ppu-attention.sh — PPU Attention 测试执行（GitHub Actions）
 # 调用方：.github/workflows/test-area-ppu-attention.yml（容器内，cwd=/workspace）
-# 完全自包含（机制复刻自 aone_ci 的 AUTO-GENERATED 脚本）：单进程单 step，
-# junit EXIT trap 合并 + 崩溃兜底；用例选集见下方 ATTN_SINGLE_ARGS。
 # 环境变量：TEST_MODE=all(默认)|single（本 area 无 multi 用例）
 # 模型：无真模型；唯 test_indexer_deepseek_v4_slot_mapping.py 需解析
 #   Llama-3-8B 的 HF config，由下方 [stub] 段本地满足。
@@ -51,8 +49,6 @@ ATTN_SINGLE_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 禁止 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True：PPU 兼容层疑不支持
-# VMM API，是虚假 OOM 头号嫌疑（Aone 侧从不设它且全绿）
 
 # 默认离线；PPU_TEST_ONLINE=1 可放开（本 area 无下载需求，仅为行为一致）
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -179,7 +175,6 @@ SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
 def _stats(path):
-    # junit 根节点 pytest 新旧版可能为 <testsuites> 或 <testsuite>
     root_ = ET.parse(path).getroot()
     suites = [root_] if root_.tag == "testsuite" else list(root_.iter("testsuite"))
     agg = dict.fromkeys(COLS, 0.0)
@@ -233,8 +228,6 @@ PYEOF
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
   # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
-  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
-  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
@@ -273,8 +266,6 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1`——条件为假时表达式整体
-      # 返回 1，顶层 set -e 会误杀脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done

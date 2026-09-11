@@ -4,18 +4,8 @@
 # ------------------------------------------------------------------------------
 # 调用方：.github/workflows/test-area-ppu-benchmarks.yml（容器内，cwd = /workspace）。
 #
-# 完全自包含,不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/benchmarks.yaml 的
-# 迁移快照（见下方 BENCH_SINGLE_ARGS,调整用例直接改这里）。
-# 模型走 /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw + HF_HUB_CACHE）。
-#
 # 环境变量：
-#   TEST_MODE   all(默认) | single   — 本 area 为 single-only（Aone extras 仅 single 段）
-#
-# 机制移植自 aone_ci/scripts/test_area_ppu_benchmarks.sh（该文件
-# AUTO-GENERATED 不可手改,故在此复刻）：
-#   - single: 单进程单 step,跑 tests/benchmarks/（bench CLI 单元测试 + 参数解析）
-#   - junit:  每 step 落 xml,EXIT trap 合并到 test-results/test.xml,
-#     pytest 崩溃时也要补 error case（不能让 CI 信号失真）
+#   TEST_MODE   all(默认) | single   — 本 area 为 single-only
 #
 # 上游对位 .buildkite/test_areas/benchmarks.yaml（3 step）,PPU scope 仅取
 # "Benchmarks CLI Test" → pytest tests/benchmarks/；另两个 step 红区不可用：
@@ -45,10 +35,7 @@ TMP_JUNIT="/tmp/ppu-benchmarks-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [deps] area 特有依赖：pandas（test_plot_filters.py 顶层 `import pandas as pd`,
-# 缺失则 collection 阶段即失败；vllm.benchmarks.sweep.plot 内部对 pandas 用
-# PlaceholderModule 兜底,但测试文件本身是硬依赖）。镜像预装则跳过——不碰镜像
-# 已有栈；缺失才从 flytiger PyPI 补。（numpy 为 vllm 依赖,恒在,不单独处理）
+# [deps] area 特有依赖：pandas
 # ------------------------------------------------------------------------------
 if python3 -c "import pandas" 2>/dev/null; then
   echo "[deps] pandas already installed: $(python3 -c 'import pandas; print(pandas.__version__)')"
@@ -63,11 +50,8 @@ fi
 # ------------------------------------------------------------------------------
 # single = Aone "benchmarks single" job（1-PPU pod）：
 #   tests/benchmarks/ — benchmark CLI 单元测试 + 参数解析测试。
-# 目录含 8 个 test file + 1 个 sweep 子目录,PPU 跑其中安全子集：
-#   test_bench_startup / test_latency_cli / test_throughput_cli / test_serve_cli
-#   （后三者 --load-format dummy,仅需模型 config/tokenizer,不下权重）,
-#   test_plot_filters（纯单元,需 pandas）, sweep/test_param_sweep（纯单元,无外部依赖）。
-# 以下两个文件 ignore（快照自原 yaml 注释）：需 gpt2 tokenizer,红区离线不可用,
+
+# 以下两个文件 ignore：需 gpt2 tokenizer,红区离线不可用,
 # run 49488451 确认全量跑时这两个文件共 18 ERROR：
 #   - test_random_dataset.py                  需 gpt2 tokenizer offline
 #   - test_random_multimodal_dataset_video.py 需 cv2 + gpt2 tokenizer
@@ -84,11 +68,6 @@ BENCH_SINGLE_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True（上游
-# TP 场景的 CUDA VMM workaround）——PPU 兼容层疑不支持 VMM API,是虚假
-# OOM 头号嫌疑：96 GiB free 时 20 MiB 分配失败且 free>total 统计错乱
-# （Aone 侧从不设它且全绿,DEC-0013 当时明确决定不引入）。删除重跑验证；
-# 若虚假 OOM 仍现再查 PPU SDK/驱动
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -123,8 +102,7 @@ fi
 # ------------------------------------------------------------------------------
 # 路径优先取红区已存模型清单 scripts/ppu/model_alises/*.json 的 path 字段
 # （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的按 Aone
-# /ppusw 同构路径标注"待确认"。路径不存在时 WARN 并跳过（该模型的用例
-# 会失败,日志里可见原因）。
+# /ppusw 同构路径标注"待确认"。路径不存在时 WARN 并跳过。
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -139,9 +117,6 @@ MODEL_MAP = {
     # /ppusw 侧是 v3.1 目录,以红区清单的 v3.2 为准,与 basic-correctness 一致）
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
-    # 备注：test_random_dataset.py / test_random_multimodal_dataset_video.py
-    # 依赖 gpt2 tokenizer,两文件已在 [tests] 段 --ignore,故 gpt2 不入 MODEL_MAP；
-    # 入库红区并移除对应 --ignore 后在此补路径。
 }
 
 HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(
@@ -217,15 +192,11 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）。合并 test.xml 的
-# testsuite name 已被改写为 label（丢失 shard 维度）,故此处从原始
-# shard xml 提取。宿主 workflow 把本文件 cat 进 GITHUB_STEP_SUMMARY,
-# 在 run 的 Summary 页直接渲染（容器内拿不到该 env,需 workflow 接力）
+# ---- step summary：分 shard 统计表（markdown）
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
 def _stats(path):
-    # junit 根节点 pytest 新旧版可能为 <testsuites> 或 <testsuite>
     root_ = ET.parse(path).getroot()
     suites = [root_] if root_.tag == "testsuite" else list(root_.iter("testsuite"))
     agg = dict.fromkeys(COLS, 0.0)
@@ -279,8 +250,6 @@ PYEOF
   # 容器以 root 运行,产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
   # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
-  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
-  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
@@ -319,9 +288,6 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
-      # 表达式返回 1,若它是函数/分支的最后一条命令,函数返回码变成 1,
-      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done

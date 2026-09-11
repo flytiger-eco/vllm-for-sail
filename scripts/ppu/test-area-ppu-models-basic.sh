@@ -5,18 +5,11 @@
 # 调用方：.github/workflows/test-area-ppu-models-basic.yml（容器内，
 # cwd = /workspace）。
 #
-# 完全自包含，不依赖 aone_ci/。用例选集是 aone_ci/ppu_extras/models_basic.yaml
-# 的迁移快照（见下方 MB_SINGLE_ARGS，调整用例直接改这里）。模型走
-# /nas_aisw 预置卷（docker -v /nas_aisw:/nas_aisw + HF_HUB_CACHE）。
-#
 # 环境变量：
 #   TEST_MODE   all(默认) | single   — 本 area 无 multi 段（上游 models_basic
 #                                      5 step 全是单卡；test_transformers::
 #                                      test_distributed 是 @multi_gpu_test(2)，
 #                                      单卡模式自动 SKIP）
-#
-# 机制移植自 aone_ci/scripts/test_area_ppu_models_basic.sh（AUTO-GENERATED 不可
-# 手改，故在此复刻）：junit EXIT trap 合并 + 崩溃补 error case。
 # ==============================================================================
 
 set -euo pipefail
@@ -39,11 +32,9 @@ TMP_JUNIT="/tmp/ppu-models-basic-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [deps] area 特有 pip 依赖（先 import 探测再补装；镜像预装则跳过）
-# 出处：ppu_extras/models_basic.yaml extra_pip_install —— tests/models/
-# registry.py 的引用链在 collection 阶段 module-level import 触发缺包
+# [deps] area 特有 pip 依赖
 # ------------------------------------------------------------------------------
-PIP_INSTALL="python3 -m pip install --no-cache-dir"
+PIP_INSTALL="python3 -m pip install --no-cache-dir --retries 5 --timeout 30"
 PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
 for pkg in terratorch einops timm regex; do
   if python3 -c "import ${pkg}" 2>/dev/null; then
@@ -53,11 +44,26 @@ for pkg in terratorch einops timm regex; do
     if [ "${pkg}" = "terratorch" ]; then
       # mirror 上 stringzilla 只剩 FlyTiger 壳包（无官方 wheel，
       # cp312+cuda13.0 无预编译产物必炸）——容错跳过，防止 set -e
-      # 杀整个 step；Prithvi/Terratorch 用例已 deselect 兜底
+      # 杀整个 step；Prithvi/Terratorch 用例已 deselect 兜底。
+      # 确定性失败保持单次尝试，不走重试白烧时间
       ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}" || \
         echo "[deps] WARN: ${pkg} install failed — continue without it"
     else
-      ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}"
+      # einops/timm/regex 是 registry.py collection 硬依赖，装不上必红。
+      # 但索引在多 area Pod 并发拉包时瞬时返回空版本列表（"from versions:
+      # none"），pip 视其为确定性失败、--retries 不覆盖，须应用层重试
+      # （实证：2026-09-10 run 34340819694 timm 撞此杀 Pod，当时 timm 索引页
+      # 实测 HTTP 200、版本列表完整）。抖动退避防并发 Pod 同步重试再撞
+      for attempt in 1 2 3 4; do
+        if ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}"; then
+          break
+        fi
+        if [ "${attempt}" -eq 4 ]; then
+          echo "[deps] ERROR: ${pkg} install failed after ${attempt} attempts" >&2
+          exit 1
+        fi
+        sleep "$(( attempt * 15 + RANDOM % 20 ))"
+      done
     fi
   fi
 done
@@ -65,7 +71,7 @@ done
 # ------------------------------------------------------------------------------
 # [tests] 用例选集（快照自 aone_ci/ppu_extras/models_basic.yaml single 段）
 # ------------------------------------------------------------------------------
-# scope 决策（原 yaml 注释）：对位上游 models_basic 的 "Basic Models Tests
+# scope 决策：对位上游 models_basic 的 "Basic Models Tests
 # (Other)" partial —— test_transformers.py + test_registry.py；
 # test_terratorch.py 未列入（2 个 Prithvi-EO-2.0-300M 待入库，defer）；
 # "Initialization"/"Extra Initialization" step defer（small_subset 12 archs
@@ -97,10 +103,6 @@ MB_SINGLE_ARGS=(
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
-# 注意：禁止 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True（上游
-# TP 场景的 CUDA VMM workaround）——PPU 兼容层疑不支持 VMM API，是虚假
-# OOM 头号嫌疑（详见 test-area-ppu-basic-correctness.sh 同段注释；
-# Aone 侧从不设它且全绿）
 
 # 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
@@ -136,8 +138,7 @@ fi
 # 路径优先取红区已存模型清单 scripts/ppu/model_alises/*.json 的 path 字段
 # （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的取 Aone 侧
 # ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时
-# WARN 并跳过（该模型的用例会失败，日志里可见原因）——本 area 属
-# first-deploy red 模式，MISS 即预期内的 RED 来源。
+# WARN 并跳过——本 area 属 first-deploy red 模式，MISS 即预期内的 RED 来源。
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -244,15 +245,11 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）。合并 test.xml 的
-# testsuite name 已被改写为 label（丢失 shard 维度），故此处从原始
-# shard xml 提取。宿主 workflow 把本文件 cat 进 GITHUB_STEP_SUMMARY，
-# 在 run 的 Summary 页直接渲染（容器内拿不到该 env，需 workflow 接力）
+# ---- step summary：分 shard 统计表（markdown）
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
 def _stats(path):
-    # junit 根节点 pytest 新旧版可能为 <testsuites> 或 <testsuite>
     root_ = ET.parse(path).getroot()
     suites = [root_] if root_.tag == "testsuite" else list(root_.iter("testsuite"))
     agg = dict.fromkeys(COLS, 0.0)
@@ -306,8 +303,6 @@ PYEOF
   # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
   # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
-  # worker Pod 与编排 runner 容器共享同一 NAS（/mnt/wl_nas ↔ /wl_nas），宿主
-  # workflow 的 Publish test summary 步骤读取并 cat 进 GITHUB_STEP_SUMMARY。
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
@@ -346,9 +341,6 @@ _run_step() {
     for pid in "${pids[@]}"; do
       set +e; wait "${pid}"; local rc=$?; set -e
       echo "[shard] shard ${i} pid=${pid} rc=${rc}"
-      # 注：不可写成 `[ $rc -ne 0 ] && rc_total=1` —— 条件为假时整个
-      # 表达式返回 1，若它是函数/分支的最后一条命令，函数返回码变成 1，
-      # 顶层 set -e 会在函数调用处杀掉脚本（测试全过反而 exit 1 的元凶）
       if [ "${rc}" -ne 0 ]; then rc_total=1; fi
       i=$((i + 1))
     done
