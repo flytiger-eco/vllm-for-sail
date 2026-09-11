@@ -16,7 +16,11 @@
 name: Models Distributed Test (Nightly)
 
 # 不放 schedule/push/PR 触发，避免与聚合 workflow 重复调度。
+# [ci-smoke] 临时 push 触发器：dispatch 要求 workflow 存在于默认分支，故用
+# 一次性分支 push 触发做首跑验证（勿合并，验证后删分支）。
 on:
+  push:
+    branches: [test/ppu-15-areas-dispatch]
   workflow_dispatch:
     inputs:
       test_mode:
