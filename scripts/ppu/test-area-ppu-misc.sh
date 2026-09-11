@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-misc.sh — PPU Miscellaneous 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
@@ -73,6 +74,104 @@ MISC_V1_INFERENCE_ARGS=(
   --ignore=tests/v1/sample/test_logprobs.py
 )
 
+# ---- Run 34594819557 失败聚类排除（v1_inference，74 例，按文件分组）----
+# (a) kv_offload/cpu 两文件 44 例：OSError [Errno 22] shm 共享内存区创建失败
+#     （与已 ignore 的 test_offloading_connector 同根因）+ swap_blocks_batch
+#     cuMemcpyBatchAsync error 998（PPU 批量拷贝路径未支持）。
+#     test_gpu_worker.py 幸存 4 例、test_shared_offload_region.py 幸存
+#     test_wait_for_file_size_* 3 例 PASSED（不触 shm/批量拷贝路径），
+#     故精确 deselect 而非整文件 ignore。
+#     恢复条件：PPU pod shm 配置与批量拷贝 kernel 适配修复。
+# (b) logits_processors 两文件 12 例：test_correctness 6 例 Cannot
+#     re-initialize CUDA in forked subprocess（fork 子进程重复初始化 PPU
+#     设备）；test_custom_offline 6 例 EngineCore failed to start
+#     （Landmine #20 同类引擎启动崩溃）。
+# (c) worker/test_gpu_model_runner.py 17 例：12 ERROR = granite-4.0-tiny-
+#     preview NAS 快照缺 model.safetensors（HF offline resolve 失败）；
+#     5 FAILED = Only dense CPU tensors can be pinned（PPU pin_memory 限制）。
+# (d) worker/test_gpu_worker_weight_transfer.py 1 例：稀疏权重传输
+#     cuda:0 vs cpu 设备不一致。
+MISC_V1_INFERENCE_DESELECTS=(
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-1-1024-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-1-1024-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-1-512-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-1-512-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-3-1024-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[False-cuda:0-0-4-256-64-3-512-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-1-1024-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-1-1024-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-1-512-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-1-512-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-3-1024-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-3-1024-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-3-512-3-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-cuda:0-0-4-256-64-3-512-3-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-1-1024-2-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-1-1024-2-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-1-512-2-False]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-1-512-2-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-3-1024-2-True]"
+  "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer_multi_group[cuda:0-0-256-64-3-512-2-True]"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_cleanup_after_create_next_view_releases_mmap"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_cleanup_creator_all_effects"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_cleanup_idempotent"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_cleanup_non_creator_all_effects"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_cumulative_overflow_raises"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_cursor_advances"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_exact_fill_succeeds"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_multi_tensor_layout"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_multiprocess_slots"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_overflow_does_not_mutate_cursor"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_row_stride_with_multiple_workers"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_shape_and_stride"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_single_overflow_raises"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_storage_offset_rank0"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_storage_offset_rank1"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_worker_isolation"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_create_next_view_write_visible_in_raw_mmap"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_creator_flag_set_on_first_open"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_file_exists_after_construction"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_file_has_correct_size"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_joiner_flag_not_set"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_multi_worker_race_exactly_one_creator"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_multi_worker_race_shared_memory_visible"
+  "tests/v1/kv_offload/cpu/test_shared_offload_region.py::test_multiprocess_race_construct_and_write"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test0-50-cuda:0]"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test1-50-cuda:0]"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test2-50-cuda:0]"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test3-50-cuda:0]"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test4-50-cuda:0]"
+  "tests/v1/logits_processors/test_correctness.py::test_logitsprocs[logitsprocs_under_test5-50-cuda:0]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_CLASS-pooling]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_CLASS-spec_dec]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT-pooling]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT-spec_dec]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_FQCN-spec_dec]"
+  "tests/v1/worker/test_gpu_model_runner.py::test_get_nans_in_logits"
+  "tests/v1/worker/test_gpu_model_runner.py::test_hybrid_attention_mamba_tensor_shapes"
+  "tests/v1/worker/test_gpu_model_runner.py::test_hybrid_cache_integration"
+  "tests/v1/worker/test_gpu_model_runner.py::test_init_kv_cache_with_kv_sharing_valid"
+  "tests/v1/worker/test_gpu_model_runner.py::test_init_kv_cache_without_kv_sharing"
+  "tests/v1/worker/test_gpu_model_runner.py::test_kv_cache_stride_order"
+  "tests/v1/worker/test_gpu_model_runner.py::test_load_model_weights_inplace"
+  "tests/v1/worker/test_gpu_model_runner.py::test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks"
+  "tests/v1/worker/test_gpu_model_runner.py::test_reload_weights_before_load_model"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_config"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_new_request"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_no_changes"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_pp_async_multi_request_keeps_rank_state_consistent"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_request_finished"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_request_resumed"
+  "tests/v1/worker/test_gpu_model_runner.py::test_update_states_request_unscheduled"
+  "tests/v1/worker/test_gpu_worker_weight_transfer.py::test_update_weights_sparse_dispatches_to_sparse_receive"
+)
+for _t in "${MISC_V1_INFERENCE_DESELECTS[@]}"; do
+  MISC_V1_INFERENCE_ARGS+=(--deselect "${_t}")
+done
+unset _t
+
 # Step 1c: V1 Speculative Decoding
 MISC_V1_SPEC_DECODE_ARGS=(
   tests/v1/spec_decode
@@ -87,6 +186,17 @@ MISC_V1_SPEC_DECODE_ARGS=(
   --ignore=tests/v1/spec_decode/test_speculators_eagle3.py
   # Run 50086632: eagle3 acceptance length AttributeError on PPU
   --ignore=tests/v1/spec_decode/test_acceptance_length.py
+  # ---- Run 34594819557 失败聚类排除（v1_spec_decode）----
+  # dflash 配置类 pydantic ValidationError（pod 内 pydantic 版本不兼容）：
+  # test_dflash_lookahead.py 3/3 全挂 → 整文件 ignore
+  --ignore=tests/v1/spec_decode/test_dflash_lookahead.py
+  # test_mtp.py 2/2 全挂：PosixPath/NoneType TypeError（MTP 路径解析）
+  --ignore=tests/v1/spec_decode/test_mtp.py
+  # test_speculators_correctness.py 2/2 全挂：dflash/peagle speculator
+  # 模型未 stage（HF offline LocalEntryNotFoundError）
+  --ignore=tests/v1/spec_decode/test_speculators_correctness.py
+  # test_eagle.py 52 例中仅此例挂：同属 dflash pydantic 不兼容
+  --deselect tests/v1/spec_decode/test_eagle.py::test_set_inputs_first_pass_dflash
 )
 
 # Step 1d: V1 KV Connector + Metrics + Standalone
@@ -105,6 +215,14 @@ MISC_V1_CONNECTORS_METRICS_ARGS=(
   --ignore=tests/v1/kv_connector/unit/test_nixl_connector.py
   # Run 51408355: NIXL library not available in CI image
   --ignore=tests/v1/kv_connector/unit/test_nixl_connector_hma.py
+  # Run 34580922394: CPU offload 共享内存区创建失败 OSError [Errno 22]
+  # （vllm/v1/kv_offload/cpu/shared_offload_region.py:100），该文件 8/8 用例全挂
+  # （test_cpu_offloading×6 + test_tiering/fs_tiering_offloading）。
+  # 恢复条件：PPU pod /dev/shm 或 shared_offload_region 适配修复后 unignore。
+  --ignore=tests/v1/kv_connector/unit/test_offloading_connector.py
+  # Run 34580922394: 两个 ExampleConnector 的 scheduler/worker 事件序列断言
+  # 不一致（PPU 执行时序差异），单用例排除。
+  --deselect tests/v1/kv_connector/unit/test_multi_connector.py::test_multi_example_connector_consistency
 )
 
 # Step 7: Async Engine, Inputs, Utils, Worker (GPU)

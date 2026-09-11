@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-compile.sh — PPU Compile 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
@@ -36,12 +37,14 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 #
 #   ✅ 上游 Step 1-4 → compile_correctness_e2e：
 #      tests/compile/correctness_e2e/test_sequence_parallel.py（SP correctness）
-#      + tests/compile/correctness_e2e/test_async_tp.py（AsyncTP correctness）
-#      PPU 2 卡实测全部 pass。
+#      + tests/compile/correctness_e2e/test_async_tp.py（AsyncTP correctness）。
+#      Run 34580922394 起按 COMPILE_MULTI_E2E_ARGS 的 -k/--deselect 排除
+#      PPU 不支持子集（pp=1 纯 SP / FP8 async_tp），详见参数块注释。
 #   ✅ 上游 Step 5 → compile_passes_distributed：
 #      tests/compile/passes/distributed/（test_fusion_all_reduce / test_async_tp /
 #      test_sequence_parallelism），同时覆盖上游 Step 6c（test_fusion_all_reduce
-#      单独调用），PPU 2 卡实测全部 pass。
+#      单独调用）。Run 34580922394 起按 COMPILE_MULTI_PASSES_ARGS 排除
+#      FP8 类 / dtype1 ScaledMM / mnnvl+trtllm fusion 失败子集，详见参数块注释。
 #
 # 逐 step 排除审计（快照自 ppu_extras 头部注释，务必保留恢复条件）：
 #   ❌ 上游 Step 6a：test_fusion_attn.py -k FLASHINFER —— PPU 无 FlashInfer，全部 skip
@@ -60,10 +63,47 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 COMPILE_MULTI_E2E_ARGS=(
   tests/compile/correctness_e2e/test_sequence_parallel.py
   tests/compile/correctness_e2e/test_async_tp.py
+  # Run 34580922394: pp=1 纯 SP 组合（parallel_setup0-3/8-11 × eager×inductor，
+  # 16 例）+ prompt_embeds 的 parallel_setup0（2 例）在 PPU 2 卡上
+  # "Server exited unexpectedly"。pp=2（setup4-7/12-15）与 FP8 SP
+  # （setup16-19）通过，保留。parallel_setup1 带横杠结尾避免误伤 setup12-19
+  # 及 prompt_embeds 的 "parallel_setup1]" 通过用例；parallel_setup0 不带
+  # 结尾以同时覆盖 prompt_embeds 的 "setup0]" 失败 id。
+  # 恢复条件：PPU pp=1 SP 崩溃修复后移除该 -k。
+  -k
+  "not parallel_setup0 and not parallel_setup1- and not parallel_setup2 and not parallel_setup3 and not parallel_setup8 and not parallel_setup9 and not parallel_setup10 and not parallel_setup11"
+  # Run 34580922394: async_tp 的 Meta-Llama-3.1-8B-Instruct-FP8 2 例失败
+  # （fp8e4nv 需 SM8.9+，PPU OAM-810E 报 SM8.0）；1B base 模型 2 例通过，保留。
+  # 恢复条件：PPU fp8e4nv 支持后移除。
+  --deselect "tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness[False-mp-True-2-RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8]"
+  --deselect "tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness[True-mp-True-2-RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8]"
 )
 
 COMPILE_MULTI_PASSES_ARGS=(
   tests/compile/passes/distributed/
+  # Run 34580922394（56 failed / 38 passed 的排除设计）：
+  # 1) test_sequence_parallelism.py 的 TestAllReduceRMSNormStaticQuantFP8Model
+  #    32 例全挂（fp8e4nv 需 SM8.9+）；同文件其它 model class 通过，按类名排除；
+  #    该类名顺带覆盖 test_fusion_all_reduce.py 同类模型的 8 个 mnnvl/trtllm 失败。
+  # 2) test_async_tp.py::test_async_tp_pass_replace 的 4 个 ScaledMM 模型仅
+  #    dtype1 的 8 例挂（cutlass_scaled_mm_sm80_epilogue scaled_mm_c2x.cu:89，
+  #    PPU 无该 kernel）；dtype0 的 ScaledMM 用例通过，故条件必须带 dtype1。
+  # 恢复条件：PPU fp8e4nv / cutlass_scaled_mm int8 kernel 支持后移除。
+  -k
+  "not TestAllReduceRMSNormStaticQuantFP8Model and not (dtype1 and ScaledMM)"
+  # Run 34580922394（接上）：test_fusion_all_reduce.py 在 mnnvl/trtllm 后端下
+  # 的 GemmaRMSNorm/RMSNorm 8 例 matched_count=0（PPU 无 mnnvl/trtllm
+  # allreduce 后端，fusion pass 不命中）；同文件 FP4 模型 4 例通过、FP8 类
+  # 8 例已由上面 -k 排除，故逐例 deselect 而非整文件 ignore。
+  # 恢复条件：PPU 支持 mnnvl/trtllm allreduce 后端后移除。
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[mnnvl-False-dtype0-64-8-8-TestAllReduceGemmaRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[mnnvl-False-dtype0-64-8-8-TestAllReduceRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[mnnvl-True-dtype0-64-8-8-TestAllReduceGemmaRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[mnnvl-True-dtype0-64-8-8-TestAllReduceRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[trtllm-False-dtype0-64-8-8-TestAllReduceGemmaRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[trtllm-False-dtype0-64-8-8-TestAllReduceRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[trtllm-True-dtype0-64-8-8-TestAllReduceGemmaRMSNormModel-False-False]"
+  --deselect "tests/compile/passes/distributed/test_fusion_all_reduce.py::test_all_reduce_fusion_pass_replace[trtllm-True-dtype0-64-8-8-TestAllReduceRMSNormModel-False-False]"
 )
 
 # ------------------------------------------------------------------------------

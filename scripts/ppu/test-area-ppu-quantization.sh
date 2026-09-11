@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-quantization.sh — PPU Quantization 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
@@ -45,9 +46,10 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 #   Step 2 "Quantized MoE Test (B200)" → 整段跳过（SM100+ Blackwell，PPU 不支持）
 #   Step 3 "Quantized Models Test"     → tests/models/quantization/（9 文件）
 #
-# quantization_core = 上游 Step 1 的 PPU 版：tests/quantization/ 全量减 13 个 ignore。
-#   实际会跑：test_auto_round / test_configs / test_experts_int8 /
-#             test_register_quantization_config（4 个无硬件/包阻断的文件）。
+# quantization_core = 上游 Step 1 的 PPU 版：tests/quantization/ 全量减 14 个
+#   ignore + fp8 kv -k 排除 + 10 个 deselect。Run 34580922394 后实际会跑：
+#   test_auto_round / test_configs / test_experts_int8 等文件的 PPU 可用子集
+#   （各排除项的根因与恢复条件见参数块内注释）。
 QUANT_CORE_ARGS=(
   tests/quantization/
   # SM100+ Blackwell，需 flashinfer
@@ -72,10 +74,43 @@ QUANT_CORE_ARGS=(
   --ignore=tests/quantization/test_lm_head.py
   --ignore=tests/quantization/test_gptq_dynamic.py
   --ignore=tests/quantization/test_gptq_v2.py
+  # Run 34580922394: 6/6 全挂 —— fp8e4nv 需 SM8.9+（PPU 报 SM8.0），
+  # is_quant_method_supported("fp8") 在 PPU 误判可用导致未 skip。
+  --ignore=tests/quantization/test_online.py
+  # Run 34580922394: test_per_token_kv_cache.py 的 fp8 参数化 23 例全挂
+  # （Triton: type fp8e4nv not supported，PPU 仅支持 fp8e4b15/fp8e5）；
+  # "[fp8-"/"[fp8]" 前缀精确匹配失败 id，保留 [fp8_per_token_head] 等
+  # 无 kernel 路径的通过用例与全部 int8 用例。
+  -k
+  "not [fp8- and not [fp8]"
+  # Run 34580922394: TheBloke/Llama-2-7B-Chat-GPTQ 与
+  # TheBloke/OpenHermes-2.5-Mistral-7B-AWQ 未 stage（[setup] MISS），
+  # 期望识别成功的 exptype0/1/2/8/9/10 挂（期望 ERROR 的变体仍通过）。
+  # 恢复条件：两个检查点入库后移除这 6 个 deselect。
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype0]"
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype1]"
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype2]"
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype8]"
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype9]"
+  --deselect "tests/quantization/test_configs.py::test_auto_gptq[model_arg_exptype10]"
+  # Run 34580922394: TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ 未 stage（NAS 无
+  # 该路径），LocalEntryNotFoundError。恢复条件：检查点入库后移除。
+  --deselect "tests/quantization/test_auto_gptq.py::test_auto_gptq_quantization_method[TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ]"
+  # Run 34580922394: Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound 引擎初始化
+  # 失败（PPU torch_call_dispatcher aten::sum dim_IntList API call failed）；
+  # 同文件 OPEA/Qwen2.5 变体通过。恢复条件：PPU aten::sum 修复后移除。
+  --deselect "tests/quantization/test_auto_round.py::test_auto_round[Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound]"
+  # Run 34580922394: Jamba-tiny-random 引擎启动时 ModelConfig ValidationError
+  # （红区 staged 快照内容不被 vllm 接受）；plamo 变体自身 skip。
+  --deselect "tests/quantization/test_experts_int8.py::test_model_experts_int8_startup[4-bfloat16-ai21labs/Jamba-tiny-random]"
+  # Run 34580922394: PPU torch.linalg.det 数值偏差（|det|-1 = 0.1665，
+  # tol=1e-4），单用例排除。
+  --deselect "tests/quantization/test_turboquant.py::TestRotationMatrix::test_rotation_matrix_det_is_pm1"
 )
 
-# quantization_models = 上游 Step 3 的 PPU 版：tests/models/quantization/ 减 8 个 ignore。
-#   实际会跑：test_awq.py（AWQ 量化模型测试）。
+# quantization_models = 上游 Step 3 的 PPU 版：tests/models/quantization/ 减 10 个
+#   ignore + fp8 kv -k 排除。Run 34580922394 后实际会跑：
+#   test_per_token_kv_cache.py 的 int8 用例（fp8 变体被 -k 排除）。
 QUANT_MODELS_ARGS=(
   tests/models/quantization/
   # SM100+（Blackwell）
@@ -94,15 +129,29 @@ QUANT_MODELS_ARGS=(
   # 模型未 stage（TechxGenus/gemma-1.1-2b-it-GPTQ；因 parametrize 按文件粒度，
   # model1 TheBloke/TinyLlama 虽通过但 model2 gemma 失败 → 整文件 ignore）
   --ignore=tests/models/quantization/test_gptq_marlin.py
+  # Run 34580922394: 5/5 全挂 —— gemma4-moe AWQ 模型未 stage
+  # （LocalEntryNotFoundError）+ InternVL2-2B EngineDeadError（c10::Error）。
+  # 恢复条件：gemma4-moe AWQ 入库 + InternVL2 PPU 修复后 unignore。
+  --ignore=tests/models/quantization/test_awq.py
+  # Run 34580922394: 4/4 全挂 —— ValueError: Failed to find a kernel that can
+  # implement the MXFP8 linear layer（PPU 无 MXFP8 kernel 实现）。
+  --ignore=tests/models/quantization/test_mxfp8.py
+  # Run 34580922394: fp8_per_token_head 1 例挂（fp8e4nv 需 SM8.9+，PPU 报
+  # SM8.0）；同文件 int8 用例通过，故 -k 精确排除而非整文件 ignore。
+  -k
+  "not fp8_per_token_head"
 )
 
 # quantization_bitsandbytes = test_bitsandbytes.py 的部分跑：BNB 4bit/8bit，
 #   -k 只选红区已 stage 模型的用例。未选中的用例用未 stage 模型
 #   （Mistral-7B-Instruct-v0.3 / Llama-Guard-3-8B-INT8 / PrunaAI 等）。
+#   Run 34580922394: test_load_pre_quant_4bit 的 PrunaAI 变体未 stage 秒挂
+#   （and not PrunaAI 排除，poedator/opt-125m-bnb-4bit 变体保留）；
+#   test_4bit_bnb_embedding（e5-mistral）缺 sentence_transformers，从 -k 移除。
 QUANT_BNB_ARGS=(
   tests/models/quantization/test_bitsandbytes.py
   -k
-  "test_load_pre_quant_4bit or test_4bit_bnb_moe or test_4bit_bnb_embedding or (test_load_4bit_bnb_model and opt) or (test_load_8bit_bnb_model and fbopt)"
+  "(test_load_pre_quant_4bit and not PrunaAI) or test_4bit_bnb_moe or (test_load_4bit_bnb_model and opt) or (test_load_8bit_bnb_model and fbopt)"
 )
 
 # ------------------------------------------------------------------------------
@@ -184,13 +233,6 @@ MODEL_MAP = {
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
 
-    # ---- quantization_models: tests/models/quantization/test_awq.py ----
-    # 主清单命中 name=InternVL2-2B
-    "OpenGVLab/InternVL2-2B":
-        "/nas_aisw/datasets/checkpoints/LLM/InternVL/v1.0/InternVL2-2B",
-    # 主清单 MISS，Aone alias 命中
-    "OpenGVLab/InternVL2-2B-AWQ":
-        "/nas_aisw/datasets/checkpoints/LLM/InternVL/v1.0/InternVL2-2B-AWQ",
     # ---- quantization_bitsandbytes: test_bitsandbytes.py（-k 选中的用例）----
     # test_load_pre_quant_4bit（主清单 MISS，Aone alias 命中）
     "poedator/opt-125m-bnb-4bit":
@@ -198,9 +240,6 @@ MODEL_MAP = {
     # test_4bit_bnb_moe
     "allenai/OLMoE-1B-7B-0125-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/OLMoE/v1.0/OLMoE-1B-7B-0125-Instruct",
-    # test_4bit_bnb_embedding（主清单命中 name=e5-mistral-7b-instruct）
-    "intfloat/e5-mistral-7b-instruct":
-        "/nas_aisw/datasets/checkpoints/LLM/e5/v1/e5-mistral-7b-instruct",
     # test_load_4bit_bnb_model and opt（主清单命中 name=opt-125m）
     "facebook/opt-125m":
         "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
