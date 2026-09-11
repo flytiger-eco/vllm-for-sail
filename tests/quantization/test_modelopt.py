@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
@@ -135,6 +136,37 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     assert layer.weight.input_dim == 0
     assert layer.weight.output_dim == 1
     method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
+def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "mtp.layers.48.mlp.experts": {
+                        "quant_algo": algo,
+                        "group_size": 128,
+                    }
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    expected = object()
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.Fp8MoEMethod",
+        return_value=expected,
+    ) as method_cls:
+        method = config.get_quant_method(layer, "mtp.layers.48.mlp.experts")
+
+    assert method is expected
+    fp8_config, called_layer = method_cls.call_args.args
+    assert called_layer is layer
+    assert fp8_config.weight_block_size == [128, 128]
+    assert fp8_config.activation_scheme == "dynamic"
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():

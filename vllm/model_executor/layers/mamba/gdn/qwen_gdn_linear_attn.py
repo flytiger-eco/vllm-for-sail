@@ -12,6 +12,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -52,8 +53,8 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops import (
     fused_post_conv_prep,
-    fused_recurrent_gated_delta_rule_packed_decode,
     fused_recurrent_gated_delta_rule_decode,
+    fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
@@ -1931,6 +1932,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,
@@ -1991,6 +1993,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core_fused_norm_packed(
     mixed_qkvz: torch.Tensor,
     ba: torch.Tensor,

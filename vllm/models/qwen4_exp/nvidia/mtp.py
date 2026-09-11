@@ -19,7 +19,6 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -48,7 +47,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
-    _HC_WEIGHTS_MAPPER,
+    _EXTRA_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
@@ -71,6 +70,17 @@ def _remap_ignored_layers(
         else:
             remapped.append(name)
     return remapped
+
+
+def _remap_quantized_layers(
+    quantized_layers: dict[str, dict],
+    mtp_start_layer_idx: int,
+) -> dict[str, dict]:
+    """Map checkpoint MTP layer indices to standalone draft indices."""
+    return {
+        _remap_ignored_layers([name], mtp_start_layer_idx)[0]: layer_info
+        for name, layer_info in quantized_layers.items()
+    }
 
 
 def _remap_mtp_weight_name(name: str) -> str | None:
@@ -131,6 +141,13 @@ def _make_draft_vllm_config(
                 "exclude_modules",
                 _remap_ignored_layers(exclude_modules, mtp_start_layer_idx),
             )
+        quantized_layers = getattr(draft_quant_config, "quantized_layers", None)
+        if quantized_layers:
+            setattr(  # noqa: B010
+                draft_quant_config,
+                "quantized_layers",
+                _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
+            )
 
     draft_vllm_config = replace(
         vllm_config,
@@ -142,17 +159,8 @@ def _make_draft_vllm_config(
     return draft_vllm_config
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "hidden_states": 0,
-    }
-)
 class Qwen4ExpMultiTokenPredictor(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -343,15 +351,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "hidden_states": 0,
-    }
-)
 class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

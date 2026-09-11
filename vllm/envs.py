@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_PLE_CPU_OFFLOAD: bool = False
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
@@ -291,8 +292,6 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
-    VLLM_PLE_CPU_OFFLOAD: bool = False
-    VLLM_PLE_OFFLOAD_READY_TIMEOUT: float = 600.0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -325,6 +324,7 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
+
 
 def get_default_cache_root():
     return os.getenv(
@@ -2047,21 +2047,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
-    # Run n-gram PLE lookup in a dedicated CPU offload worker. The initial
-    # implementation supports ModelRunner V1 and single-node TP only.
-    "VLLM_PLE_CPU_OFFLOAD": lambda: (
-        os.getenv("VLLM_PLE_CPU_OFFLOAD", "False").lower() in ("true", "1")
-    ),
-    # Timeout for PLE weight loading and TP worker registration.
-    "VLLM_PLE_OFFLOAD_READY_TIMEOUT": lambda: float(
-        os.getenv("VLLM_PLE_OFFLOAD_READY_TIMEOUT", "600")
-    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
+    # Keep Qwen4Exp PLE embedding tables in pinned CPU memory and gather their
+    # rows through UVA on a dedicated CUDA stream.
+    # Legacy fallback for EngramConfig.cpu_offload, which takes precedence.
+    # This environment variable may be removed in a future release.
+    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "0"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2213,7 +2209,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Use triton_int8_quant
     "VLLM_PPU_USE_TRITON_INT8_QUANT": lambda: (
-        os.getenv("VLLM_PPU_USE_TRITON_INT8_QUANT", "True").strip().lower() in ("true", "1")
+        os.getenv("VLLM_PPU_USE_TRITON_INT8_QUANT", "True").strip().lower()
+        in ("true", "1")
     ),
     # If set, will use nvtx and PTG's model_prof to capture trace for profiling
     "VLLM_PPU_NVTX_PROFILE": lambda: (
