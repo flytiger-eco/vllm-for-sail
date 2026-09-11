@@ -1,0 +1,138 @@
+# 编译 PPU wheel 的【提速验证】入口——不动已跑通的 build-ppu-wheel.yml。
+#
+# 目的：验证两项优化的可行性（第一轮先跑通链路，第二轮看缓存命中提速）：
+#   1. 编译并发真正生效：MAX_JOBS/NVCC_THREADS 经脚本 docker -e 透传进容器
+#      （生产脚本这两行是注释的 no-op，setup.py 只能按 cpu_count 决定并发）。
+#   2. ccache：容器内装 ccache + 持久 CCACHE_DIR（actions/cache 跨 run），
+#      setup.py 探测到后自动接线为编译器 launcher，重复构建跳过编译。
+#
+# 本轮 runner = ubuntu-latest（4 vCPU）：MAX_JOBS 取 nproc，核数不变故并发提速
+# 有限，主要验证「透传生效 + ccache 命中」两条链路；确认后再把 runs-on 换成
+# 大核 runner，MAX_JOBS 随 nproc 自动放大即得多核加速。
+name: Build PPU Wheel (test / speedup)
+
+on:
+  # 改动本 workflow 或其专用脚本时 push 触发；不碰生产构建与业务代码路径。
+  push:
+    paths:
+      - .github/workflows/build-ppu-wheel-test.yml
+      - scripts/ppu/build-ppu-wheel-test.sh
+  workflow_dispatch:
+
+# 排队不取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    if: |
+      github.repository == 'flytiger-eco/vllm-for-sail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+        cuda-version: ["13.0"]
+        arch: [x86_64]
+    outputs:
+      wheel_version: ${{ steps.version.outputs.wheel_version }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+    env:
+      # 宿主侧 ccache 目录：用 runner.temp（绝对路径,workspace 之外,不被 Clean
+      # workspace/checkout 清掉;docker -v 也要求绝对路径）。
+      HOST_CCACHE_DIR: ${{ runner.temp }}/ppu-ccache
+    steps:
+      - name: Clean workspace (remove root-owned files from prior runs)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" alpine:3 \
+            sh -c 'rm -rf /workspace/..?* /workspace/.[!.]* /workspace/*' || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      # 跨 run 恢复 ccache；restore-keys 前缀命中最近一次保存的缓存。
+      # 首轮（本 PR 第一次跑）必然 miss——这是预期，用于填充缓存。
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.HOST_CCACHE_DIR }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-${{ github.sha }}
+          restore-keys: |
+            ppu-ccache-${{ runner.os }}-cu13.0-
+
+      - name: Compute wheel version
+        id: version
+        env:
+          TARGET_VERSION: "0.23.0"
+        run: |
+          BUILD_DATE_COMPACT=$(date -u +%Y%m%d)
+          HASH=$(git rev-parse --short HEAD)
+          WHEEL_VERSION="${TARGET_VERSION}.dev${BUILD_DATE_COMPACT}+g${HASH}"
+          echo "Wheel version: ${WHEEL_VERSION}"
+          {
+            echo "wheel_version=${WHEEL_VERSION}"
+            echo "artifact_name=wheel-test-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_23_0"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        env:
+          VLLM_VERSION_OVERRIDE: ${{ steps.version.outputs.wheel_version }}
+        run: |
+          # ubuntu-latest 4 vCPU：MAX_JOBS 取 nproc，NVCC_THREADS=1 → num_jobs=nproc，
+          # 不过度订阅内存。换大核 runner 时无需改脚本，nproc 自动放大。
+          export MAX_JOBS="$(nproc)"
+          export NVCC_THREADS=1
+          export HOST_CCACHE_DIR="${{ env.HOST_CCACHE_DIR }}"
+          mkdir -p "${HOST_CCACHE_DIR}"
+          bash scripts/ppu/build-ppu-wheel-test.sh \
+            "0.23.0" \
+            "${{ matrix.python-version }}" \
+            "${{ matrix.cuda-version }}" \
+            "${{ matrix.arch }}"
+
+      # 容器以 root 写入 ccache 目录，chown 回 runner 用户，save 才能打包。
+      - name: Fix ccache ownership for save
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "${{ env.HOST_CCACHE_DIR }}" || true
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.HOST_CCACHE_DIR }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-${{ github.sha }}
+
+      - name: Verify wheel version
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.wheel_version }}
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::No wheel produced in dist/"
+            exit 1
+          fi
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one wheel, got ${#wheels[@]}: ${wheels[*]}"
+            exit 1
+          fi
+          wheel_version=$(basename "${wheels[0]}" | cut -d- -f2)
+          if [ "$wheel_version" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Built wheel version '$wheel_version' does not match expected '$EXPECTED_VERSION'"
+            exit 1
+          fi
+          echo "Verified: ${wheels[0]}"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-test-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_23_0
+          path: dist/*.whl
+          if-no-files-found: error
