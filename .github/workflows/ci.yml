@@ -149,6 +149,22 @@ jobs:
   # 注意：models-distributed / models-multimodal 仅挂 nightly-ppu.yml（重量级
   # 回归兜底，不进 PR 门禁）；spec-decode 仅 workflow_dispatch 手动入口（依赖
   # 模型未入库，详见该文件头注释），三者均不在本文件编排。
+  #
+  # 并发节流（run 34602096292 起）：集群仅 2 台 OAM-810E 节点，且仅 na131t
+  # 预置了 CI 镜像；13+ 个 area 同时扇出（总 22 卡）必然排队，排队中的 pod
+  # 会被调度到无镜像节点 → 容器拉镜像 20~45 分钟超时 failed、全程零输出
+  # （mr-v2 三轮、compile 一轮均此模式）。故按卡数分三批串行：
+  #   batch1 轻量 1 卡×5=5 卡：misc/cuda/pytorch/quantization/benchmarks
+  #     （原位 needs，不动）
+  #   batch2 中量 2 卡×5=10 卡：compile/distributed/model-runner-v2/
+  #     expert-parallelism/weight-loading（needs 追加 batch1 五个 job）
+  #   batch3 重量 4 卡×2=8 卡：e2e-integration/lm-eval（needs 追加 batch2）
+  # 每批 ≤10 卡 < na131t 实证容量（≥11 卡同时），批内全部立即调度不排队。
+  # 批次 needs 仅作节奏控制、不传递结果：if 已带 always() 且不引用批次 job
+  # 的 result，前批 failure/skipped 不阻断后批。轻量先跑可尽快给出反馈。
+  # 待平台在第二台节点预置镜像后可回退本分批（恢复全并发）。
+  # 注意：check-changes 常驻 skipped 的 10 个 area 未纳入分批（不建 pod 不占
+  # 资源）；若 run-all 全命中场景出现资源争抢，需将它们一并纳入。
   ppu-attention:
     needs: [human-review, human-review-waived, build-wheel]
     if: >-
@@ -282,7 +298,9 @@ jobs:
     secrets: inherit
 
   ppu-compile:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：needs 追加 batch1（轻量 1 卡组）仅作并发节流，不传结果
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-misc, ppu-cuda, ppu-pytorch, ppu-quantization, ppu-benchmarks]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -306,7 +324,9 @@ jobs:
     secrets: inherit
 
   ppu-distributed:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-misc, ppu-cuda, ppu-pytorch, ppu-quantization, ppu-benchmarks]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -318,7 +338,10 @@ jobs:
     secrets: inherit
 
   ppu-e2e-integration:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch3：并发节流，等 batch2（2 卡组）释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-compile, ppu-distributed, ppu-model-runner-v2,
+            ppu-expert-parallelism, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -330,7 +353,9 @@ jobs:
     secrets: inherit
 
   ppu-expert-parallelism:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-misc, ppu-cuda, ppu-pytorch, ppu-quantization, ppu-benchmarks]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -342,7 +367,10 @@ jobs:
     secrets: inherit
 
   ppu-lm-eval:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch3：并发节流，等 batch2（2 卡组）释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-compile, ppu-distributed, ppu-model-runner-v2,
+            ppu-expert-parallelism, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -366,7 +394,9 @@ jobs:
     secrets: inherit
 
   ppu-model-runner-v2:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-misc, ppu-cuda, ppu-pytorch, ppu-quantization, ppu-benchmarks]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -402,7 +432,9 @@ jobs:
     secrets: inherit
 
   ppu-weight-loading:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel,
+            ppu-misc, ppu-cuda, ppu-pytorch, ppu-quantization, ppu-benchmarks]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
