@@ -82,10 +82,11 @@ MISC_V1_INFERENCE_ARGS=(
 #     test_wait_for_file_size_* 3 例 PASSED（不触 shm/批量拷贝路径），
 #     故精确 deselect 而非整文件 ignore。
 #     恢复条件：PPU pod shm 配置与批量拷贝 kernel 适配修复。
-# (b) logits_processors 两文件 12 例：test_correctness 6 例 Cannot
+# (b) logits_processors 两文件 13 例：test_correctness 6 例 Cannot
 #     re-initialize CUDA in forked subprocess（fork 子进程重复初始化 PPU
-#     设备）；test_custom_offline 6 例 EngineCore failed to start
-#     （Landmine #20 同类引擎启动崩溃）。
+#     设备）；test_custom_offline 7 例 EngineCore 启动失败/fork CUDA 污染
+#     （Landmine #20 同类引擎启动崩溃；其中 FQCN-pooling 在 run
+#     34602096292 才暴露出同根因失败，补入）。
 # (c) worker/test_gpu_model_runner.py 17 例：12 ERROR = granite-4.0-tiny-
 #     preview NAS 快照缺 model.safetensors（HF offline resolve 失败）；
 #     5 FAILED = Only dense CPU tensors can be pinned（PPU pin_memory 限制）。
@@ -147,6 +148,7 @@ MISC_V1_INFERENCE_DESELECTS=(
   "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_CLASS-spec_dec]"
   "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT-pooling]"
   "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT-spec_dec]"
+  "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_FQCN-pooling]"
   "tests/v1/logits_processors/test_custom_offline.py::test_rejects_custom_logitsprocs[CustomLogitprocSource.LOGITPROC_SOURCE_FQCN-spec_dec]"
   "tests/v1/worker/test_gpu_model_runner.py::test_get_nans_in_logits"
   "tests/v1/worker/test_gpu_model_runner.py::test_hybrid_attention_mamba_tensor_shapes"
