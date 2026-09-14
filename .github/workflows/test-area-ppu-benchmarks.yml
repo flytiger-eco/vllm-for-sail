@@ -46,6 +46,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
 
 env:
@@ -58,10 +59,8 @@ jobs:
     outputs:
       changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 仅 PR 用 dorny/paths-filter
+      # 仅 PR 用 dorny/paths-filter；无需 checkout——它在 pull_request 下走
+      # GitHub REST API 取变更清单，不依赖工作区（本 workflow 无 push 触发器）。
       - name: Detect file changes
         id: filter
         uses: dorny/paths-filter@v3
@@ -73,10 +72,8 @@ jobs:
               - "scripts/ppu/ppu_install_dependency.sh"
               - "scripts/ppu/test-area-ppu-benchmarks.sh"
               - "benchmarks/**"
-              - "benchmarks/attention_benchmarks/**"
               - "tests/benchmarks/**"
               - "vllm/**"
-              - "vllm/v1/attention/**"
 
       - name: Decide whether to run tests
         id: decide
@@ -94,7 +91,7 @@ jobs:
               echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
             fi
           else
-            # push / 手动触发（workflow_dispatch）：必跑
+            # workflow_dispatch（手动触发）：必跑
             echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -143,20 +140,21 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact }}
           path: ci-wheel
-      - name: Resolve wheel path
-        if: inputs.wheel_artifact != ''
-        run: |
-          whl="$(ls ci-wheel/*.whl | head -n1)"
-          # ci-wheel/ 在 $GITHUB_WORKSPACE 内,随源码 tarball 一并投递进 Pod
-          echo "PPU_WHEEL_PATH=/workspace/source/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
 
       - name: Build in-pod runner payload
         id: payload
         shell: bash
         env:
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
-          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
+          TEST_MODE: ${{ inputs.test_mode }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args }}
+          WHEEL_ARTIFACT: ${{ inputs.wheel_artifact }}
         run: |
+          # ci-wheel/ 在 $GITHUB_WORKSPACE 内，随源码 tarball 一并投递进 Pod，
+          # 故这里解析成 Pod 内视角的绝对路径
+          if [ -n "${WHEEL_ARTIFACT:-}" ]; then
+            whl="$(ls ci-wheel/*.whl | head -n1)"
+            PPU_WHEEL_PATH="/workspace/source/ci-wheel/$(basename "${whl}")"
+          fi
           # 为什么绕 base64：ppu-distributed-action 的「校验 inputs」步骤把
           # inputs.command 直接文本插值进 `if [ -z "<command>" ]`,多行/含引号的
           # command 会引发 shell syntax error。base64 后是单行且只含
@@ -199,7 +197,8 @@ jobs:
           namespace: ppu-sched
           timeout_minutes: 90
           cleanup_policy: always
-          # unprivileged 确保设备数=分配数，是 area 间并行的前提
+          # 注意：此处刻意不设 privileged——unprivileged 下 PPU device plugin
+          # 只注入分配到的卡，设备数=分配数，是 area 间并行的前提
           container_options: |
             host_ipc: true
             shm_size: "8Gi"
@@ -216,7 +215,7 @@ jobs:
           OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          TEST_MODE: ${{ inputs.test_mode }}
         run: |
           NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
           {

@@ -32,7 +32,6 @@ on:
         description: "CI 构建的 wheel artifact 名（ci.yml 传入）；空则用镜像预装 vllm"
         type: string
         default: ""
-  # 无 inputs：手动触发跑与 push/PR 相同的全量 LoRA 测试。
   workflow_dispatch:
     inputs:
       test_mode:
@@ -44,15 +43,16 @@ on:
         type: string
         default: ""
 
-# 所有 PPU area workflow 共用同名 group：自托管 runner 的 PPU 设备互斥
-# （并发 job 争抢 CUDA_VISIBLE_DEVICES 与显存会 OOM），同名 group 实现
-# 跨 workflow 串行。
+# 每个 area 独立 group（与其余 area workflow 一致）：worker Pod 去掉
+# privileged 后卡是真隔离的，area 之间无需互斥；这里只保证同一 area 的
+# 新 run 取消同 ref 的旧 run。
 concurrency:
   group: test-area-ppu-lora-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
 
 env:
@@ -66,13 +66,8 @@ jobs:
     outputs:
       changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 仅 PR 用 dorny/paths-filter（走 GitHub API，不依赖 git 历史）。
-      # push 不用它：浅克隆下与默认分支（v0.20.1）无 merge-base，deepen
-      # 重试报 "fatal: shallow file has changed"（128）。push 已由
-      # on.push.paths 触发级过滤；本列表须与 on.push.paths 保持同步。
+      # 仅 PR 用 dorny/paths-filter；无需 checkout——它在 pull_request 下走
+      # GitHub REST API 取变更清单，不依赖工作区（本 workflow 无 push 触发器）。
       - name: Detect file changes
         id: filter
         uses: dorny/paths-filter@v3
@@ -102,7 +97,7 @@ jobs:
               echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
             fi
           else
-            # push / 手动触发（workflow_dispatch）：必跑
+            # workflow_dispatch（手动触发）：必跑
             echo "changes_exist=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -147,20 +142,21 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact }}
           path: ci-wheel
-      - name: Resolve wheel path
-        if: inputs.wheel_artifact != ''
-        run: |
-          whl="$(ls ci-wheel/*.whl | head -n1)"
-          # ci-wheel 随源码送 Pod
-          echo "PPU_WHEEL_PATH=/workspace/source/ci-wheel/$(basename "$whl")" >> "$GITHUB_ENV"
 
       - name: Build in-pod runner payload
         id: payload
         shell: bash
         env:
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
-          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
+          TEST_MODE: ${{ inputs.test_mode }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args }}
+          WHEEL_ARTIFACT: ${{ inputs.wheel_artifact }}
         run: |
+          # ci-wheel/ 在 $GITHUB_WORKSPACE 内，随源码 tarball 一并投递进 Pod，
+          # 故这里解析成 Pod 内视角的绝对路径
+          if [ -n "${WHEEL_ARTIFACT:-}" ]; then
+            whl="$(ls ci-wheel/*.whl | head -n1)"
+            PPU_WHEEL_PATH="/workspace/source/ci-wheel/$(basename "${whl}")"
+          fi
           # base64 规避 action 插值时多行 command 的 shell syntax error
           cat > /tmp/ppu-run.sh <<'RUNEOF'
           #!/bin/bash
@@ -200,7 +196,8 @@ jobs:
           namespace: ppu-sched
           timeout_minutes: 90
           cleanup_policy: always
-          # unprivileged 确保设备数=分配数，是 area 间并行的前提
+          # 注意：此处刻意不设 privileged——unprivileged 下 PPU device plugin
+          # 只注入分配到的卡，设备数=分配数，是 area 间并行的前提
           container_options: |
             host_ipc: true
             shm_size: "8Gi"
@@ -217,7 +214,7 @@ jobs:
           OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          TEST_MODE: ${{ inputs.test_mode }}
         run: |
           NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
           {
