@@ -59,6 +59,16 @@ jobs:
       changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
       - name: Checkout code
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+
+      - name: Wait before checkout retry
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 60
+
+      - name: Checkout code (retry)
+        if: steps.checkout.outcome == 'failure'
         uses: actions/checkout@v4
 
       # 仅 PR 用 dorny/paths-filter
@@ -116,6 +126,18 @@ jobs:
       # 暂存到 NAS,worker Pod 内解压到 source_dir（默认 /workspace/source）。
       # fetch-depth: 1 缩小 .git,减少打包体积与耗时。
       - name: Checkout code
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Wait before checkout retry
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 60
+
+      - name: Checkout code (retry)
+        if: steps.checkout.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
