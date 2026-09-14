@@ -52,18 +52,6 @@ jobs:
     steps:
       # action 自动打包源码送 Pod
       - name: Checkout code
-        id: checkout
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Wait before checkout retry
-        if: steps.checkout.outcome == 'failure'
-        run: sleep 60
-
-      - name: Checkout code (retry)
-        if: steps.checkout.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1

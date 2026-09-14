@@ -59,16 +59,6 @@ jobs:
       changes_exist: ${{ steps.decide.outputs.changes_exist }}
     steps:
       - name: Checkout code
-        id: checkout
-        continue-on-error: true
-        uses: actions/checkout@v4
-
-      - name: Wait before checkout retry
-        if: steps.checkout.outcome == 'failure'
-        run: sleep 60
-
-      - name: Checkout code (retry)
-        if: steps.checkout.outcome == 'failure'
         uses: actions/checkout@v4
 
       # 仅 PR 用 dorny/paths-filter
@@ -128,24 +118,27 @@ jobs:
     steps:
       # action 自动打包源码送 Pod
       - name: Checkout code
-        id: checkout
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Wait before checkout retry
-        if: steps.checkout.outcome == 'failure'
-        run: sleep 60
-
-      - name: Checkout code (retry)
-        if: steps.checkout.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Fetch CI-built wheel
+        id: fetch-wheel
+        continue-on-error: true
         if: inputs.wheel_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+
+      - name: Wait before wheel fetch retry
+        if: steps.fetch-wheel.outcome == 'failure'
+        run: |
+          rm -rf ci-wheel
+          sleep 60
+
+      - name: Fetch CI-built wheel (retry)
+        if: steps.fetch-wheel.outcome == 'failure'
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.wheel_artifact }}
