@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-weight-loading.sh — PPU Weight Loading 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
@@ -35,13 +36,18 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # REVISION) 驱动同一个 test_weight_loading.py（内部硬编码 tensor_parallel_size=2）。
 # PPU 侧复刻该机制：per-config env var + 单进程 pytest。
 #
-# 红区选集（6 个，全 TP=2，均有 NAS 别名可跑）：
+# 红区选集（2 个，全 TP=2，均有 NAS 别名且 Run 34580922394 实测通过）：
 #   wl_gptq_marlin_zephyr    gptq_marlin  robertgshaw2/zephyr-7b-beta-channelwise-gptq
-#   wl_gptq_marlin_tinyllama gptq_marlin  TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ
-#   wl_gptq_tinyllama        gptq         TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ
-#   wl_ct_w8w8_static        compressed-tensors  nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change
-#   wl_ct_w8a8_dynamic       compressed-tensors  nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2
 #   wl_none_fairseq2         None         mgleize/fairseq2-dummy-Llama-3.2-1B
+#
+# Run 34580922394 移除的 4 个 config：
+#   - wl_gptq_marlin_tinyllama / wl_gptq_tinyllama
+#     （TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ）：NAS 未 stage，[setup] MISS →
+#     LocalEntryNotFoundError 秒挂。恢复条件：该检查点入库后加回。
+#   - wl_ct_w8w8_static / wl_ct_w8a8_dynamic（nm-testing/tinyllama-oneshot-*，
+#     compressed-tensors INT8）：deep_gemm int8 kernel shape assert
+#     （lhs_scales.shape[0] == m / rhs_scales.shape[0] == n），PPU int8
+#     scaled_mm kernel 不支持。恢复条件：PPU int8 kernel 修复后加回。
 #
 # 排除（快照自原 yaml 可用性分析，均因红区不满足条件而不跑）：
 #   - fp8 模型（nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test、
@@ -61,29 +67,17 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # 模型名，无模块级下载，vllm_runner 负责加载。
 WL_LABELS=(
   wl_gptq_marlin_zephyr
-  wl_gptq_marlin_tinyllama
-  wl_gptq_tinyllama
-  wl_ct_w8w8_static
-  wl_ct_w8a8_dynamic
   wl_none_fairseq2
 )
 WL_QUANT=(
   gptq_marlin
-  gptq_marlin
-  gptq
-  compressed-tensors
-  compressed-tensors
   None
 )
 WL_MODEL=(
   robertgshaw2/zephyr-7b-beta-channelwise-gptq
-  TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ
-  TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ
-  nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change
-  nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2
   mgleize/fairseq2-dummy-Llama-3.2-1B
 )
-WL_REV=(main main main main main main)
+WL_REV=(main main)
 WL_ARGS=(tests/weight_loading/test_weight_loading.py)
 
 # ------------------------------------------------------------------------------
@@ -139,18 +133,6 @@ MODEL_MAP = {
     "robertgshaw2/zephyr-7b-beta-channelwise-gptq":
         "/nas_aisw/datasets/checkpoints/LLM/zephyr/v1.0/"
         "zephyr-7b-beta-channelwise-gptq",
-    # wl_gptq_marlin_tinyllama + wl_gptq_tinyllama
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ":
-        "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v1.0/"
-        "TinyLlama-1.1B-Chat-v1.0-GPTQ",
-    # wl_ct_w8w8_static
-    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v1.0/"
-        "tinyllama-oneshot-w8w8-test-static-shape-change",
-    # wl_ct_w8a8_dynamic
-    "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v2/"
-        "tinyllama-oneshot-w8a8-dynamic-token-v2",
     # wl_none_fairseq2
     "mgleize/fairseq2-dummy-Llama-3.2-1B":
         "/nas_aisw/datasets/checkpoints/LLM/fairseq2/v1.0/"
@@ -348,7 +330,7 @@ _run_step() {
 }
 
 # weight_loading 全部用例都是 TP=2（multi 段）：single 无 step；multi/all 跑全部
-# 6 个 model config。每个 config 通过命令前缀 env var 下传 MODEL_NAME/
+# 2 个 model config。每个 config 通过命令前缀 env var 下传 MODEL_NAME/
 # QUANTIZATION/REVISION（pytest 子进程继承），单进程执行（shards=1，不限
 # CUDA_VISIBLE_DEVICES → 2 卡全可见，测试内部 tensor_parallel_size=2 自行用满）。
 _run_weight_loading_configs() {

@@ -34,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
@@ -60,8 +61,8 @@ jobs:
         id: payload
         shell: bash
         env:
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
-          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args || '' }}
+          TEST_MODE: ${{ inputs.test_mode }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args }}
         run: |
           # base64 规避 action 插值时多行 command 的 shell syntax error
           cat > /tmp/ppu-run.sh <<'RUNEOF'
@@ -102,7 +103,8 @@ jobs:
           # in-pod 上限（首跑校准，暂用 90m；job timeout-minutes = 此值 + 25）
           timeout_minutes: 90
           cleanup_policy: always
-          # unprivileged 确保设备数=分配数，是 area 间并行的前提
+          # 注意：此处刻意不设 privileged——unprivileged 下 PPU device plugin
+          # 只注入分配到的卡，设备数=分配数，是 area 间并行的前提
           container_options: |
             host_ipc: true
             shm_size: "8Gi"
@@ -119,7 +121,7 @@ jobs:
           OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
-          TEST_MODE: ${{ inputs.test_mode || 'all' }}
+          TEST_MODE: ${{ inputs.test_mode }}
         run: |
           NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
           {
