@@ -77,6 +77,10 @@ COMPILE_MULTI_E2E_ARGS=(
   # 恢复条件：PPU fp8e4nv 支持后移除。
   --deselect "tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness[False-mp-True-2-RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8]"
   --deselect "tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness[True-mp-True-2-RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8]"
+  # Run 34936679139: 1B 的 False 组合 RuntimeError: Server failed to start in
+  # time（启动超时；上轮 run 34580922394 同例通过，疑似超时抖动）。True 组合
+  # 仍通过，保留。恢复条件：PPU 上该组合启动稳定后移除。
+  --deselect "tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness[False-mp-True-2-meta-llama/Llama-3.2-1B-Instruct]"
 )
 
 COMPILE_MULTI_PASSES_ARGS=(
