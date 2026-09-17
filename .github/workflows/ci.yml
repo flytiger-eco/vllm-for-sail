@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # 透传 area：callee 权限只降不升
   pull-requests: read
 
 concurrency:
@@ -66,8 +67,10 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
-  # Stage 2b: PPU wheel 构建
-  # 经 workflow_call 复用 build-ppu-wheel.yml：产出 wheel artifact 供 22 个 area 共用
+  # ---- Stage 2b: PPU wheel 构建 ----
+  # 经 workflow_call 复用 build-ppu-wheel.yml：产出 wheel artifact（主 wheel +
+  # toolchain/ 测试依赖 wheel）供 22 个 area 共用；ccache 经 actions/cache 跨 run
+  # 持久。ci-smoke 转存版（下载 build-ppu-wheel-test 现成 wheel 重传）已完成验证退场。
   build-wheel:
     name: Build PPU Wheel
     needs: precheck
@@ -125,6 +128,28 @@ jobs:
   # 注意：models-distributed / models-multimodal 仅挂 nightly-ppu.yml（重量级
   # 回归兜底，不进 PR 门禁）；spec-decode 仅 workflow_dispatch 手动入口（依赖
   # 模型未入库，详见该文件头注释），三者均不在本文件编排。
+  #
+  # 并发节流：2 台 OAM-810E 节点均已预置 CI 镜像，na131t 单节点时期的
+  # 「单批 13 卡」水位随之放宽（当时排队 pod 会被调度到无镜像节点、拉镜像
+  # 20~45 分钟超时 failed，见 git 历史）。22 个 area 按 run 34936679139
+  # 实测时长从三批改为两批串行，关键路径 ~2h59m → ~2h24m：
+  # 短批先跑——~8m 出首个信号（wheel 坏了/基建抖动尽早暴露），长批收尾。
+  #   batch1 12 个 / 15 卡 / 长极 ~16m（原位 needs，不挂前置批次）：
+  #     quantization(16m)/models-basic(~15m,估)/samplers(14m)/entrypoints-llm(14m)/
+  #     attention(~13m,估)/entrypoints(~13m,估)/cuda(12m)/weight-loading(12m)/
+  #     pytorch(10m)/distributed(10m)/expert-parallelism(10m)/model-executor(8m)
+  #   batch2 10 个 / 22 卡 / 长极 2h08m（needs += batch1 全部）：
+  #     kernels(2h08m)/engine(1h26m)/e2e-integration(~54m)/model-runner-v2(47m)/
+  #     misc(38m)/basic-correctness(37m)/lm-eval(30m)/compile(25m)/lora(23m)/
+  #     benchmarks(22m)
+  # 注：kernels 单个 area 就要 2h08m，是任何分批方案的地板；要继续压缩需拆
+  # 其测试选集为多 shard 并行，不在本次改动范围。
+  #
+  # check-changes 决定只有路径命中的 area 真正建 pod（skipped 不占卡），
+  # 但 26/26 个 area 的 filter 均含 scripts/ppu/ppu_install_dependency.sh，
+  # 故改该脚本的 PR（即 CI 自身的开发 PR）必然全量扇出、每次都付满关键路径。
+  # 批次 needs 仅作节奏控制、不传结果：if 已带 always() 且不引用批次 job 的
+  # result，前批 failure/skipped 不阻断后批。
   ppu-attention:
     needs: [human-review, human-review-waived, build-wheel]
     if: >-
@@ -174,7 +199,11 @@ jobs:
     secrets: inherit
 
   ppu-basic-correctness:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -198,7 +227,11 @@ jobs:
     secrets: inherit
 
   ppu-lora:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -222,7 +255,11 @@ jobs:
     secrets: inherit
 
   ppu-engine:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -234,7 +271,11 @@ jobs:
     secrets: inherit
 
   ppu-kernels:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -246,7 +287,11 @@ jobs:
     secrets: inherit
 
   ppu-benchmarks:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -258,7 +303,11 @@ jobs:
     secrets: inherit
 
   ppu-compile:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -294,7 +343,11 @@ jobs:
     secrets: inherit
 
   ppu-e2e-integration:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -318,7 +371,11 @@ jobs:
     secrets: inherit
 
   ppu-lm-eval:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -330,7 +387,11 @@ jobs:
     secrets: inherit
 
   ppu-misc:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&
@@ -342,7 +403,11 @@ jobs:
     secrets: inherit
 
   ppu-model-runner-v2:
-    needs: [human-review, human-review-waived, build-wheel]
+    # batch2：并发节流，等 batch1 释放（见 Stage 4 头注释）
+    needs: [human-review, human-review-waived, build-wheel, ppu-attention,
+            ppu-cuda, ppu-distributed, ppu-entrypoints, ppu-entrypoints-llm,
+            ppu-expert-parallelism, ppu-model-executor, ppu-models-basic,
+            ppu-pytorch, ppu-quantization, ppu-samplers, ppu-weight-loading]
     if: >-
       always() &&
       needs.build-wheel.result == 'success' &&

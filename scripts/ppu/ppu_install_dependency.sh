@@ -49,11 +49,27 @@ PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simp
 #     -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
 # 退避带随机抖动：并发 Pod 若同步重试会再次撞在一起。
 PPU_WHEELHOUSE="${PPU_WHEELHOUSE:-/nas_aisw/devops/pip-wheelhouse}"
+# build-wheel job 在出网正常的云 runner 上预下载的测试 toolchain wheel，随
+# ci-wheel/ 打进源码 tarball 送进 Pod。命中即完全免网——既躲开 mirror 空页，
+# 也躲开 Pod 出网代理（ptg-green-proxy）抖动。目录不存在（dispatch/push 无
+# wheel，或云端预下载失败）则自动跳过离线优先、直接走索引，行为不变。
+PPU_TOOLCHAIN_DIR="${PPU_TOOLCHAIN_DIR:-/workspace/source/ci-wheel/toolchain}"
 _pip_retry() {
     local max=8 n=1 wait_s
     local wh_args=()
     if [[ -d "${PPU_WHEELHOUSE}" ]]; then
         wh_args=(--find-links "${PPU_WHEELHOUSE}")
+    fi
+    # 离线优先：先用 --no-index 从本地 toolchain 目录装，成功即返回（无网络、
+    # 无自愈回写）。仅当本次请求的包能被离线解析时成功；否则（如 vllm 等不在
+    # toolchain 里）pip 立即失败（--no-index 不触网），落到下方索引重试循环。
+    if [[ -d "${PPU_TOOLCHAIN_DIR}" ]] && compgen -G "${PPU_TOOLCHAIN_DIR}/*.whl" > /dev/null 2>&1; then
+        # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）
+        if ${PIP_INSTALL} $@ --no-index --find-links "${PPU_TOOLCHAIN_DIR}"; then
+            echo "[deps] installed offline from ${PPU_TOOLCHAIN_DIR}: $*"
+            return 0
+        fi
+        echo "[deps] offline toolchain miss, fall back to index: $*" >&2
     fi
     while true; do
         # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）

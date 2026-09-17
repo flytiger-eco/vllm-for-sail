@@ -30,15 +30,23 @@ PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
 DIST_DIR="dist"
 mkdir -p "${DIST_DIR}"
 
+# 宿主侧 ccache 目录：由 workflow 的 actions/cache 恢复/保存，跨 run 持久。
+# 容器内固定挂到 /root/.ccache（root 的默认位置）。缺省给一个本地路径便于本机跑。
+HOST_CCACHE_DIR="${HOST_CCACHE_DIR:-$HOME/.cache/ppu-ccache}"
+mkdir -p "${HOST_CCACHE_DIR}"
+
 echo "----------------------------------------"
 echo "Build configuration"
-echo "TARGET_VERSION: ${TARGET_VERSION}"
-echo "PYTHON_VERSION: ${PYTHON_VERSION}"
-echo "CUDA_VERSION:   ${CUDA_VERSION}"
-echo "ARCH:           ${ARCH}"
-echo "BASE_IMG:       ${BASE_IMG}"
-echo "PYTHON_TAG:     ${PY_TAG}"
-echo "Output:         ${DIST_DIR}/"
+echo "TARGET_VERSION:  ${TARGET_VERSION}"
+echo "PYTHON_VERSION:  ${PYTHON_VERSION}"
+echo "CUDA_VERSION:    ${CUDA_VERSION}"
+echo "ARCH:            ${ARCH}"
+echo "BASE_IMG:        ${BASE_IMG}"
+echo "PYTHON_TAG:      ${PY_TAG}"
+echo "MAX_JOBS:        ${MAX_JOBS:-<unset→cpu_count>}"
+echo "NVCC_THREADS:    ${NVCC_THREADS:-<unset>}"
+echo "HOST_CCACHE_DIR: ${HOST_CCACHE_DIR}"
+echo "Output:          ${DIST_DIR}/"
 echo "----------------------------------------"
 
 # 用带引号的 heredoc（<<'INNER'）而不是 bash -c '...'：容器内脚本自身含单引号
@@ -46,25 +54,35 @@ echo "----------------------------------------"
 # 实测 printf '%s\n%s' 传到容器里变成 printf %sn%s，版本比较恒走 else 分支。
 # 引号化 heredoc 不做任何宿主端展开，变量全靠下面的 -e 传入。
 # -i 是必需的：heredoc 走 stdin 喂进容器。
-# 与 PR #6 成功版本一致，先不把 workflow 的并发变量传入云端容器；setup.py
-# 因此按容器 cpu_count 决定并发。
-#   -e MAX_JOBS="${MAX_JOBS:-}" \
-#   -e NVCC_THREADS="${NVCC_THREADS:-}" \
+# MAX_JOBS/NVCC_THREADS 经 docker -e 透传进容器，setup.py 据此决定编译并发
+# （不传时按容器 cpu_count）；CCACHE_DIR + ccache 挂载令 setup.py 探测到
+# 编译器 launcher，重复构建命中缓存跳过编译。
 docker run --rm -i \
   --network=host \
   -v "$(pwd):/workspace" \
+  -v "${HOST_CCACHE_DIR}:/root/.ccache" \
   -w /workspace \
   -e ARCH="${ARCH}" \
   -e TARGET_VERSION="${TARGET_VERSION}" \
   -e PYTHON_VERSION="${PYTHON_VERSION}" \
   -e CUDA_VERSION="${CUDA_VERSION}" \
   -e VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}" \
+  -e MAX_JOBS="${MAX_JOBS:-}" \
+  -e NVCC_THREADS="${NVCC_THREADS:-}" \
+  -e CCACHE_DIR="/root/.ccache" \
+  -e CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}" \
   "${BASE_IMG}" \
   bash -s <<'INNER'
 set -ex
 
 apt update
-apt install -y protobuf-compiler
+apt install -y protobuf-compiler ccache
+# ccache 就绪度自检：setup.py 靠 `which ccache` 决定是否接线，装不上就直接失败，
+# 免得静默退回全量编译还以为缓存生效。
+command -v ccache
+ccache --version | head -n1
+ccache --max-size="${CCACHE_MAXSIZE}"
+ccache --zero-stats
 # 与 PR #6 成功版本一致，先保留 Rust 环境准备；是否删除作为后续独立优化验证。
 if [ ! -d "$HOME/.cargo" ]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -114,6 +132,7 @@ clang --version
 nvcc --version
 asys --version
 ppu-smi --version
+# CCACHE_DIR 在 /root/.ccache，不受此清理影响
 rm -rf /tmp/*
 
 python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.11.0%2Bv0.1.0.ppu2.1.1/torch-2.11.0%2Bcu130ubuntu2404oe-cp312-cp312-linux_x86_64.whl --force-reinstall
@@ -126,6 +145,10 @@ export VLLM_REQUIRE_RUST_FRONTEND=0
 export TORCH_CUDA_ARCH_LIST="8.0"
 
 python3 setup.py bdist_wheel
+
+# 缓存命中率自检：hit/miss 是判断 ccache 是否真的接上编译的唯一硬证据。
+echo "==== ccache stats after build ===="
+ccache --show-stats
 INNER
 
 echo "Done. Wheels are in ${DIST_DIR}/"

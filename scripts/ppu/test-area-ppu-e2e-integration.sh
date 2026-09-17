@@ -1,4 +1,5 @@
 #!/bin/bash
+# [ci-smoke] 第二批 12 area PR 门禁全量验证触碰行（本 PR 勿合并）
 # ==============================================================================
 # scripts/ppu/test-area-ppu-e2e-integration.sh — PPU E2E Integration 测试执行（GitHub Actions）
 # ------------------------------------------------------------------------------
@@ -15,9 +16,9 @@
 #
 # 注意（GSM8K 离线数据）：tests/evals/gsm8k/gsm8k_eval.py 运行时从
 #   raw.githubusercontent.com 下载 train/test.jsonl 到 /tmp。红区 Pod 不通外网，
-#   需预置 /tmp/{train,test}.jsonl（数据仅 vendor 在 aone_ci/data/gsm8k/，为遵守
-#   "运行时零依赖 aone_ci/" 本脚本不引用该路径；数据 vendoring 到 fork 可用位置
-#   作为独立后续项处理，否则依赖 GSM8K 的用例会因 ConnectionError 失败）。
+#   下方 [setup] pre-cache 段从 /nas_aisw 候选路径预置 /tmp/{train,test}.jsonl
+#   （与 test-area-ppu-lm-eval.sh 一致）；NAS 未入库时 WARN 且 GSM8K 用例会
+#   因 ConnectionError 失败（恢复条件：jsonl 入库到任一候选路径）。
 # ==============================================================================
 
 set -euo pipefail
@@ -53,8 +54,43 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # 故此处无需再补装。
 
 # ------------------------------------------------------------------------------
+# [setup] pre-cache GSM8K jsonl（红区 pod 不通 raw.githubusercontent.com）
+# ------------------------------------------------------------------------------
+# gsm8k_eval.py:download_and_cache_file() 用 requests.get 直接拉 GitHub raw
+# 的 {train,test}.jsonl 到 /tmp/{train,test}.jsonl（os.path.exists 命中即复用）。
+# 红区无外网 → ConnectionError → 所有 GSM8K 用例 fail。HF_HUB_OFFLINE 只 hook
+# huggingface_hub，不影响 requests，无法绕开此下载。与 lm-eval 脚本同款逻辑：
+# 从 /nas_aisw 预置卷候选路径探测拷贝，缺失时 WARN（用例将 fail，日志可见原因）。
+# Run 34594819557 补齐：此前本脚本漏掉此段（lm-eval 有），e2e 两 step 必挂。
+echo "========== [setup] pre-cache gsm8k jsonl =========="
+for f in train.jsonl test.jsonl; do
+  dst="/tmp/${f}"
+  if [ -f "${dst}" ]; then
+    echo "[gsm8k] ${dst} already present"
+    continue
+  fi
+  for _cand in \
+    "/nas_aisw/datasets/gsm8k/${f}" \
+    "/nas_aisw/datasets/eval/gsm8k/${f}" \
+    "/nas_aisw/datasets/grade-school-math/${f}"; do
+    if [ -f "${_cand}" ]; then
+      cp "${_cand}" "${dst}" && echo "[gsm8k] cached ${f} <- ${_cand}"
+      break
+    fi
+  done
+  if [ ! -f "${dst}" ]; then
+    echo "[gsm8k] WARN: ${f} not found on /nas_aisw candidates — GSM8K tests will fail (待入库)"
+  fi
+done
+
+# ------------------------------------------------------------------------------
 # [tests] 用例选集（快照自 aone_ci/ppu_extras/e2e_integration.yaml single/multi 段）
 # ------------------------------------------------------------------------------
+# Run 34594819557 修复：models-ppu-e2e-{single,multi,fp8}.txt 及引用的 3 个
+# yaml（DeepSeek-V2-Lite-Prefetch-Offload / DeepSeek-V2-Lite-EP-EPLB /
+# Qwen3-30B-A3B-FP8-EP-EPLB）已补入 tests/evals/gsm8k/configs/（复刻 Aone
+# 侧已验证版本）。此前 7 个文件缺失，conftest 无参数化源 → 收集 1 个裸
+# test_gsm8k_correctness 报 fixture 'config_filename' not found（2 step 全挂）。
 # single = Aone "e2e-integration single" job（1-PPU pod）：
 #   - e2e_prefetch_offload：DeepSeek-V2-Lite prefetch offload 精度验证（1 GPU）;
 #     GSM8K eval 框架，threshold=0.25，200 questions（本脚本 single 段
