@@ -585,7 +585,7 @@ def _deepgemm_grouped_int8_gemm_nt_contiguous_warmup(
                 out[:num_tokens],
                 expert_ids[:num_tokens],
                 None,
-                best_config,
+                configs=best_config,
             )
             if pbar is not None:
                 pbar.update(1)
