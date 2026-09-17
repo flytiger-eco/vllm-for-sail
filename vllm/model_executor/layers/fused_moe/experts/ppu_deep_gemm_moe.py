@@ -458,7 +458,7 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
                 mm1_out,
                 expert_ids,
                 experts_for_rows,
-                best_config,
+                configs=best_config,
             )
             activation_out_dim = self.adjust_N_for_activation(N, activation)
             quant_out = _resize_cache(
@@ -482,7 +482,7 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
                 mm2_out,
                 expert_ids,
                 experts_for_rows,
-                best_config,
+                configs=best_config,
             )
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_int4_w4a16:
             if self.quant_config.use_mxfp4_w4a16:
