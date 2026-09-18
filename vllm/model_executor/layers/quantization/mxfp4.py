@@ -59,6 +59,8 @@ class Mxfp4Config(QuantizationConfig):
     register themselves as the handler for a specific checkpoint format.
     """
 
+    supports_kimi_k3_quantized_latent_projections = True
+
     def __init__(self, ignored_layers: list[str] | None = None,
                  fp8_channelwise_layers: list[str] | None = None):
         super().__init__()

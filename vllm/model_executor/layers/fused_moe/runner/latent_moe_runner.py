@@ -38,17 +38,25 @@ class LatentMoERunner(MoERunner):
         super().__init__(*args, **kwargs)
         self.enable_k3_latent_moe_tail_fusion = enable_k3_latent_moe_tail_fusion
         use_fused_path = self._use_fused_path()
-        if (
-            self.enable_k3_latent_moe_tail_fusion
-            and use_fused_path
-            and self.moe_config.tp_size not in (8, 16)
-        ):
-            logger.warning_once(
-                "K3 latent-MoE tail fusion currently supports TP=8 and TP=16, "
-                "but TP=%d is configured. Falling back to the default path.",
-                self.moe_config.tp_size,
-            )
-            self.enable_k3_latent_moe_tail_fusion = False
+        if self.enable_k3_latent_moe_tail_fusion and use_fused_path:
+            if self.moe_config.tp_size not in (8, 16):
+                logger.warning_once(
+                    "K3 latent-MoE tail fusion currently supports TP=8 and TP=16, "
+                    "but TP=%d is configured. Falling back to the default path.",
+                    self.moe_config.tp_size,
+                )
+                self.enable_k3_latent_moe_tail_fusion = False
+            elif (
+                self.routed_output_transform is not None
+                and self.routed_output_transform.up_proj.weight.dtype
+                != torch.bfloat16
+            ):
+                logger.warning_once(
+                    "K3 latent-MoE tail fusion requires bfloat16 up-proj weight, "
+                    "but got %s. Falling back to the default path.",
+                    self.routed_output_transform.up_proj.weight.dtype,
+                )
+                self.enable_k3_latent_moe_tail_fusion = False
 
         if self.enable_k3_latent_moe_tail_fusion and use_fused_path:
             vllm_config = get_current_vllm_config()
@@ -204,11 +212,12 @@ class LatentMoERunner(MoERunner):
             shared_expert_stream.wait_stream(main)
             with torch.cuda.stream(shared_expert_stream):
                 shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = torch.mm(fused_latent, transform.up_proj.weight.t())
+            result = transform.up_proj(fused_latent)
             main.wait_stream(shared_expert_stream)
         else:
             shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = torch.mm(fused_latent, transform.up_proj.weight.t())
+            result = transform.up_proj(fused_latent)
+        result = result[0] if isinstance(result, tuple) else result
         result.add_(shared_output)
 
         # Output is already fully reduced; this only strips padding.
