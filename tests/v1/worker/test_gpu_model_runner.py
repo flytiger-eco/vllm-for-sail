@@ -12,6 +12,9 @@ import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -37,11 +40,13 @@ from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -1592,6 +1597,188 @@ def test_is_uniform_decode() -> None:
         num_reqs=15,
         force_uniform_decode=False,
     )
+
+
+def _make_gdn_dispatch_runner(cudagraph_mode, num_spec_tokens=2, has_gdn=True):
+    """Use real dispatch/padding without initializing a model or a GPU."""
+    compilation = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=cudagraph_mode,
+        cudagraph_capture_sizes=[3, 6, 9, 12],
+        max_cudagraph_capture_size=12,
+    )
+    parallel = ParallelConfig()
+    compilation.set_splitting_ops_for_v1(
+        all2all_backend=parallel.all2all_backend, data_parallel_size=1
+    )
+    compilation.post_init_cudagraph_sizes()
+    config = Mock(spec=VllmConfig)
+    config.compilation_config = compilation
+    config.parallel_config = parallel
+    config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
+    config.num_speculative_tokens = num_spec_tokens
+    config.lora_config = None
+    config.observability_config = SimpleNamespace(cudagraph_metrics=False)
+    runner = object.__new__(GPUModelRunner)
+    runner.vllm_config = config
+    runner.compilation_config = compilation
+    runner.parallel_config = parallel
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.input_batch = SimpleNamespace(lora_id_to_lora_request={})
+    runner._has_gdn_attention = has_gdn
+    runner.num_spec_tokens = num_spec_tokens
+    runner.uniform_decode_query_len = 1 + num_spec_tokens
+    # An old pure-spec batch must not make missing current markers eligible.
+    runner.num_decode_draft_tokens = SimpleNamespace(np=np.array([2, 2, 2]))
+    runner.cudagraph_dispatcher = CudagraphDispatcher(config)
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys(
+        cudagraph_mode, uniform_decode_query_len=runner.uniform_decode_query_len
+    )
+    return runner
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+@pytest.mark.parametrize(
+    "query_lens,draft_lens,num_spec_tokens,has_gdn,force_uniform,expect_full",
+    [
+        pytest.param([3, 3, 3], [2, 2, 2], 2, True, None, True, id="pure-spec"),
+        pytest.param([3, 3, 3], [2, -1, 2], 2, True, None, False, id="mixed"),
+        pytest.param([3, 3, 3], None, 2, True, None, False, id="missing-markers"),
+        pytest.param([2], [1], 2, True, None, False, id="short-spec"),
+        pytest.param([1, 1, 1], [0, 0, 0], 2, True, None, False, id="no-drafts"),
+        pytest.param([1, 1, 1], None, 0, True, None, True, id="gdn-without-spec"),
+        pytest.param([3, 3, 3], None, 2, False, None, True, id="non-gdn"),
+        pytest.param([3, 3, 3], None, 2, True, True, True, id="capture"),
+    ],
+)
+def test_gdn_spec_dispatch_requires_current_pure_spec_batch(
+    cudagraph_mode,
+    query_lens,
+    draft_lens,
+    num_spec_tokens,
+    has_gdn,
+    force_uniform,
+    expect_full,
+):
+    runner = _make_gdn_dispatch_runner(cudagraph_mode, num_spec_tokens, has_gdn)
+    mode, descriptor, _, _, _ = runner._determine_batch_execution_and_padding(
+        num_tokens=sum(query_lens),
+        num_reqs=len(query_lens),
+        num_scheduled_tokens_np=np.array(query_lens),
+        max_num_scheduled_tokens=max(query_lens),
+        use_cascade_attn=False,
+        force_uniform_decode=force_uniform,
+        num_decode_draft_tokens_cpu=(
+            None if draft_lens is None else np.array(draft_lens)
+        ),
+    )
+    expected = CUDAGraphMode.FULL if expect_full else cudagraph_mode.mixed_mode()
+    assert mode == expected
+    assert descriptor.uniform == expect_full
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_gdn_spec_dispatch_preserves_restrictions_after_dp_sync(
+    monkeypatch, cudagraph_mode
+):
+    runner = _make_gdn_dispatch_runner(cudagraph_mode)
+    runner.parallel_config.data_parallel_size = 2
+    fallback = cudagraph_mode.mixed_mode()
+    coordinate = Mock(return_value=(False, torch.tensor([12, 12]), fallback.value))
+    monkeypatch.setattr(
+        gpu_model_runner_module, "coordinate_batch_across_dp", coordinate
+    )
+    dispatch = Mock(wraps=runner.cudagraph_dispatcher.dispatch)
+    monkeypatch.setattr(runner.cudagraph_dispatcher, "dispatch", dispatch)
+    mode, descriptor, _, _, _ = runner._determine_batch_execution_and_padding(
+        num_tokens=9,
+        num_reqs=3,
+        num_scheduled_tokens_np=np.array([3, 3, 3]),
+        max_num_scheduled_tokens=3,
+        use_cascade_attn=False,
+        num_decode_draft_tokens_cpu=np.array([2, -1, 2]),
+    )
+    assert mode == fallback
+    assert descriptor.num_tokens == 12
+    assert not descriptor.uniform
+    coordinate.assert_called_once()
+    assert coordinate.call_args.kwargs["uniform_decode"] is False
+    assert coordinate.call_args.kwargs["cudagraph_mode"] == fallback.value
+    assert dispatch.call_count == 2
+    assert dispatch.call_args.kwargs["valid_modes"] == {fallback}
+    for call in dispatch.call_args_list:
+        assert call.kwargs["invalid_modes"] == {CUDAGraphMode.FULL}
+
+
+@pytest.mark.parametrize("private_kda", [False, True], ids=["shared-kda", "kimi-k3"])
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_kda_backend_initialization_guards_mixed_spec_graphs(
+    monkeypatch, private_kda, cudagraph_mode
+):
+    """Both KDA builders must activate the guard and recover pure-spec FULL."""
+    from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAAttentionBackend
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+
+    backend = KimiK3KDAAttentionBackend if private_kda else GDNAttentionBackend
+    runner = _make_gdn_dispatch_runner(cudagraph_mode, has_gdn=False)
+    runner.attn_groups = []
+    runner.kv_sharing_fast_prefill_eligible_layers = set()
+    layer = SimpleNamespace(get_attn_backend=lambda: backend)
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_layers_from_vllm_config",
+        lambda *args: {"layer.0": layer},
+    )
+    monkeypatch.setattr(runner, "_check_and_update_cudagraph_mode", Mock())
+    monkeypatch.setattr(
+        gpu_model_runner_module, "check_attention_cp_compatibility", Mock()
+    )
+    runner.initialize_attn_backend(
+        KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["layer.0"],
+                    kv_cache_spec=MambaSpec(
+                        block_size=16,
+                        shapes=((16, 64),),
+                        dtypes=(torch.float32,),
+                        num_speculative_blocks=2,
+                    ),
+                )
+            ],
+        )
+    )
+    assert runner._has_gdn_attention
+    assert runner.attn_groups[0][0].backend is backend
+
+    fallback = cudagraph_mode.mixed_mode()
+    for query_lens, draft_lens, expected in (
+        ([3, 3, 3], [2, 2, 2], CUDAGraphMode.FULL),
+        ([2], [1], fallback),
+        ([3, 3, 3], [2, -1, 2], fallback),
+        ([3, 3, 3], [2, 2, 2], CUDAGraphMode.FULL),
+    ):
+        mode, descriptor, _, _, _ = runner._determine_batch_execution_and_padding(
+            num_tokens=sum(query_lens),
+            num_reqs=len(query_lens),
+            num_scheduled_tokens_np=np.array(query_lens),
+            max_num_scheduled_tokens=max(query_lens),
+            use_cascade_attn=False,
+            num_decode_draft_tokens_cpu=np.array(draft_lens),
+        )
+        assert mode == expected
+        assert descriptor.uniform == (expected == CUDAGraphMode.FULL)
 
 
 @pytest.mark.skipif(

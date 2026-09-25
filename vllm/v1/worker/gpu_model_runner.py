@@ -613,6 +613,7 @@ class GPUModelRunner(
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
+        self._has_gdn_attention = False
         # self.kv_cache_config: KVCacheConfig
 
         # mm_hash ->  encoder_output
@@ -4001,6 +4002,7 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        num_decode_draft_tokens_cpu: np.ndarray | None = None,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -4015,6 +4017,25 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        # Equal query lengths do not distinguish speculative decode from a
+        # short prefill. GDN/KDA FULL graphs capture only the pure-spec branch.
+        # Capture/dummy runs synthesize their own metadata instead of using
+        # the current scheduler's draft markers.
+        gdn_spec_mismatch = (
+            self._has_gdn_attention
+            and self.num_spec_tokens > 0
+            and force_uniform_decode is None
+            and not (
+                uniform_decode
+                and num_decode_draft_tokens_cpu is not None
+                and len(num_decode_draft_tokens_cpu) >= num_reqs
+                and not np.count_nonzero(
+                    num_decode_draft_tokens_cpu[:num_reqs] != self.num_spec_tokens
+                )
+            )
+        )
+        if gdn_spec_mismatch:
+            uniform_decode = False
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
@@ -4031,7 +4052,9 @@ class GPUModelRunner(
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
 
-        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+        disable_full = use_cascade_attn or has_encoder_output or gdn_spec_mismatch
+
+        def dispatch_cudagraph(num_tokens, valid_modes=None):
             return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
@@ -4041,9 +4064,7 @@ class GPUModelRunner(
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
-        )
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
             assert (
@@ -4264,7 +4285,6 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
-
             if NVTX_PROFILE:
                 sche_mark(scheduler_output)
 
@@ -4343,6 +4363,11 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                num_decode_draft_tokens_cpu=(
+                    self.num_decode_draft_tokens.np[:num_reqs]
+                    if scheduler_output.scheduled_spec_decode_tokens
+                    else None
+                ),
             )
 
             logger.debug(
@@ -4502,12 +4527,11 @@ class GPUModelRunner(
             _total_bs = len(scheduler_output.num_scheduled_tokens)
             _spec_tokens = scheduler_output.scheduled_spec_decode_tokens
             _p_bs = sum(
-                1 for rid, n in scheduler_output.num_scheduled_tokens.items()
+                1
+                for rid, n in scheduler_output.num_scheduled_tokens.items()
                 if n - len(_spec_tokens.get(rid, ())) > 1
             )
-            th_nvtx_range_push(
-                f"total bs={_total_bs}, P bs={_p_bs}"
-            )
+            th_nvtx_range_push(f"total bs={_total_bs}, P bs={_p_bs}")
 
         with (
             set_forward_context(
@@ -4571,7 +4595,8 @@ class GPUModelRunner(
                 sample_hidden_states = hidden_states[logits_indices]
                 if NVTX_PROFILE:
                     th_nvtx_range_push(
-                        f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
+                        "[FW_GEMM] op:compute_logits,"
+                        f"hidden_states:{sample_hidden_states.shape}"
                     )
                 logits = self.model.compute_logits(sample_hidden_states)
                 if NVTX_PROFILE:
@@ -4596,7 +4621,8 @@ class GPUModelRunner(
                 else:
                     if NVTX_PROFILE:
                         th_nvtx_range_push(
-                            f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
+                            "[FW_GEMM] op:compute_logits,"
+                            f"hidden_states:{sample_hidden_states.shape}"
                         )
                     logits = self.model.compute_logits(sample_hidden_states)
                     if NVTX_PROFILE:
@@ -7225,6 +7251,12 @@ class GPUModelRunner(
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        self._has_gdn_attention = any(
+            issubclass(backend.get_builder_cls(), GDNAttentionMetadataBuilder)
+            for backends in attention_backend_list
+            for backend in backends
+        )
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]

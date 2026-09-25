@@ -1045,6 +1045,25 @@ class Worker(WorkerBase):
                 list(scheduler_output.num_scheduled_tokens.values()),
                 dtype=np.int32,
             )
+            num_decode_draft_tokens_cpu = None
+            if (
+                self.model_runner._has_gdn_attention
+                and self.model_runner.num_spec_tokens > 0
+                and scheduler_output.scheduled_spec_decode_tokens
+            ):
+                # This prepass runs before the runner prepares its CPU buffers.
+                # Match its draft markers using this step's scheduler output.
+                num_decode_draft_tokens_cpu = np.full(
+                    len(num_scheduled_tokens_np), -1, dtype=np.int32
+                )
+                for i, (req_id, num_tokens) in enumerate(
+                    scheduler_output.num_scheduled_tokens.items()
+                ):
+                    draft_tokens = scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id
+                    )
+                    if draft_tokens is not None and num_tokens == len(draft_tokens) + 1:
+                        num_decode_draft_tokens_cpu[i] = len(draft_tokens)
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
             # in `execute_model`) but this requires a larger refactor of PP.
@@ -1055,6 +1074,7 @@ class Worker(WorkerBase):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
                     use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
+                    num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
                 )
             )
             all_gather_tensors = {

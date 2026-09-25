@@ -6,20 +6,27 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm.model_executor.layers.mamba.gdn import kimi_gdn_linear_attn
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.models.kimi_k3.nvidia import kda as kimi_k3_kda
 from vllm.models.kimi_k3.nvidia.kda import (
+    KimiK3DeltaAttention,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
+from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
+from vllm.models.kimi_k3.nvidia.ops.third_party import kda as kda_ops
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
@@ -30,8 +37,121 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 DEVICE = "cuda"
+
+
+@pytest.mark.parametrize("implementation", ["kimi-linear", "kimi-k3"])
+@pytest.mark.parametrize(
+    "spec_mask", [[True, False, True], [False, True, True], [True, True]]
+)
+def test_kda_forward_preserves_token_identity(monkeypatch, implementation, spec_mask):
+    """Check routing through the real core with CPU kernel stand-ins.
+
+    Every QKV, gate, beta and output-gate row has a distinct token identity;
+    convolution also depends on each request's state index and boundaries.
+    The golden is computed in the original order without partitioning.
+    """
+    is_k3 = implementation == "kimi-k3"
+    module = kimi_k3_kda if is_k3 else kimi_gdn_linear_attn
+    layer_type = (
+        KimiK3DeltaAttention
+        if is_k3
+        else kimi_gdn_linear_attn.KimiGatedDeltaNetAttention
+    )
+    metadata_type = KimiK3KDAMetadata if is_k3 else GDNAttentionMetadata
+    mask = torch.tensor(spec_mask)
+    num_spec, num_prefill = sum(spec_mask), len(spec_mask) - sum(spec_mask)
+    num_tokens = 3 * len(spec_mask)
+    slots = torch.arange(1, num_tokens + 1, dtype=torch.int32).reshape(-1, 3)
+    meta = metadata_type(
+        num_prefills=num_prefill,
+        num_prefill_tokens=3 * num_prefill,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=num_spec,
+        num_spec_decode_tokens=3 * num_spec,
+        num_actual_tokens=num_tokens,
+        has_initial_state=torch.ones(num_prefill, dtype=torch.bool),
+        spec_query_start_loc=torch.arange(num_spec + 1, dtype=torch.int32) * 3,
+        non_spec_query_start_loc=torch.arange(num_prefill + 1, dtype=torch.int32) * 3,
+        spec_state_indices_tensor=slots[mask],
+        non_spec_state_indices_tensor=slots[~mask, 0],
+        spec_sequence_masks=None if is_k3 else mask,
+        spec_token_indx=mask.repeat_interleave(3).nonzero().flatten(),
+        non_spec_token_indx=(~mask).repeat_interleave(3).nonzero().flatten(),
+        num_accepted_tokens=torch.ones(num_spec, dtype=torch.int32),
+    )
+    context = SimpleNamespace(attn_metadata={"kda": meta})
+    monkeypatch.setattr(module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(module, "is_conv_state_dim_first", lambda: True)
+    # The shared core imports a vendor module inside _forward. The stand-ins
+    # exercise its host logic independently of the machine's GPU vendor.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+
+    def conv_value(x, indices, cu):
+        offsets = indices.repeat_interleave(cu.diff()).to(x.dtype)
+        return 2 * x + offsets.unsqueeze(-1)
+
+    def conv_update(x, *args, conv_state_indices, query_start_loc, out, **kwargs):
+        out.copy_(conv_value(x, conv_state_indices, query_start_loc))
+        return out
+
+    def conv_prefill(x, *args, cache_indices, query_start_loc, **kwargs):
+        return conv_value(x.T, cache_indices, query_start_loc).T
+
+    def recurrent(*, q, k, v, raw_g, raw_beta, initial_state, out=None, **kwargs):
+        result = q + 2 * k + 3 * v + 5 * raw_g + 7 * raw_beta.unsqueeze(-1)
+        if out is not None:
+            out.copy_(result)
+            result = out
+        return result, initial_state
+
+    monkeypatch.setattr(module, "causal_conv1d_update", conv_update)
+    monkeypatch.setattr(module, "causal_conv1d_fn", conv_prefill)
+    monkeypatch.setattr(
+        module, "gather_initial_states", lambda state, indices, mask: state[indices]
+    )
+    monkeypatch.setattr(kda_ops, "fused_recurrent_kda", recurrent)
+    monkeypatch.setattr(kda_ops, "chunk_kda_with_fused_gate", recurrent)
+    layer = SimpleNamespace(
+        prefix="kda",
+        local_projection_size=1,
+        head_dim=1,
+        conv1d=SimpleNamespace(weight=torch.ones(3, 1, 2), bias=None),
+        kv_cache=(
+            torch.zeros(num_tokens + 1, 3, 2),
+            torch.zeros(num_tokens + 1, 1, 1, 1),
+        ),
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        gate_lower_bound=-5.0,
+        decode_conv1d_weight=None,
+        decode_norm_weight=None,
+        kda_prefill_backend="triton",
+        o_norm=lambda value, gate: value + 11 * gate.unsqueeze(0),
+    )
+    # Match projection views: QKV, beta and output gate share row-strided storage.
+    token = torch.arange(num_tokens, dtype=torch.float32)
+    projection = torch.stack(
+        [token + offset for offset in (1, 101, 201, 301, 401)], dim=1
+    )
+    original = projection.clone()
+    mixed_qkv = projection[:, :3]
+    beta = projection[:, 3:4].unsqueeze(0)
+    g2 = projection[:, 4:5].unsqueeze(-1)
+    g1 = (token + 501).reshape(1, num_tokens, 1, 1)
+    output = torch.empty(1, num_tokens, 1, 1)
+    layer_type._forward(layer, mixed_qkv, g1, g2, beta, output)
+
+    conv_offset = (token // 3) * 3 + 1
+    q, k, v = (2 * original[:, i] + conv_offset for i in range(3))
+    expected = (
+        q + 2 * k + 3 * v + 5 * (token + 501) + 7 * original[:, 3] + 11 * original[:, 4]
+    )
+    torch.testing.assert_close(output.flatten(), expected, atol=0, rtol=0)
+    torch.testing.assert_close(projection, original, atol=0, rtol=0)
 
 
 @torch.inference_mode()

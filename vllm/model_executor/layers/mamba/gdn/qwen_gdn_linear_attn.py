@@ -262,9 +262,7 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl", "pla") and (
-            active_backend != backend
-        ):
+        if backend in ("flashinfer", "cutedsl", "pla") and (active_backend != backend):
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
@@ -423,6 +421,7 @@ class ChunkGatedDeltaRule(CustomOp):
         )
 
         pla_chunk_gated_delta_rule_fwd = get_sail_cuda_pla_prefill_fwd()
+        assert pla_chunk_gated_delta_rule_fwd is not None
         _, _, o, _, final_state = pla_chunk_gated_delta_rule_fwd(
             q.unsqueeze(0),
             k.unsqueeze(0),
@@ -1355,9 +1354,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
                 mixed_qkv_non_spec = None
+                a_spec, b_spec = a, b
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
@@ -1484,8 +1486,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_spec,
+                    b=b_spec,
                     dt_bias=self.dt_bias,
                     q=query_spec,
                     k=key_spec,
