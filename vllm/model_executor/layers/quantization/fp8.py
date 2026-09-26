@@ -201,9 +201,17 @@ class Fp8Config(QuantizationConfig):
                 offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return offline_method
         elif isinstance(layer, RoutedExperts):
+            from vllm.model_executor.layers.quantization.compressed_tensors.utils import (  # noqa: E501
+                should_ignore_layer,
+            )
+
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ) or should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)

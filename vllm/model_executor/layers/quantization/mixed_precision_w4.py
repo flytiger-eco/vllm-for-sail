@@ -162,6 +162,10 @@ class MixedPrecisionW4Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+            ) or should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if should_ignore_layer(prefix,

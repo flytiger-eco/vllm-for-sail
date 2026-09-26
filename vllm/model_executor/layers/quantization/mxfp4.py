@@ -152,10 +152,21 @@ class Mxfp4Config(QuantizationConfig):
             # the checkpoint lists under ``ignore``) are stored unquantized;
             # route them to UnquantizedFusedMoEMethod so the param shape
             # matches the BF16 checkpoint instead of the MXFP4-packed layout.
-            if self.ignored_layers and is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
+            from vllm.model_executor.layers.quantization.compressed_tensors.utils import (  # noqa: E501
+                should_ignore_layer,
+            )
+
+            if self.ignored_layers and (
+                is_layer_skipped(
+                    prefix=prefix,
+                    ignored_layers=self.ignored_layers,
+                    fused_mapping=self.packed_modules_mapping,
+                )
+                or should_ignore_layer(
+                    prefix,
+                    ignore=self.ignored_layers,
+                    fused_mapping=self.packed_modules_mapping,
+                )
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return self._make_moe_method(layer.moe_config)
