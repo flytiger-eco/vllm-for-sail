@@ -613,9 +613,9 @@ class GPUModelRunner(
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
-        self._has_gdn_attention = False
         # self.kv_cache_config: KVCacheConfig
 
+        self._has_gdn_attention = False
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
         self.late_interaction_runner = LateInteractionRunner()
@@ -4359,17 +4359,17 @@ class GPUModelRunner(
                 num_tokens_across_dp,
                 cudagraph_stats,
             ) = self._determine_batch_execution_and_padding(
+                num_decode_draft_tokens_cpu=(
+                    self.num_decode_draft_tokens.np[:num_reqs]
+                    if scheduler_output.scheduled_spec_decode_tokens
+                    else None
+                ),
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                num_decode_draft_tokens_cpu=(
-                    self.num_decode_draft_tokens.np[:num_reqs]
-                    if scheduler_output.scheduled_spec_decode_tokens
-                    else None
-                ),
             )
 
             logger.debug(
