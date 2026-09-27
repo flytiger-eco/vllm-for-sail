@@ -4017,6 +4017,20 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
+        # is present). Also, chunked-prefill is disabled, so batch are uniform.
+        has_encoder_output = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+
+        # Compute LoRA state for cudagraph dispatch
+        num_active_loras = (
+            force_num_active_loras
+            if force_num_active_loras is not None
+            else len(self.input_batch.lora_id_to_lora_request)
+        )
+        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
+
         # Equal query lengths do not distinguish speculative decode from a
         # short prefill. GDN/KDA FULL graphs capture only the pure-spec branch.
         # Capture/dummy runs synthesize their own metadata instead of using
@@ -4036,19 +4050,6 @@ class GPUModelRunner(
         )
         if gdn_spec_mismatch:
             uniform_decode = False
-        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
-        # is present). Also, chunked-prefill is disabled, so batch are uniform.
-        has_encoder_output = (
-            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
-        )
-
-        # Compute LoRA state for cudagraph dispatch
-        num_active_loras = (
-            force_num_active_loras
-            if force_num_active_loras is not None
-            else len(self.input_batch.lora_id_to_lora_request)
-        )
-        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
 
@@ -4284,6 +4285,7 @@ class GPUModelRunner(
         ):
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
+
 
             if NVTX_PROFILE:
                 sche_mark(scheduler_output)
@@ -4527,11 +4529,12 @@ class GPUModelRunner(
             _total_bs = len(scheduler_output.num_scheduled_tokens)
             _spec_tokens = scheduler_output.scheduled_spec_decode_tokens
             _p_bs = sum(
-                1
-                for rid, n in scheduler_output.num_scheduled_tokens.items()
+                1 for rid, n in scheduler_output.num_scheduled_tokens.items()
                 if n - len(_spec_tokens.get(rid, ())) > 1
             )
-            th_nvtx_range_push(f"total bs={_total_bs}, P bs={_p_bs}")
+            th_nvtx_range_push(
+                f"total bs={_total_bs}, P bs={_p_bs}"
+            )
 
         with (
             set_forward_context(
@@ -4595,8 +4598,7 @@ class GPUModelRunner(
                 sample_hidden_states = hidden_states[logits_indices]
                 if NVTX_PROFILE:
                     th_nvtx_range_push(
-                        "[FW_GEMM] op:compute_logits,"
-                        f"hidden_states:{sample_hidden_states.shape}"
+                        f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
                     )
                 logits = self.model.compute_logits(sample_hidden_states)
                 if NVTX_PROFILE:
@@ -4621,8 +4623,7 @@ class GPUModelRunner(
                 else:
                     if NVTX_PROFILE:
                         th_nvtx_range_push(
-                            "[FW_GEMM] op:compute_logits,"
-                            f"hidden_states:{sample_hidden_states.shape}"
+                            f"[FW_GEMM] op:compute_logits,hidden_states:{sample_hidden_states.shape}"
                         )
                     logits = self.model.compute_logits(sample_hidden_states)
                     if NVTX_PROFILE:

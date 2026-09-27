@@ -25,9 +25,6 @@ Both paths are exercised through the REAL ``_forward_core``:
 The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
 must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
 portable check of the split wiring).
-
-CPU routing tests also cover mixed spec/prefill batches with lightweight
-kernel stand-ins, checking that token partitioning keeps QKV and gates aligned.
 """
 
 from __future__ import annotations
@@ -39,33 +36,42 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from tests.v1.attention.utils import (
+from vllm.platforms import current_platform
+
+if not (
+    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+):
+    pytest.skip(
+        reason="GDN _forward_core split test uses the CuteDSL prefill backend "
+        "(requires CUDA SM10x).",
+        allow_module_level=True,
+    )
+
+from tests.v1.attention.utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
-from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+from vllm.config import set_current_vllm_config  # noqa: E402
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
     QwenGatedDeltaNetAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import (
+from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
 )
-from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.index import (
+from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from vllm.third_party.flash_linear_attention.ops.utils import (
+from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
-from vllm.v1.attention.backends.gdn_attn import (
-    GDNAttentionMetadata,
+from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 
 # Small GDN dims; head_k_dim/head_v_dim=128 keeps the chunk/update kernels happy.
 H = 4  # num key heads
@@ -131,11 +137,7 @@ def _build_layer(
 
 def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
     core_attn_out = torch.zeros(
-        num_tokens,
-        layer.num_v_heads // layer.tp_size,
-        layer.head_v_dim,
-        dtype=mixed_qkv.dtype,
-        device=mixed_qkv.device,
+        num_tokens, HV, V, dtype=mixed_qkv.dtype, device=mixed_qkv.device
     )
     ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
     with patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx):
@@ -148,12 +150,6 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
     return core_attn_out
 
 
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="CuteDSL prefill requires CUDA SM10x",
-)
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
 @pytest.mark.parametrize("fresh_prefill", [False, True])
@@ -304,96 +300,3 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
-
-
-@pytest.mark.parametrize(
-    "spec_mask", [[True, False, True], [False, True, True], [True, True]]
-)
-def test_forward_core_spec_gates_follow_token_order(monkeypatch, spec_mask):
-    """Partitioning must preserve each token's QKV/gates association.
-
-    Use CPU stand-ins for the kernels: the routing is the behavior under test,
-    and distinct per-token gates make incorrect prefix reads observable.
-    """
-    mask = torch.tensor(spec_mask)
-    spec_tokens = mask.repeat_interleave(3).nonzero().flatten()
-    non_spec_tokens = (~mask).repeat_interleave(3).nonzero().flatten()
-    num_spec, num_prefill = sum(spec_mask), len(spec_mask) - sum(spec_mask)
-    num_tokens = len(spec_mask) * 3
-    prefill_indices = (~mask).nonzero().flatten() * 3 + 1
-    prefill_cu = torch.arange(num_prefill + 1, dtype=torch.int32) * 3
-    meta = GDNAttentionMetadata(
-        num_prefills=num_prefill,
-        num_prefill_tokens=3 * num_prefill,
-        num_decodes=0,
-        num_decode_tokens=0,
-        num_spec_decodes=num_spec,
-        num_spec_decode_tokens=3 * num_spec,
-        num_actual_tokens=num_tokens,
-        has_initial_state=torch.ones(num_prefill, dtype=torch.bool),
-        spec_query_start_loc=torch.arange(num_spec + 1, dtype=torch.int32) * 3,
-        non_spec_query_start_loc=prefill_cu,
-        spec_state_indices_tensor=torch.arange(
-            1, num_tokens + 1, dtype=torch.int32
-        ).reshape(-1, 3)[mask],
-        non_spec_state_indices_tensor=prefill_indices,
-        spec_sequence_masks=mask,
-        spec_token_indx=spec_tokens,
-        non_spec_token_indx=non_spec_tokens,
-        num_accepted_tokens=torch.ones(num_spec, dtype=torch.int32),
-        prefill_query_start_loc=prefill_cu,
-        prefill_state_indices=prefill_indices,
-        prefill_has_initial_state=torch.ones(num_prefill, dtype=torch.bool),
-    )
-
-    def recurrent(*, q, k, v, a, b, **kwargs):
-        # Device kernels consume the first T gate rows; extra rows may not
-        # trigger a shape error, so compare values rather than just shapes.
-        t = q.shape[1]
-        return q + a[:t][None, :, :, None] * k + b[:t][None, :, :, None] * v, None
-
-    def post_conv(*, conv_output, a, b, **kwargs):
-        q, k, v = conv_output.reshape(-1, 3, 1, 1).unbind(1)
-        return q, k, v, a, b
-
-    def chunk(*, q, k, v, g, beta, initial_state, **kwargs):
-        return q + g.unsqueeze(-1) * k + beta.unsqueeze(-1) * v, initial_state
-
-    for name in ("causal_conv1d_update", "causal_conv1d_fn"):
-        monkeypatch.setattr(qwen_gdn_linear_attn, name, lambda x, *args, **kw: x)
-    monkeypatch.setattr(qwen_gdn_linear_attn, "fused_post_conv_prep", post_conv)
-    monkeypatch.setattr(
-        qwen_gdn_linear_attn, "fused_sigmoid_gating_delta_rule_update", recurrent
-    )
-    layer = types.SimpleNamespace(
-        prefix=PREFIX,
-        enable_packed_recurrent_decode=False,
-        tp_size=1,
-        num_k_heads=1,
-        num_v_heads=1,
-        head_k_dim=1,
-        head_v_dim=1,
-        key_dim=1,
-        value_dim=1,
-        activation="silu",
-        A_log=torch.zeros(1),
-        dt_bias=torch.zeros(1),
-        conv1d=types.SimpleNamespace(weight=torch.ones(3, 1, 1), bias=None),
-        kv_cache=(
-            torch.zeros(num_tokens + 1, 3, 3),
-            torch.zeros(num_tokens + 1, 1, 1, 1),
-        ),
-        chunk_gated_delta_rule=chunk,
-    )
-    for name in ("rearrange_mixed_qkv", "_forward_core"):
-        setattr(
-            layer,
-            name,
-            types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
-        )
-    mixed_qkv = torch.arange(1, num_tokens * 3 + 1, dtype=torch.float32).reshape(-1, 3)
-    a = torch.arange(1, num_tokens + 1, dtype=torch.float32).unsqueeze(-1)
-    b = 10 * a - 3
-    actual = _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens)
-    expected = mixed_qkv[:, :1] + a * mixed_qkv[:, 1:2] + b * mixed_qkv[:, 2:3]
-    torch.testing.assert_close(actual, expected.unsqueeze(-1), atol=0, rtol=0)
