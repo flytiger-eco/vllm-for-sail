@@ -207,7 +207,7 @@ def _flashkda_prefill(
             g=g.view(B * T, H, D),
             beta=beta.view(B * T, H),
             A_log=A_log,
-            dt_bias=dt_bias,
+            dt_bias=dt_bias.view(H, D),
             out=out.view(B * T, H, D),
             scale=q.shape[-1] ** -0.5,
             lower_bound=lower_bound,
