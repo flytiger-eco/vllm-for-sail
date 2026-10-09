@@ -1,0 +1,2 @@
+Qwen3-0.6B-FP8.yaml
+Qwen1.5-MoE-W4A16-CT.yaml

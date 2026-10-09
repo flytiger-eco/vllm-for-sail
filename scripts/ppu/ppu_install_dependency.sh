@@ -1,0 +1,261 @@
+#!/bin/bash
+# [ci-smoke] 10-area 全量验证触碰行（快速档×4 + 标签档×6，本 PR 勿合并）
+# ==============================================================================
+# scripts/ppu/ppu_install_dependency.sh — PPU CI 依赖安装（GitHub Actions）
+# ------------------------------------------------------------------------------
+# 调用方：全部 .github/workflows/test-area-ppu-*.yml（11 个 area 共用）与
+#   nightly-ppu.yml，在 PPU 基础镜像容器内执行：
+#   pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-...-vllm0.27.0-py312-20261001
+#
+# 对位：
+#   - Aone CI 侧 wheel/依赖安装分散在 .aoneci/build-wheel-ppu.yaml +
+#     aone_ci/scripts/test_area_ppu_lora.sh 的 [setup] 段
+#   - sglang-for-sail scripts/ci/ppu/ppu_install_dependency.sh 的组织方式
+#
+# 核心原则（sglang 踩坑经验，见其脚本注释）：镜像预装的 PPU 栈（带
+# +v0.x.0.ppu2.2.0 local version 的 torch/vllm/triton/flashinfer 等）一律
+# 不动——blind `--force-reinstall` 会用同版本号的另一种构建覆盖镜像里的
+# 版本，甚至降级。只安装镜像里真正缺失的包。
+# ==============================================================================
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+# --retries/--timeout：pip 默认只重试 5 次且无连接超时上限，显式收紧后
+# 单次调用不会在网络挂起时耗满 job timeout。
+PIP_INSTALL="python3 -m pip install --no-cache-dir --retries 5 --timeout 30"
+# SAIL SDK v2.2.0 PyPI source
+PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
+
+# 从私有 index 装包统一走这里。
+# 为什么在 pip --retries 之外再包一层：pip 的重试只覆盖连接层错误，索引
+# 返回空版本列表（"ERROR: ... (from versions: none)"）属应用层结果，pip
+# 视为确定性失败、不重试，而这恰好是并发拉包时的表现。
+# 实测依据：
+# - 2026-09-09：4 个 area 并发起 Pod 时全部卡在 pytest 工具链安装，报
+#   pytest-asyncio from versions: none；当时索引页直连正常，按瞬时故障处理。
+# - 2026-09-10（run 34440797915）：故障升级为分钟级——benchmarks/pytorch/cuda
+#   的 pytest-asyncio 空页持续 ≥5min，旧窗口（4 次 × ~35s ≈ 2min）盖不住，
+#   三个 area 全灭（老 area models-basic/samplers/kernels 同款）。故窗口拉长到
+#   ~10min，并加 NAS wheelhouse 兜底。
+# NAS wheelhouse（--find-links 常挂）：mirror 空页时 pip 仍能从 NAS 的 wheel
+# 解析出版本，不等重试直接免疫；装成功后顺手回写（自愈播种）。目录不存在
+# 则自动跳过，无硬依赖。首次播种（任一可写 NAS 的机器执行一次）：
+#   mkdir -p /nas_aisw/devops/pip-wheelhouse && \
+#   python3 -m pip download --no-deps pytest pytest-asyncio tblib \
+#     pytest-shard pyyaml -d /nas_aisw/devops/pip-wheelhouse \
+#     -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+# 退避带随机抖动：并发 Pod 若同步重试会再次撞在一起。
+PPU_WHEELHOUSE="${PPU_WHEELHOUSE:-/nas_aisw/devops/pip-wheelhouse}"
+# build-wheel job 在出网正常的云 runner 上预下载的测试 toolchain wheel，随
+# ci-wheel/ 打进源码 tarball 送进 Pod。命中即完全免网——既躲开 mirror 空页，
+# 也躲开 Pod 出网代理（ptg-green-proxy）抖动。目录不存在（dispatch/push 无
+# wheel，或云端预下载失败）则自动跳过离线优先、直接走索引，行为不变。
+PPU_TOOLCHAIN_DIR="${PPU_TOOLCHAIN_DIR:-/workspace/source/ci-wheel/toolchain}"
+_pip_retry() {
+    local max=8 n=1 wait_s
+    local wh_args=()
+    if [[ -d "${PPU_WHEELHOUSE}" ]]; then
+        wh_args=(--find-links "${PPU_WHEELHOUSE}")
+    fi
+    # 离线优先：先用 --no-index 从本地 toolchain 目录装，成功即返回（无网络、
+    # 无自愈回写）。仅当本次请求的包能被离线解析时成功；否则（如 vllm 等不在
+    # toolchain 里）pip 立即失败（--no-index 不触网），落到下方索引重试循环。
+    if [[ -d "${PPU_TOOLCHAIN_DIR}" ]] && compgen -G "${PPU_TOOLCHAIN_DIR}/*.whl" > /dev/null 2>&1; then
+        # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）
+        if ${PIP_INSTALL} $@ --no-index --find-links "${PPU_TOOLCHAIN_DIR}"; then
+            echo "[deps] installed offline from ${PPU_TOOLCHAIN_DIR}: $*"
+            return 0
+        fi
+        echo "[deps] offline toolchain miss, fall back to index: $*" >&2
+    fi
+    while true; do
+        # shellcheck disable=SC2068  # $@ 需按词拆分成 pip 参数（含 --no-deps 等）
+        if ${PIP_INSTALL} $@ -i "${PPU_PIP_INDEX}" "${wh_args[@]}"; then
+            # 自愈回写（best-effort，失败不影响主流程）：装成功的包沉淀到
+            # wheelhouse，供后续 mirror 空页时 --find-links 命中
+            if [[ -d "${PPU_WHEELHOUSE}" ]] && touch "${PPU_WHEELHOUSE}/.rw_probe" 2>/dev/null; then
+                rm -f "${PPU_WHEELHOUSE}/.rw_probe"
+                local pkgs=() a
+                for a in "$@"; do [[ "${a}" == -* ]] || pkgs+=("${a}"); done
+                python3 -m pip download --no-cache-dir --no-deps -q \
+                    "${pkgs[@]}" -d "${PPU_WHEELHOUSE}" -i "${PPU_PIP_INDEX}" \
+                    2>/dev/null || true
+            fi
+            return 0
+        fi
+        if [[ ${n} -ge ${max} ]]; then
+            echo "[deps] ERROR: pip install failed after ${max} attempts: $*" >&2
+            return 1
+        fi
+        wait_s=$(( n * 30 > 90 ? 90 : n * 30 ))
+        wait_s=$(( wait_s + RANDOM % 30 ))
+        echo "[deps] pip install failed (attempt ${n}/${max}), retry in ${wait_s}s: $*" >&2
+        sleep "${wait_s}"
+        n=$(( n + 1 ))
+    done
+}
+
+# flytiger artifactory 凭证（GitHub Secrets 注入；镜像公开时可无）
+if [[ -n "${PPU_ARTIFACTORY_USER:-}" && -n "${PPU_ARTIFACTORY_PASSWORD:-}" ]]; then
+    echo "machine pkg.flytiger-eco.com login ${PPU_ARTIFACTORY_USER} password ${PPU_ARTIFACTORY_PASSWORD}" > ~/.netrc
+    chmod 600 ~/.netrc
+fi
+
+# 容器内以 root 运行 git 需要（vllm 版本号由 setuptools-scm 从 git 推导时也依赖它）
+git config --global --add safe.directory "${REPO_ROOT}"
+
+# ------------------------------------------------------------------------------
+# [wheel] 安装构建的wheel
+# ------------------------------------------------------------------------------
+# dispatch/push → 跳过，沿用镜像预装 vllm（现状行为）。
+if [[ -n "${PPU_WHEEL_PATH:-}" ]]; then
+    if [[ ! -f "${PPU_WHEEL_PATH}" ]]; then
+        echo "[wheel] ERROR: PPU_WHEEL_PATH set but not found: ${PPU_WHEEL_PATH}" >&2
+        exit 1
+    fi
+    echo "========== [wheel] install CI-built wheel =========="
+    echo "[wheel] ${PPU_WHEEL_PATH}"
+    ${PIP_INSTALL} --force-reinstall --no-deps "${PPU_WHEEL_PATH}"
+fi
+
+# ------------------------------------------------------------------------------
+# [diag] 环境盘点：先看清镜像里已有什么，再决定装什么
+# ------------------------------------------------------------------------------
+echo "========== [diag] preinstalled stack =========="
+python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
+python3 -c "import vllm; print('vllm', vllm.__version__)" || echo "vllm NOT importable"
+python3 -m pip list 2>/dev/null | grep -iE "^(vllm|torch|triton|flashinfer|deep.ep|deep.gemm|tilelang|flash.mla|flash.attn|transformers) " || true
+
+# ------------------------------------------------------------------------------
+# [deps] PPU 依赖：镜像预装优先，缺失才从 flytiger PyPI 补
+# ------------------------------------------------------------------------------
+# vllm 版本对齐镜像（sdk2.2.0 镜像预装 0.27.0）；其余组件版本仍沿用 SAIL SDK
+# v2.1.1 用户指南的 PyPI 安装命令，仅在镜像缺包时兜底。注意：如果镜像预装的
+# 版本与下表不同（通常更新），以镜像为准，不降级。
+_ensure_pip_pkg() {
+    local pkg="$1" ver="$2" extra_args="${3:-}"
+    local installed
+    installed="$(python3 -c "import importlib.metadata as m; print(m.version('${pkg}'))" 2>/dev/null || true)"
+    if [[ -n "${installed}" ]]; then
+        echo "[deps] ${pkg} already installed: ${installed} — keep image build"
+        return 0
+    fi
+    echo "[deps] installing ${pkg}==${ver}"
+    # shellcheck disable=SC2086  # extra_args is intentionally word-split
+    _pip_retry "${pkg}==${ver}" ${extra_args}
+}
+
+# vllm 本体：不带 --no-deps（需解析依赖树）；其余 PPU 组件按指南 --no-deps
+_ensure_pip_pkg "vllm" "0.27.0"
+_ensure_pip_pkg "flashinfer_python" "0.6.8.post1" "--no-deps --force-reinstall"
+_ensure_pip_pkg "deep_ep" "1.0.0" "--no-deps --force-reinstall"
+_ensure_pip_pkg "deep_gemm" "1.0.0" "--no-deps --force-reinstall"
+_ensure_pip_pkg "tilelang" "0.1.8" "--no-deps --force-reinstall"
+_ensure_pip_pkg "flash_mla" "2.0.0" "--no-deps --force-reinstall"
+_ensure_pip_pkg "flash_attn_3" "2.8.2" "--no-deps --force-reinstall"
+_ensure_pip_pkg "flash_attn" "2.7.4.post1" "--no-deps --force-reinstall"
+
+# ------------------------------------------------------------------------------
+# [deps] pytest 测试依赖（对位 test_area_ppu_lora.sh 的 [setup] 段）
+# ------------------------------------------------------------------------------
+# pytest-asyncio: tests/conftest.py asyncio fixture 需要
+# tblib: pytest 跨进程 traceback 序列化（spawn worker 报错时）
+# pytest-shard: single 模式 --shard-id/--num-shards 需要
+# pyyaml: 备用通用依赖（用例选集已内联在 test-area-ppu-lora.sh，不解析 yaml）
+echo "========== [deps] pytest toolchain =========="
+_pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
+
+# ------------------------------------------------------------------------------
+# [cext] 源码树补齐编译产物：镜像预装 vllm 的 C 扩展 → REPO_ROOT/vllm
+# ------------------------------------------------------------------------------
+# pytest 以 REPO_ROOT 为 rootdir，tests 包（tests/__init__.py）使 REPO_ROOT 被
+# prepend 到 sys.path 最前 → import vllm 解析到源码树（纯 Python，无编译
+# 产物）而非 site-packages 里镜像的完整构建。vllm/platforms/ppu.py 继承
+# NvmlCudaPlatform，而 cuda.py 顶层 import vllm._C → conftest 一加载就
+# ModuleNotFoundError: No module named 'vllm._C'。
+# bring-up 期做法：把预装 wheel 的编译产物拷进源码树，形成“Python 层 =
+# 分支源码 + C 扩展 = 镜像构建”的混合形态。ABI 前提：分支未改 csrc/
+# Python 绑定接口（当前改动集中在 vllm/lora 纯 Python）。正式流程后续
+# 切换为 wheel 构建（对位 Aone .aoneci/build-wheel-ppu.yaml），届时未段可删。
+# 门禁影响：因为 C 扩展来自镜像而非本次改动，改 csrc/ 的 PR 在 CI 里跑的仍是
+# 镜像里的旧 .so，绿灯是假绿。为此 test-area-ppu-kernels.yml 的路径过滤刻意
+# 不含 csrc/**（见该文件注释）。接上 PPU wheel 构建后一并恢复。
+# 注：定位 site-packages 用 sysconfig 而非 import vllm —— cwd=REPO_ROOT 时
+# import vllm 走的就是源码树，拿到的是错误答案。
+echo "========== [cext] borrow compiled extensions from image vllm =========="
+SP_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+SP_VLLM_DIR="${SP_SITE}/vllm"
+if [ ! -d "${SP_VLLM_DIR}" ]; then
+    echo "[cext] ERROR: image vllm not found at ${SP_VLLM_DIR}" >&2
+    exit 1
+fi
+cext_copied=0
+# 递归复制镜像 vllm 包内所有编译产物并保持相对路径：顶层 _C/_moe_C/... 之外，
+# vllm_flash_attn/ 子目录里还有 _vllm_fa2_C/_vllm_fa3_C（FA2/FA3 可用性探针，
+# vllm/vllm_flash_attn/__init__.py 缺少它们会直接 raise ImportError）。
+# 用 find 全量复制而非按文件名枚举：镜像增减扩展时本脚本无需同步改动。
+while IFS= read -r f; do
+    rel="${f#"${SP_VLLM_DIR}"/}"
+    dest="${REPO_ROOT}/vllm/${rel}"
+    mkdir -p "$(dirname "${dest}")"
+    cp -f "$f" "${dest}"
+    echo "[cext] copied vllm/${rel}"
+    cext_copied=1
+done < <(find "${SP_VLLM_DIR}" -maxdepth 3 -type f -name '*.so')
+if [ -f "${SP_VLLM_DIR}/_version.py" ]; then
+    cp -f "${SP_VLLM_DIR}/_version.py" "${REPO_ROOT}/vllm/"
+    echo "[cext] copied vllm/_version.py"
+    cext_copied=1
+fi
+# auditwheel 打包的 wheel 会把依赖库放 vllm.libs/，RPATH 指向 $ORIGIN/../vllm.libs
+if [ -d "${SP_VLLM_DIR}.libs" ]; then
+    cp -rf "${SP_VLLM_DIR}.libs" "${REPO_ROOT}/"
+    echo "[cext] copied vllm.libs/"
+    cext_copied=1
+fi
+# ------------------------------------------------------------------------------
+# [cext] vllm_flash_attn 目录：镜像版整体借用（PPU 适配）
+# ------------------------------------------------------------------------------
+# PPU 镜像未编译 CUDA 的 _vllm_fa2_C/_vllm_fa3_C 扩展（PPU 的 FA 走独立 pip
+# 包 flash_attn/flash_attn_3），而源码树上游版 vllm/vllm_flash_attn/__init__.py
+# 在这两个扩展都缺失时直接 raise ImportError；fa_utils.py 的 is_ppu() 分支
+# 顶层 import vllm.vllm_flash_attn → 测试收集即挂。镜像 site-packages 的同名
+# 目录若是 PPU 适配版（.py 探针逻辑不同），整目录借用（含 .py），保证与镜像
+# 行为一致。注意：借用会覆盖分支对该目录的改动——bring-up 期可接受（分支改动
+# 集中在 vllm/lora），切 wheel 构建流程后此段可删。
+FA_DIR_SRC="${SP_VLLM_DIR}/vllm_flash_attn"
+if [ ! -d "${FA_DIR_SRC}" ]; then
+    echo "[cext] ERROR: no vllm_flash_attn dir in image vllm package" >&2
+    exit 1
+fi
+echo "[cext] image vllm_flash_attn contents:"
+ls -l "${FA_DIR_SRC}"
+# .so 已由上面的 find 循环同步进源码树，此 diff 实际反映 .py 层面的差异
+if ! diff -rq --exclude=__pycache__ "${FA_DIR_SRC}" "${REPO_ROOT}/vllm/vllm_flash_attn" >/dev/null 2>&1; then
+    echo "[cext] image version differs from source tree — borrowing image copy:"
+    diff -rq --exclude=__pycache__ "${FA_DIR_SRC}" "${REPO_ROOT}/vllm/vllm_flash_attn" || true
+    cp -rf "${FA_DIR_SRC}/." "${REPO_ROOT}/vllm/vllm_flash_attn/"
+    rm -rf "${REPO_ROOT}/vllm/vllm_flash_attn/__pycache__"
+    echo "[cext] copied vllm/vllm_flash_attn/ (image version)"
+else
+    echo "[cext] image vllm_flash_attn identical to source tree — nothing to borrow;"
+    echo "[cext] upstream probe will raise without _vllm_fa2_C/_vllm_fa3_C (see verify step)"
+fi
+if [ "${cext_copied}" -eq 0 ]; then
+    echo "[cext] ERROR: no compiled extensions found in ${SP_VLLM_DIR}" >&2
+    exit 1
+fi
+# 对症验证：conftest 崩的是 vllm._C（cwd=REPO_ROOT，import 走源码树）
+python3 -c "import vllm._C as c; print('[cext] vllm._C OK from source tree:', c.__file__)"
+# 对症验证：vllm_flash_attn 借用镜像 PPU 适配版后 import 不应再 raise
+python3 -c "import vllm.vllm_flash_attn as fa; print('[cext] vllm.vllm_flash_attn OK: FA2=%s FA3=%s' % (fa.FA2_AVAILABLE, fa.FA3_AVAILABLE))"
+
+echo "========== [verify] final stack =========="
+python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
+# 混合形态下 __version__ 来自镜像 wheel 的 _version.py（0.27.0+…ppu2.2.0），
+# 不再是源码树的 'dev' fallback —— 这本身就是 [cext] 生效的信号
+python3 -c "import vllm; print('vllm', vllm.__version__)"
+echo "[deps] done"

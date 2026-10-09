@@ -1,0 +1,6 @@
+model_name: "Qwen/Qwen3-30B-A3B-FP8"
+accuracy_threshold: 0.80
+num_questions: 200
+num_fewshot: 5
+server_args: "--enforce-eager --tensor-parallel-size 2 --data-parallel-size 2 --enable-expert-parallel --enable-eplb --max-model-len 2048"
+startup_max_wait_seconds: 600

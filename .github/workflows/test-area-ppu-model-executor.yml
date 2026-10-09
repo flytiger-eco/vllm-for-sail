@@ -1,0 +1,254 @@
+# Aone CI `.aoneci/test-area-ppu-model-executor.yaml` 的 GitHub Actions 移植版
+# 结构：
+#   check-changes — 路径变更门禁（对位 Aone diff-guard）
+#   ppu-model-executor-test — K8s worker Pod 内装依赖 + 跑 pytest（编排壳 CPU-only，零占卡）
+#   ppu-model-executor-finish — 分支保护聚合点
+#
+# 测试选集见 scripts/ppu/test-area-ppu-model-executor.sh。
+name: Model Executor Test (PPU)
+
+on:
+  # PR 入口收编到 ci.yml：组织门禁链（precheck → smoke-test ∥ ai-code-review → human-review）通过后以 workflow_call 调用本 workflow；base 分支白名单
+  # 在 ci.yml 侧。
+  workflow_call:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
+      wheel_artifact:
+        description: "CI 构建的 wheel artifact 名（ci.yml 传入）；空则用镜像预装 vllm"
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "TEST_MODE：all(默认) | single | multi"
+        type: string
+        default: all
+      pytest_args:
+        description: '追加的 pytest 参数，如 "-k test_foo -x"（透传 PYTEST_EXTRA_ARGS）'
+        type: string
+        default: ""
+
+concurrency:
+  group: test-area-ppu-model-executor-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+env:
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
+
+jobs:
+  # ==================== 变更检查 ==================== #
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_exist: ${{ steps.decide.outputs.changes_exist }}
+    steps:
+      # 仅 PR 用 dorny/paths-filter；无需 checkout——它在 pull_request 下走
+      # GitHub REST API 取变更清单，不依赖工作区（本 workflow 无 push 触发器）。
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            ppu_code:
+              - ".github/workflows/test-area-ppu-model-executor.yml"
+              - "scripts/ppu/ppu_install_dependency.sh"
+              - "scripts/ppu/test-area-ppu-model-executor.sh"
+              - "tests/model_executor/**"
+              - "vllm/model_executor/**"
+
+      - name: Decide whether to run tests
+        id: decide
+        env:
+          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
+          HAS_RUN_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'run-all') }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            # PR：默认按路径变更决定;打 run-all 标签则无条件执行本 area
+            if [[ "${HAS_RUN_ALL_LABEL}" == "true" ]]; then
+              echo "[gate] run-all 标签命中 -> 强制执行本 area"
+              echo "changes_exist=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "[gate] paths_hit=${FILTER_HIT:-false}"
+              echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # workflow_dispatch（手动触发）：必跑
+            echo "changes_exist=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ==================== PPU Model Executor ==================== #
+  ppu-model-executor-test:
+    needs: [check-changes]
+    # fork PR 不进特权 PPU worker Pod（privileged + 设备直通 +
+    # NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码驱动）
+    if: >-
+      needs.check-changes.outputs.changes_exist == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 60
+    steps:
+      # action 自动打包源码送 Pod
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch CI-built wheel
+        id: fetch-wheel
+        continue-on-error: true
+        if: inputs.wheel_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+
+      - name: Wait before wheel fetch retry
+        if: steps.fetch-wheel.outcome == 'failure'
+        run: |
+          rm -rf ci-wheel
+          sleep 60
+
+      - name: Fetch CI-built wheel (retry)
+        if: steps.fetch-wheel.outcome == 'failure'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+
+      - name: Build in-pod runner payload
+        id: payload
+        shell: bash
+        env:
+          TEST_MODE: ${{ inputs.test_mode }}
+          PYTEST_EXTRA_ARGS: ${{ inputs.pytest_args }}
+          WHEEL_ARTIFACT: ${{ inputs.wheel_artifact }}
+        run: |
+          # ci-wheel/ 在 $GITHUB_WORKSPACE 内，随源码 tarball 一并投递进 Pod，
+          # 故这里解析成 Pod 内视角的绝对路径
+          if [ -n "${WHEEL_ARTIFACT:-}" ]; then
+            whl="$(ls ci-wheel/*.whl | head -n1)"
+            PPU_WHEEL_PATH="/workspace/source/ci-wheel/$(basename "${whl}")"
+          fi
+          # base64 规避 action 插值时多行 command 的 shell syntax error
+          cat > /tmp/ppu-run.sh <<'RUNEOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /workspace/source
+          echo "[k8s-area] node=${NODE_NAME:-unknown} TEST_MODE=${TEST_MODE:-all}"
+          bash scripts/ppu/ppu_install_dependency.sh
+          bash scripts/ppu/test-area-ppu-model-executor.sh
+          RUNEOF
+          bash -n /tmp/ppu-run.sh
+          # base64 -w0 是 GNU 专有，用 tr 替代
+          echo "b64=$(base64 < /tmp/ppu-run.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          # extra_env 以逗号分隔 KEY=VAL，值内不能含逗号；空值项一律不下发
+          envs="HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E"
+          envs="${envs},TEST_MODE=${TEST_MODE:-all}"
+          if [ -n "${PYTEST_EXTRA_ARGS:-}" ]; then
+            envs="${envs},PYTEST_EXTRA_ARGS=${PYTEST_EXTRA_ARGS}"
+          fi
+          if [ -n "${PPU_WHEEL_PATH:-}" ]; then
+            envs="${envs},PPU_WHEEL_PATH=${PPU_WHEEL_PATH}"
+          fi
+          # NAS 回传路径，对应 Publish test summary 读取约定
+          envs="${envs},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}"
+          echo "extra_env=${envs}" >> "$GITHUB_OUTPUT"
+
+      - name: Run PPU model executor tests
+        id: ppu
+        uses: flytiger-eco/ppu-distributed-action@main
+        with:
+          # 单机；nproc_per_node = 本 area 实际需要的 PPU 卡数
+          #（所有 step 均 CUDA_VISIBLE_DEVICES=0）
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=OAM-810E
+          # 默认挂载已含 /nas_aisw 和 /mnt/wl_nas
+          image: ${{ env.PPU_BASE_IMAGE }}
+          namespace: ppu-sched
+          timeout_minutes: 40
+          cleanup_policy: always
+          # 注意：此处刻意不设 privileged——unprivileged 下 PPU device plugin
+          # 只注入分配到的卡，设备数=分配数，是 area 间并行的前提
+          container_options: |
+            host_ipc: true
+            shm_size: "8Gi"
+          extra_env: ${{ steps.payload.outputs.extra_env }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          # 必须单行
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
+
+      # 从 NAS 读回 per-unit 统计表，回退为作业元信息
+      - name: Publish test summary
+        if: always()
+        env:
+          OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
+          OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
+          OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
+          OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
+          OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
+          TEST_MODE: ${{ inputs.test_mode }}
+        run: |
+          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
+          {
+            if [ -f "${NAS_SUM}" ]; then
+              cat "${NAS_SUM}"
+              echo ""
+              echo "<sub>mode: ${TEST_MODE:-all} · K8s job \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`</sub>"
+            else
+              echo "### Model Executor Test (PPU, K8s)"
+              echo ""
+              echo "> summary.md 未回传（Pod 内脚本在 EXIT trap 前退出或 NAS 不可写），仅显示作业元信息；用例明细见上方 job 日志。"
+              echo ""
+              echo "| item | value |"
+              echo "|---|---|"
+              echo "| test_mode | ${TEST_MODE:-all} |"
+              echo "| image | \`${PPU_BASE_IMAGE}\` |"
+              echo "| job_name | ${OUT_JOB_NAME:-<empty>} |"
+              echo "| job_status | ${OUT_JOB_STATUS:-<empty>} |"
+              echo "| duration_seconds | ${OUT_DURATION:-<empty>} |"
+              echo "| task_pods | ${OUT_TASK_PODS:-<empty>} |"
+              echo "| log_artifact | ${OUT_LOG_ARTIFACT:-<empty>} |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==================== 聚合点 ==================== #
+  ppu-model-executor-finish:
+    needs: [check-changes, ppu-model-executor-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c "
+          import json, sys, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          failed = []
+          for job, info in needs.items():
+              result = info.get('result', 'unknown')
+              print(f'{job}: {result}')
+              if result not in ('success', 'skipped'):
+                  failed.append(f'{job} ({result})')
+          if failed:
+              sep = ','
+              print(f'Failed jobs: {sep.join(failed)}')
+              sys.exit(1)
+          print('All jobs completed successfully')
+          "
