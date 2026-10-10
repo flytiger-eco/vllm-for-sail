@@ -174,8 +174,8 @@ _pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 # pytest 以 REPO_ROOT 为 rootdir，tests 包（tests/__init__.py）使 REPO_ROOT 被
 # prepend 到 sys.path 最前 → import vllm 解析到源码树（纯 Python，无编译
 # 产物）而非 site-packages 里镜像的完整构建。vllm/platforms/ppu.py 继承
-# NvmlCudaPlatform，而 cuda.py 顶层 import vllm._C → conftest 一加载就
-# ModuleNotFoundError: No module named 'vllm._C'。
+# NvmlCudaPlatform，而 cuda.py 顶层 import vllm._C_stable_libtorch → conftest
+# 一加载就会因源码树缺少该扩展而失败。
 # bring-up 期做法：把预装 wheel 的编译产物拷进源码树，形成“Python 层 =
 # 分支源码 + C 扩展 = 镜像构建”的混合形态。ABI 前提：分支未改 csrc/
 # Python 绑定接口（当前改动集中在 vllm/lora 纯 Python）。正式流程后续
@@ -193,7 +193,8 @@ if [ ! -d "${SP_VLLM_DIR}" ]; then
     exit 1
 fi
 cext_copied=0
-# 递归复制镜像 vllm 包内所有编译产物并保持相对路径：顶层 _C/_moe_C/... 之外，
+# 递归复制镜像 vllm 包内所有编译产物并保持相对路径：顶层
+# _C_stable_libtorch/_moe_C_stable_libtorch/... 之外，
 # vllm_flash_attn/ 子目录里还有 _vllm_fa2_C/_vllm_fa3_C（FA2/FA3 可用性探针，
 # vllm/vllm_flash_attn/__init__.py 缺少它们会直接 raise ImportError）。
 # 用 find 全量复制而非按文件名枚举：镜像增减扩展时本脚本无需同步改动。
@@ -248,8 +249,9 @@ if [ "${cext_copied}" -eq 0 ]; then
     echo "[cext] ERROR: no compiled extensions found in ${SP_VLLM_DIR}" >&2
     exit 1
 fi
-# 对症验证：conftest 崩的是 vllm._C（cwd=REPO_ROOT，import 走源码树）
-python3 -c "import vllm._C as c; print('[cext] vllm._C OK from source tree:', c.__file__)"
+# 对症验证：v0.27.0 CUDA/PPU 路径使用 vllm._C_stable_libtorch；legacy
+# vllm._C 仅由 ROCm 构建，不应作为 PPU wheel 的必需扩展。
+python3 -c "import vllm._C_stable_libtorch as c; print('[cext] vllm._C_stable_libtorch OK from source tree:', c.__file__)"
 # 对症验证：vllm_flash_attn 借用镜像 PPU 适配版后 import 不应再 raise
 python3 -c "import vllm.vllm_flash_attn as fa; print('[cext] vllm.vllm_flash_attn OK: FA2=%s FA3=%s' % (fa.FA2_AVAILABLE, fa.FA3_AVAILABLE))"
 
