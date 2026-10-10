@@ -116,7 +116,7 @@ export LD_LIBRARY_PATH=""
 export LD_LIBRARY_PATH=${CUDA_SDK}/lib64:${PPU_SDK}/lib:${LD_LIBRARY_PATH}
 export LIBRARY_PATH=${CUDA_SDK}/lib64:${PPU_SDK}/lib:${LIBRARY_PATH}
 
-wget --no-check-certificate -nv https://pkg.flytiger-eco.com/artifactory/generic-local/CUDA_SDK/v2.1.1/PPU_SDK_cuda-13.0.0-ubuntu2404-2.1.1-a5c56e.tar.gz -O /tmp/ppu.tar.gz
+wget --no-check-certificate -nv https://pkg.flytiger-eco.com/artifactory/generic-local/CUDA_SDK/v2.2.0/PPU_SDK_cuda-13.0.0-ubuntu2404-2.2.0-663c22.tar.gz -O /tmp/ppu.tar.gz
 mkdir -p /tmp/ppu
 tar --extract --file="/tmp/ppu.tar.gz" --directory=/tmp/ppu
 mv /tmp/ppu/PPU_SDK /usr/local/
@@ -135,7 +135,7 @@ ppu-smi --version
 # 生产脚本这里 `rm -rf /tmp/*`；CCACHE_DIR 在 /root/.ccache，不受影响。
 rm -rf /tmp/*
 
-python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.11.0%2Bv0.1.0.ppu2.1.1/torch-2.11.0%2Bcu130ubuntu2404oe-cp312-cp312-linux_x86_64.whl --force-reinstall
+python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.13.0%2Bv0.1.0.ppu2.2.0/torch-2.13.0%2Bcu130ubuntu2404oe-cp312-cp312-linux_x86_64.whl --force-reinstall
 
 export HGGC_ENABLE_COMPRESS=1
 export NVCC_APPEND_FLAGS="-Xfatbin -compress-all"

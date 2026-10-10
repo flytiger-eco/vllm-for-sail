@@ -33,7 +33,7 @@ permissions:
   actions: read
 
 env:
-  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-vllm0.23.0-py312
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
 
 jobs:
   # ==================== PPU Models Distributed（nightly 全量 multi 3 段） ==================== #
