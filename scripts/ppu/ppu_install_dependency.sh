@@ -127,7 +127,7 @@ fi
 echo "========== [diag] preinstalled stack =========="
 python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
 python3 -c "import vllm; print('vllm', vllm.__version__)" || echo "vllm NOT importable"
-python3 -m pip list 2>/dev/null | grep -iE "^(vllm|torch|triton|flashinfer|deep.ep|deep.gemm|tilelang|flash.mla|flash.attn|transformers) " || true
+python3 -m pip list 2>/dev/null | grep -iE "^(vllm|torch|triton|flashinfer|deep.ep|deep.gemm|tilelang|flash.mla|flash.attn|transformers|gguf|regex) " || true
 
 # ------------------------------------------------------------------------------
 # [deps] PPU 依赖：镜像预装优先，缺失才从 flytiger PyPI 补
@@ -156,6 +156,12 @@ _ensure_pip_pkg "tilelang" "0.1.8" "--no-deps --force-reinstall"
 _ensure_pip_pkg "flash_mla" "2.0.0" "--no-deps --force-reinstall"
 _ensure_pip_pkg "flash_attn_3" "2.8.2" "--no-deps --force-reinstall"
 _ensure_pip_pkg "flash_attn" "2.7.4.post1" "--no-deps --force-reinstall"
+
+# v0.23 源码在 pytest 加载 tests/conftest.py 时会无条件导入 gguf_utils。
+# SDK 2.1.1 镜像预装了这两个包，而 SDK 2.2 镜像未预装；CI wheel 又以
+# --no-deps 安装，因此必须显式补齐，否则所有 area 都会在 collection 阶段失败。
+echo "========== [deps] vLLM runtime dependencies =========="
+_pip_retry "gguf>=0.17.0" regex
 
 # ------------------------------------------------------------------------------
 # [deps] pytest 测试依赖（对位 test_area_ppu_lora.sh 的 [setup] 段）

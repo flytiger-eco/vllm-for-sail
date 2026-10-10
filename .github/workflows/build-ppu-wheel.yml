@@ -134,14 +134,15 @@ jobs:
       # 进 Pod（/workspace/source/ci-wheel/toolchain/），deps 脚本先 --no-index
       # --find-links 离线装,规避 mirror 空页 / Pod 出网代理抖动;失败再回落索引。
       # best-effort：云端偶发拉取失败不阻断构建（Pod 侧本就有索引回落兜底）。
-      # 5 个包与 ppu_install_dependency.sh 第 152 行一致;runner 与 Pod 同为
-      # linux/x86_64/cp312,pip download 得到的 wheel 平台匹配。
+      # pytest 工具链与 SDK 2.2 镜像缺失的 vLLM runtime 依赖一起预下载；
+      # runner 与 Pod 同为 linux/x86_64/cp312，pip download 得到的 wheel 平台匹配。
       - name: Download test toolchain wheels
         continue-on-error: true
         run: |
           mkdir -p dist/toolchain
           python3 -m pip download --no-deps \
             pytest pytest-asyncio tblib pytest-shard pyyaml \
+            "gguf>=0.17.0" regex \
             -d dist/toolchain \
             -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
           echo "---- toolchain wheels ----"
