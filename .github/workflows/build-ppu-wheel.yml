@@ -60,9 +60,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ppu-ccache
-          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-${{ github.sha }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-${{ github.sha }}
           restore-keys: |
-            ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-
+            ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-
 
       - name: Compute wheel version
         id: version
@@ -105,7 +105,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ppu-ccache
-          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-${{ github.sha }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-${{ github.sha }}
 
       # 硬校验产物文件名中的版本段：断链时在这里响，而不是下游装错版本才发现。
       - name: Verify wheel version

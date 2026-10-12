@@ -5,7 +5,9 @@
 # ------------------------------------------------------------------------------
 # 调用方：全部 .github/workflows/test-area-ppu-*.yml（11 个 area 共用）与
 #   nightly-ppu.yml，在 PPU 基础镜像容器内执行：
-#   pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-...-vllm0.27.0-py312-20261001
+#   pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-...-vllm0.23.0-py312
+#   （SDK 2.1.1 镜像跑 v0.27.0 源码的对照测试；镜像预装 vllm 为 0.23，必须
+#   通过 PPU_WHEEL_PATH 安装本次以 torch 2.11 PPU 构建的 v0.27 wheel）
 #
 # 对位：
 #   - Aone CI 侧 wheel/依赖安装分散在 .aoneci/build-wheel-ppu.yaml +
@@ -13,7 +15,7 @@
 #   - sglang-for-sail scripts/ci/ppu/ppu_install_dependency.sh 的组织方式
 #
 # 核心原则（sglang 踩坑经验，见其脚本注释）：镜像预装的 PPU 栈（带
-# +v0.x.0.ppu2.2.0 local version 的 torch/vllm/triton/flashinfer 等）一律
+# +v0.x.0.ppu2.1.1 local version 的 torch/vllm/triton/flashinfer 等）一律
 # 不动——blind `--force-reinstall` 会用同版本号的另一种构建覆盖镜像里的
 # 版本，甚至降级。只安装镜像里真正缺失的包。
 # ==============================================================================
@@ -26,7 +28,7 @@ cd "${REPO_ROOT}"
 # --retries/--timeout：pip 默认只重试 5 次且无连接超时上限，显式收紧后
 # 单次调用不会在网络挂起时耗满 job timeout。
 PIP_INSTALL="python3 -m pip install --no-cache-dir --retries 5 --timeout 30"
-# SAIL SDK v2.2.0 PyPI source
+# SAIL SDK PyPI source
 PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
 
 # 从私有 index 装包统一走这里。
@@ -132,7 +134,7 @@ python3 -m pip list 2>/dev/null | grep -iE "^(vllm|torch|triton|flashinfer|deep.
 # ------------------------------------------------------------------------------
 # [deps] PPU 依赖：镜像预装优先，缺失才从 flytiger PyPI 补
 # ------------------------------------------------------------------------------
-# vllm 版本对齐镜像（sdk2.2.0 镜像预装 0.27.0）；其余组件版本仍沿用 SAIL SDK
+# vllm 由 CI wheel 提供（SDK 2.1.1 镜像预装的是 0.23）；其余组件版本沿用 SAIL SDK
 # v2.1.1 用户指南的 PyPI 安装命令，仅在镜像缺包时兜底。注意：如果镜像预装的
 # 版本与下表不同（通常更新），以镜像为准，不降级。
 _ensure_pip_pkg() {
@@ -185,6 +187,13 @@ _pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 # 不含 csrc/**（见该文件注释）。接上 PPU wheel 构建后一并恢复。
 # 注：定位 site-packages 用 sysconfig 而非 import vllm —— cwd=REPO_ROOT 时
 # import vllm 走的就是源码树，拿到的是错误答案。
+# SDK 2.1.1 镜像预装 vllm 0.23：若未装上 v0.27 CI wheel，[cext] 会把 0.23 的
+# .so 拷进 v0.27 源码树，测试结果没有意义，直接失败。
+SP_VLLM_VER="$(python3 -c "import importlib.metadata as m; print(m.version('vllm'))")"
+if [[ "${SP_VLLM_VER}" != 0.27.* ]]; then
+    echo "[cext] ERROR: site-packages vllm is ${SP_VLLM_VER}, expected 0.27.x CI wheel" >&2
+    exit 1
+fi
 echo "========== [cext] borrow compiled extensions from image vllm =========="
 SP_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 SP_VLLM_DIR="${SP_SITE}/vllm"
@@ -257,7 +266,7 @@ python3 -c "import vllm.vllm_flash_attn as fa; print('[cext] vllm.vllm_flash_att
 
 echo "========== [verify] final stack =========="
 python3 -c "import torch; print('torch', torch.__version__, 'device_count', torch.cuda.device_count())"
-# 混合形态下 __version__ 来自镜像 wheel 的 _version.py（0.27.0+…ppu2.2.0），
+# 混合形态下 __version__ 来自 CI wheel 的 _version.py（0.27.0+…），
 # 不再是源码树的 'dev' fallback —— 这本身就是 [cext] 生效的信号
 python3 -c "import vllm; print('vllm', vllm.__version__)"
 echo "[deps] done"

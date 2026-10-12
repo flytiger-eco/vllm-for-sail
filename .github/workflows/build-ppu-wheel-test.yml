@@ -62,9 +62,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ppu-ccache
-          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-${{ github.sha }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-${{ github.sha }}
           restore-keys: |
-            ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-
+            ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-
 
       - name: Compute wheel version
         id: version
@@ -107,7 +107,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ppu-ccache
-          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-${{ github.sha }}
+          key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.1.1-${{ github.sha }}
 
       - name: Verify wheel version
         env:
