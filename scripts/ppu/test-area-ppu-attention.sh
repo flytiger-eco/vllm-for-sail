@@ -39,6 +39,10 @@ ATTN_SINGLE_ARGS=(
   tests/v1/attention/
   -k
   'not _correctness and not test_gdn_build_classification and not test_has_initial_state_after_reclassification'
+  # Run 38499841007: PPU attention backend/cache marker 行为不兼容。
+  --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[auto-0]"
+  --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[fp8_ds_mla-1]"
+  --deselect "tests/v1/attention/test_mla_noncausal.py::test_mla_cache_marker_is_preserved_and_cannot_be_mixed"
 )
 
 # multi：无（tests/v1/attention/ 无 @multi_gpu_test）

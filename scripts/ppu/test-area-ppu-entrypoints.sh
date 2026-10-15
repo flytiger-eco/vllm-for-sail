@@ -70,6 +70,12 @@ EP_SINGLE_UNIT_ARGS=(
   --ignore=tests/entrypoints/generate
   # weight_transfer — LLM(NCCL weight transfer)，PPU 上未验证
   --ignore=tests/entrypoints/weight_transfer
+  # Run 38499841007: collection 阶段缺少 rapidfuzz。
+  --ignore=tests/entrypoints/tool_parsers/test_openai_tool_parser.py
+  # Run 38547348048: 基础镜像 anthropic SDK 不接受 temperature 参数。
+  --deselect tests/entrypoints/anthropic/test_messages.py::test_anthropic_streaming_cache_usage
+  # Run 38547348048: PPU 上流式/非流式生成的合法 tool JSON 时间值不一致。
+  --deselect tests/entrypoints/tool_parsers/test_granite4_tool_parser.py::test_stop_sequence_interference
 )
 
 # 注：原快照 Step 2（v1_entrypoints，跑 tests/v1/entrypoints/）已删除——

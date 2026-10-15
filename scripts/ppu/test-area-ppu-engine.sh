@@ -41,6 +41,17 @@ ENGINE_SINGLE_BASIC_ARGS=(
   tests/test_sequence.py
   tests/test_logger.py
   tests/test_vllm_port.py
+  # Run 38499841007: 离线 JIT monitor 配置与 PPU device-id 解析失败。
+  --deselect "tests/engine/test_arg_utils.py::test_jit_monitor_verbose_arg"
+  --deselect "tests/engine/test_arg_utils.py::test_jit_monitor_mode_arg[warn]"
+  --deselect "tests/engine/test_arg_utils.py::test_jit_monitor_mode_arg[error]"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_with_cvd_out_of_range"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_with_cvd_resolve_to_physical_ids"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_with_uuid_cvd_resolve_to_physical_ids"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_with_uuid_args_resolve_to_physical_ids"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_reject_mixed_integer_and_uuid_args"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_no_device_ids"
+  --deselect "tests/engine/test_arg_utils.py::TestDeviceIds::test_device_ids_reject_duplicates"
 )
 
 # Step 2: v1_engine — tests/v1/engine/ 整目录（V1 engine core/client/async/

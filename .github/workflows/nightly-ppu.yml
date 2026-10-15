@@ -1,12 +1,13 @@
 # 定时 PPU 回归——重量级 area 的兜底覆盖。
 #
 # 与 PR 门禁的分工（详见 scripts/ppu/docs/ppu-ci-usage.md）：
-#   PR 门禁：全部 area 按路径变更自动触发（打 run-all 标签则强制全跑），
-#   走完 precheck → smoke ∥ ai-review → human-review 后各自派发；只有改到
+#   PR 门禁：17 个常规 area 按路径变更自动触发（打 run-all 标签则强制全跑），
+#   走完 precheck → smoke ∥ ai-review → human-review 后同时派发；只有改到
 #   对应路径的 area 才真正上卡。
-#   本 workflow：把重量级 area 连同 3 个 nightly-only area（models-language /
-#   models-distributed / models-multimodal）按夜间/周末两档定时补跑一遍，
-#   保证即使 PR 未改到相关路径也有每日/每周的回归基线。
+#   本 workflow：接管 PR 门禁移出的 models-basic / engine / kernels /
+#   e2e-integration / model-runner-v2，并连同 3 个原有 nightly-only area
+#   （models-language / models-distributed / models-multimodal）及其他定时回归
+#   area，按夜间/周末两档运行。
 #   注：spec-decode 仅 workflow_dispatch 手动入口（依赖模型未入库），不在本档。
 #
 # 为什么拆两档 cron：area 之间必须串行（理由见下方 max-parallel）。
@@ -16,10 +17,10 @@
 #     - 工作日夜间集：basic-correctness / entrypoints-llm / lora / models-basic
 #       （已标定部分 1h 以内，另两个按 timeout 上限预留；worst-case ≈7h 已贴近
 #       夜间窗口上限，不再往里加新 area）
-#     - 周末集：engine / kernels / models-language + 批次 2 新增的 14 个未标定
-#       area（含 nightly-only 的 models-distributed / models-multimodal；spec-decode
-#       为 dispatch-only 不在此列）。周六 02:00 起跑，worst-case ≈43h 仍在周末
-#       窗口内，首跑标定后再按实测时长在两档间回摆
+#     - 周末集：engine / kernels / models-language + 其余长时或补充回归 area
+#       （含移出的 e2e-integration / model-runner-v2，以及 nightly-only 的
+#       models-distributed / models-multimodal；spec-decode 为 dispatch-only）。
+#       周六 02:00 起跑，首跑标定后再按实测时长在两档间回摆
 #   cron 为 UTC：18:00 UTC = 次日 02:00 北京时间，故 `0-4` = 周一~周五，
 #   `5` = 周六。schedule 仅在仓库默认分支生效，其他分支用 workflow_dispatch。
 #
@@ -76,7 +77,7 @@ jobs:
         run: |
           # run_timeout = in-pod 上限（已标定的按首跑实测收紧：entrypoints-llm
           # 11m34s → 50，models-basic 48m07s → 110；basic-correctness / lora /
-          # models-language 与批次 2 的 14 个新 area 未标定，暂留 PR 版上限 90，
+          # models-language 与其余未标定 area 暂留 PR 版上限 90，
           # 首次定时跑完后回写）。
           # timeout = job 上限 = run_timeout + 25，含 K8s 调度 + 镜像准备开销
           #（实测约 210s），与各 test-area-ppu-*.yml 取值一致。

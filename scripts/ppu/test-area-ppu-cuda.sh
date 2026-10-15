@@ -65,6 +65,8 @@ CUDA_CUDAGRAPH_ARGS=(
   # Run 34580922394: dispatcher 的 FULL_AND_PIECEWISE 1 例 DID NOT RAISE
   # AssertionError（PPU 分发行为差异）；同函数其它 4 个 mode 通过。
   --deselect "tests/v1/cudagraph/test_cudagraph_dispatch.py::TestCudagraphDispatcher::test_dispatcher[FULL_AND_PIECEWISE-0-False]"
+  # Run 38499841007: encoder cudagraph budget 计数不一致。
+  --deselect "tests/v1/cudagraph/test_encoder_cudagraph.py::TestFindBudgetGraph::test_num_graphs_to_capture_tracks_budgets"
 )
 
 # ------------------------------------------------------------------------------

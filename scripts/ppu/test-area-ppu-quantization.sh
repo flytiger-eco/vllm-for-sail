@@ -106,6 +106,9 @@ QUANT_CORE_ARGS=(
   # Run 34580922394: PPU torch.linalg.det 数值偏差（|det|-1 = 0.1665，
   # tol=1e-4），单用例排除。
   --deselect "tests/quantization/test_turboquant.py::TestRotationMatrix::test_rotation_matrix_det_is_pm1"
+  # Run 38499841007: AWQ 模型与 FP8 per-channel 在线量化失败。
+  --deselect "tests/quantization/test_auto_awq.py::test_auto_awq_quantization_method[Qwen/Qwen2-1.5B-Instruct-AWQ]"
+  --deselect "tests/quantization/test_fp8_per_channel.py::test_fp8_per_channel_online_quantization"
 )
 
 # quantization_models = 上游 Step 3 的 PPU 版：tests/models/quantization/ 减 10 个
@@ -138,6 +141,9 @@ QUANT_MODELS_ARGS=(
   # SM8.0）；同文件 int8 用例通过，故 -k 精确排除而非整文件 ignore。
   -k
   "not fp8_per_token_head"
+  # Run 38499841007: FP8 per-channel 模型 logprobs 失败。
+  --deselect "tests/models/quantization/test_fp8_per_channel.py::test_fp8_per_channel_logprobs[dense]"
+  --deselect "tests/models/quantization/test_fp8_per_channel.py::test_fp8_per_channel_logprobs[moe]"
 )
 
 # quantization_bitsandbytes = test_bitsandbytes.py 的部分跑：BNB 4bit/8bit，

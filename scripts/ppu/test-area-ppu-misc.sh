@@ -159,6 +159,10 @@ MISC_V1_INFERENCE_DESELECTS=(
   "tests/v1/worker/test_gpu_model_runner.py::test_load_model_weights_inplace"
   "tests/v1/worker/test_gpu_model_runner.py::test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks"
   "tests/v1/worker/test_gpu_model_runner.py::test_reload_weights_before_load_model"
+  # Run 38547348048: 前序用例泄漏 torch 默认 CUDA device，CPU pinned tensor
+  # 被隐式建到 CUDA，触发 Only dense CPU tensors can be pinned。
+  "tests/v1/worker/test_gpu_model_runner.py::test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids"
+  "tests/v1/worker/test_kv_block_zeroer.py::test_block_ids_are_not_overwritten_while_copy_is_in_flight"
   "tests/v1/worker/test_gpu_model_runner.py::test_update_config"
   "tests/v1/worker/test_gpu_model_runner.py::test_update_states_new_request"
   "tests/v1/worker/test_gpu_model_runner.py::test_update_states_no_changes"
@@ -225,6 +229,8 @@ MISC_V1_CONNECTORS_METRICS_ARGS=(
   # Run 34580922394: 两个 ExampleConnector 的 scheduler/worker 事件序列断言
   # 不一致（PPU 执行时序差异），单用例排除。
   --deselect tests/v1/kv_connector/unit/test_multi_connector.py::test_multi_example_connector_consistency
+  # Run 38547348048: 测试 Stub 未初始化生产代码新增读取的 _has_mamba 属性。
+  --deselect tests/v1/kv_connector/unit/test_nixl_push_connector.py::TestPushWriterMlaReplication::test_mla_hetero_tp_writes_every_d_rank
 )
 
 # Step 7: Async Engine, Inputs, Utils, Worker (GPU)

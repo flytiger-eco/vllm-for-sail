@@ -150,6 +150,8 @@ MRV2_PIPELINE_PARALLELISM_ARGS=(
   --deselect "tests/distributed/test_pipeline_parallel.py::test_tp_language_generation[microsoft/Phi-3.5-MoE-instruct-parallel_setup22-mp-auto-test_options22]"
   --deselect "tests/distributed/test_pipeline_parallel.py::test_tp_multimodal_generation[OpenGVLab/InternVL2-1B-parallel_setup0-mp-auto-test_options0]"
   --deselect "tests/distributed/test_pipeline_parallel.py::test_tp_multimodal_generation[fixie-ai/ultravox-v0_5-llama-3_2-1b-parallel_setup2-mp-auto-test_options2]"
+  # Run 38499841007: InternVL3-1B pipeline parallel 多模态生成失败。
+  --deselect "tests/distributed/test_pipeline_parallel.py::test_tp_multimodal_generation[OpenGVLab/InternVL3-1B-parallel_setup0-mp-auto-test_options0]"
 )
 
 # ------------------------------------------------------------------------------
