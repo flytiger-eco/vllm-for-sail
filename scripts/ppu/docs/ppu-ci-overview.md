@@ -18,7 +18,7 @@ PR 事件(opened / synchronize / reopened / ready_for_review / labeled)
                 ↓
   smoke-test(PPU 静态冒烟) ∥ ai-code-review(Copilot Gate) ∥ build-wheel(编 PPU wheel)
                 ↓
-  human-review(真人审批) ── 或 ──> human-review-waived(skip-human-review 标签豁免通道)
+  human-review(真人审批) ── 或 ──> skip-human-review(skip-human-review 标签跳过 human review 通道)
                 ↓
   PPU area × 22(wheel 就绪 + 门禁任一通道 success 后统一派发)
      每个 area 在自己的 check-changes 里按路径 diff 决定是否真正上卡;
@@ -75,7 +75,7 @@ PR 事件(opened / synchronize / reopened / ready_for_review / labeled)
    - smoke-test：`bash -n` 全部 `scripts/ppu/*.sh` + `py_compile` + `check-exclusions.py`(每个 PR 都跑,与 selfcheck 的 paths 过滤互补)。
    - ai-code-review：组织 Copilot Gate。
    - build-wheel：workflow_call 复用 `build-ppu-wheel.yml`,产出 wheel artifact。
-3. **human-review**(真人审批)**或** **human-review-waived**(豁免通道,见 4.3)。
+3. **human-review**(真人审批)**或** **skip-human-review**(跳过 human review 通道,见 4.3)。
 4. **PPU area × 22**：放行条件 = `build-wheel success` **且** 两条审批通道任一 `success`(用 `always()` 兜住另一条必然 skipped 的级联跳过)。每个 area 内部的 `check-changes` 再按路径 diff 决定是否真正上卡。
 5. **Full CI 聚合点**：`needs` 全部 job,`skipped` 视为通过——分支保护只需配这一条 required check。
 
@@ -87,7 +87,7 @@ PR 事件(opened / synchronize / reopened / ready_for_review / labeled)
 
 | 标签 | 作用 |
 | --- | --- |
-| `skip-human-review` | 跳过真人审批门禁,改走 `human-review-waived` 本地豁免 job 放行。**背景**：GitHub 禁止 PR 作者 approve 自己的 PR,而本仓库日常只有作者一人提交,轮询门禁会空等 6h 后 failure、22 个 area 永不派发;打标签需 triage 权限、在时间线留痕可审计,授权强度不弱于一次 approve。 |
+| `skip-human-review` | 跳过 human review,改走 `skip-human-review` 本地 job 放行。**背景**：GitHub 禁止 PR 作者 approve 自己的 PR,而本仓库日常只有作者一人提交,轮询门禁会空等 6h 后 failure、22 个 area 永不派发;打标签需 triage 权限、在时间线留痕可审计,授权强度不弱于一次 approve。 |
 | `run-all` | 无条件执行全部 22 个 area(不跳过 precheck/review 等前置门禁)。各 area 的 `check-changes` 见此标签即强制 `changes_exist=true`。 |
 
 ### 4.4 单组并发互斥

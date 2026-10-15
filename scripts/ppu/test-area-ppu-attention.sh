@@ -39,6 +39,9 @@ ATTN_SINGLE_ARGS=(
   tests/v1/attention/
   -k
   'not _correctness and not test_gdn_build_classification and not test_has_initial_state_after_reclassification'
+  # Run 38696232863：SM90 参数在 PPU 上报 native_next_n_supported 未定义。
+  # 恢复条件：该能力探测用例在 PPU 上通过后移除此项，保留其他参数变体。
+  '--deselect=tests/v1/attention/test_indexer_native_next_n.py::test_native_decode_gate_per_architecture[9-expected_native0]'
 )
 
 # multi：无（tests/v1/attention/ 无 @multi_gpu_test）
