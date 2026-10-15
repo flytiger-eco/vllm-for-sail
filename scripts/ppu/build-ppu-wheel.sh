@@ -21,7 +21,8 @@ if [ "${ARCH}" = "aarch64" ]; then
   echo "aarch64 is not supported yet: no aarch64 PPU base image / SDK tarball" >&2
   exit 1
 else
-  BASE_IMG="pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06"
+  # CI 传入已用于 Rust 缓存键的镜像 ID；本地直接调用仍使用默认镜像。
+  BASE_IMG="${PPU_BUILD_IMAGE:-pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06}"
 fi
 
 PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
