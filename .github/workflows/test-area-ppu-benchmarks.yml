@@ -1,6 +1,5 @@
 # Aone CI `.aoneci/test-area-ppu-benchmarks.yaml` 的 GitHub Actions 移植版
 # 结构：
-#   check-changes — 路径变更门禁（对位 Aone diff-guard）
 #   ppu-benchmarks-test — K8s worker Pod 内装依赖 + 跑 pytest（编排壳 CPU-only,零占卡）
 #   ppu-benchmarks-finish — 分支保护聚合点
 #
@@ -8,13 +7,7 @@
 name: Benchmarks Test (PPU)
 
 on:
-  # 重量级 area（占 PPU 卡时间；首跑未标定耗时,timeout 上限 90min）：
-  # PR 上按路径变更自动触发（打 run-all 标签则强制全跑）,夜间/周末由 nightly-ppu.yml 兜底。
-  # 依赖路径清单保留在下方 check-changes 的 dorny 过滤器中。
-  # PR 入口收编到 ci.yml：PR（无需标签）走完完整门禁链
-  # （precheck → smoke-test ∥ ai-code-review → human-review）后以
-  # workflow_call 调用本 workflow；base 判定在 ci.yml 侧,下方
-  # check-changes 的路径过滤仍生效，run-all 标签可强制全跑。
+  # PR 由 ci.yml 的构建和审批门禁放行后调用；手动入口保持可用。
   workflow_call:
     inputs:
       test_mode:
@@ -53,55 +46,12 @@ env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
 
 jobs:
-  # ==================== 变更检查 ==================== #
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      changes_exist: ${{ steps.decide.outputs.changes_exist }}
-    steps:
-      # 仅 PR 用 dorny/paths-filter；无需 checkout——它在 pull_request 下走
-      # GitHub REST API 取变更清单，不依赖工作区（本 workflow 无 push 触发器）。
-      - name: Detect file changes
-        id: filter
-        uses: dorny/paths-filter@v3
-        if: github.event_name == 'pull_request'
-        with:
-          filters: |
-            ppu_code:
-              - ".github/workflows/test-area-ppu-benchmarks.yml"
-              - "scripts/ppu/ppu_install_dependency.sh"
-              - "scripts/ppu/test-area-ppu-benchmarks.sh"
-              - "benchmarks/**"
-              - "tests/benchmarks/**"
-              - "vllm/**"
-
-      - name: Decide whether to run tests
-        id: decide
-        env:
-          FILTER_HIT: ${{ steps.filter.outputs.ppu_code }}
-          HAS_RUN_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'run-all') }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            # PR：默认按路径变更决定;打 run-all 标签则无条件执行本 area
-            if [[ "${HAS_RUN_ALL_LABEL}" == "true" ]]; then
-              echo "[gate] run-all 标签命中 -> 强制执行本 area"
-              echo "changes_exist=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "[gate] paths_hit=${FILTER_HIT:-false}"
-              echo "changes_exist=${FILTER_HIT:-false}" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            # workflow_dispatch（手动触发）：必跑
-            echo "changes_exist=true" >> "$GITHUB_OUTPUT"
-          fi
-
+  # 由 ci.yml 放行后固定执行，不按变更路径或标签筛选。
   # ==================== PPU Benchmarks ==================== #
   ppu-benchmarks-test:
-    needs: [check-changes]
     # fork PR 不进特权 PPU worker Pod（privileged + 设备直通 +
     # NAS 挂载 + artifactory 凭证,不能被外部 PR 的代码驱动）
     if: >-
-      needs.check-changes.outputs.changes_exist == 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: k8s-runner-group-cpu-flytiger
@@ -242,7 +192,7 @@ jobs:
 
   # ==================== 聚合点 ==================== #
   ppu-benchmarks-finish:
-    needs: [check-changes, ppu-benchmarks-test]
+    needs: [ppu-benchmarks-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
