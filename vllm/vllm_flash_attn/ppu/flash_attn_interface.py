@@ -76,6 +76,9 @@ def _is_fa3_supported(device = None) -> Tuple[bool, Optional[str]]:
     return True, None
 
 def is_fa_version_supported(fa_version: int, device = None) -> bool:
+    # 上游会在测试收集和后端选择时探测 FA4；PPU 尚无对应内核。
+    if fa_version == 4:
+        return False
     assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[0]
@@ -84,6 +87,8 @@ def is_fa_version_supported(fa_version: int, device = None) -> bool:
 
 def fa_version_unsupported_reason(fa_version: int, device = None) \
     -> Optional[str]:
+    if fa_version == 4:
+        return "FA4 is not supported on PPU"
     assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[1]
