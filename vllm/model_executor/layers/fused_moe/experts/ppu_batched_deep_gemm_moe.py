@@ -104,23 +104,22 @@ def _silu_mul_quant_deep_gemm(
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
 ):
+    # 3D grid: (G, token_parallel_blocks, E)
+    # axis-0 = group index, axis-1 = token block index, axis-2 = expert
     G = H // GROUP_SIZE
     SITU_INV_BETA: tl.constexpr = 1.0 / SITU_BETA
     SITU_LINEAR_INV_BETA: tl.constexpr = 1.0 / SITU_LINEAR_BETA
 
-    # map program id -> (e, g)
-    pid = tl.program_id(0)
-    e = pid // G
-    g = pid % G
-
-    e = e.to(tl.int64)
-    g = g.to(tl.int64)
+    g = tl.program_id(0).to(tl.int64)
+    token_block_id = tl.program_id(1)
+    e = tl.program_id(2).to(tl.int64)
+    token_stride = tl.num_programs(1)
 
     # number of valid tokens for this expert
     n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
 
     cols = tl.arange(0, BLOCK).to(tl.int64)
-    mask = cols < BLOCK
+    mask = cols < GROUP_SIZE
 
     base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
     base_gate_offset = base_input_offset + cols * stride_i_h
@@ -128,7 +127,8 @@ def _silu_mul_quant_deep_gemm(
     base_yq_offset = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h + cols * stride_yq_h
     base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
-    for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
+    for t in tl.range(token_block_id, n_tokens, token_stride,
+                      num_stages=NUM_STAGES):
         gate = tl.load(
             input_ptr + base_gate_offset + t * stride_i_t, mask=mask, other=0.0
         ).to(tl.float32)
@@ -270,9 +270,6 @@ def _persistent_masked_m_silu_mul_quant(
     else:
         stride_cnt_e = tokens_per_expert.stride()[0]
 
-        # Static grid over experts and H-groups.
-        # A loop inside the kernel handles the token dim
-        grid = (E * G,)
         # strides (elements)
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
@@ -289,6 +286,32 @@ def _persistent_masked_m_silu_mul_quant(
             f"_silu_mul_fp8_quant_deep_gemm does"
             f"not support {y_s.dtype} scales. Only torch.float32 supported."
         )
+
+        # Dynamic launch configuration:
+        # - Scale num_warps with BLOCK size for better thread utilisation
+        # - Add token-parallel blocks when group count G is small (e.g. G=1
+        #   for int8 per-token quant) to improve GPU occupancy
+        block_size = triton.next_power_of_2(group_size)
+        if block_size >= 2048:
+            n_warps = 8
+            n_stages = 2
+        elif block_size >= 512:
+            n_warps = 4
+            n_stages = 2
+        else:
+            n_warps = 1
+            n_stages = 4
+
+        total_group_blocks = E * G
+        if total_group_blocks < 128:
+            token_parallel = max(1, 128 // max(total_group_blocks, 1))
+            token_parallel = min(token_parallel, 64)
+        else:
+            token_parallel = 1
+
+        # 3D grid: (G, token_parallel_blocks, E)
+        grid = (G, token_parallel, E)
+
         _silu_mul_quant_deep_gemm[grid](
             y,
             y_q,
@@ -316,9 +339,9 @@ def _persistent_masked_m_silu_mul_quant(
             IS_SITU=is_situ,
             SITU_BETA=situ_beta,
             SITU_LINEAR_BETA=situ_linear_beta,
-            BLOCK=triton.next_power_of_2(group_size),
-            NUM_STAGES=4,
-            num_warps=1,
+            BLOCK=block_size,
+            NUM_STAGES=n_stages,
+            num_warps=n_warps,
         )
 
     return y_q, y_s
