@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
@@ -26,6 +27,9 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 
 if current_platform.is_ppu():
+    from vllm.model_executor.layers.quantization.utils.int8_utils import (
+        per_token_group_quant_int8,
+    )
     from vllm.utils.ppu_deep_gemm import (
         fp8_mqa_logits,
         fp8_paged_mqa_logits,
@@ -43,6 +47,69 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+@triton.jit
+def _scatter_indexer_int8_cache(
+    k_bytes,
+    scale_bytes,
+    cache,
+    slots,
+    BLOCK_SIZE: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    slot = tl.load(slots + row).to(tl.int64)
+    if slot >= 0:
+        tl.device_assert(slot < NUM_BLOCKS * BLOCK_SIZE, "indexer slot out of bounds")
+        if slot < NUM_BLOCKS * BLOCK_SIZE:
+            page = slot // BLOCK_SIZE
+            token = slot % BLOCK_SIZE
+            head = tl.arange(0, 128)
+            values = tl.load(k_bytes + row * 128 + head)
+            tl.store(cache + page * PAGE_STRIDE + token * 128 + head, values)
+            byte = tl.arange(0, 4)
+            scale = tl.load(scale_bytes + row * 4 + byte)
+            tl.store(
+                cache + page * PAGE_STRIDE + BLOCK_SIZE * 128 + token * 4 + byte,
+                scale,
+            )
+
+
+def indexer_k_quant_and_cache_int8(
+    k: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    quant_block_size: int,
+) -> None:
+    assert current_platform.is_ppu()
+    assert k.ndim == 2 and k.shape[1] == 128 and k.dtype == torch.bfloat16
+    assert quant_block_size == 128
+    assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
+    assert kv_cache.shape[1] > 0 and kv_cache.shape[2] == 132
+    assert kv_cache.stride(2) == 1 and kv_cache.stride(1) == 132
+    assert kv_cache.stride(0) >= kv_cache.shape[1] * 132
+    assert kv_cache.stride(0) % 4 == 0 and kv_cache.data_ptr() % 4 == 0
+    assert k.device == kv_cache.device == slot_mapping.device
+    assert k.device.type == "cuda"
+    assert slot_mapping.ndim == 1 and slot_mapping.dtype == torch.int64
+    assert slot_mapping.is_contiguous() and slot_mapping.shape[0] == k.shape[0]
+    if k.shape[0] == 0:
+        return
+
+    values, scales = per_token_group_quant_int8(k.contiguous(), 128)
+    # INT8 consumers need FP32 scales and separate value/scale planes per page.
+    _scatter_indexer_int8_cache[(k.shape[0],)](
+        values.view(torch.uint8),
+        scales.view(torch.uint8),
+        kv_cache,
+        slot_mapping,
+        kv_cache.shape[1],
+        kv_cache.stride(0),
+        kv_cache.shape[0],
+        num_warps=4,
+    )
 
 
 def _gather_workspace_shapes(
@@ -174,13 +241,18 @@ def ppu_sparse_attn_indexer(
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
-        ops.indexer_k_quant_and_cache(
-            k,
-            kv_cache,
-            slot_mapping,
-            quant_block_size,
-            scale_fmt,
-        )
+        if q_dtype == torch.int8:
+            indexer_k_quant_and_cache_int8(
+                k, kv_cache, slot_mapping, quant_block_size
+            )
+        else:
+            ops.indexer_k_quant_and_cache(
+                k,
+                kv_cache,
+                slot_mapping,
+                quant_block_size,
+                scale_fmt,
+            )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
