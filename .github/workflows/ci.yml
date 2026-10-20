@@ -1,8 +1,11 @@
-# PR gates and PPU CI. precheck, ai-code-review and human-review are reusable
-# workflows from flytiger-eco/.github:
-#   precheck -> smoke-test | ai-code-review | build-wheel
-#            -> human-review | skip-human-review -> PPU areas -> Full CI
-# Runs triggered by other labels or non-approval reviews skip every job.
+# PR checks and PPU CI, with shared gates from flytiger-eco/.github.
+#
+# Checks: precheck -> (smoke-test + ai-code-review) -> human-review
+# PPU: authorize(run-ci) + precheck -> build-wheel
+#      build-wheel + smoke-test -> (attention + samplers + benchmarks) -> Full CI
+#
+# The `run-ci` label enables PPU CI; approvals rerun checks only.
+# Full CI excludes AI and human reviews; their checks report separately.
 
 name: CI Pipeline
 
@@ -14,62 +17,65 @@ on:
 
 permissions:
   contents: read
-  actions: read # Needed by the areas; callees cannot widen permissions
+  actions: read # Required by PPU areas.
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}-${{ ((github.event.action == 'labeled' && github.event.label.name != 'skip-human-review') || (github.event_name == 'pull_request_review' && github.event.review.state != 'approved')) && 'noop' || 'main' }}
-  cancel-in-progress: ${{ github.event_name != 'pull_request_review' }}
+  # Review and ignored events must not cancel PPU runs.
+  group: >-
+    ci-${{ github.event.pull_request.number }}-${{
+    ((github.event_name == 'pull_request' && github.event.action == 'labeled' &&
+    github.event.label.name != 'run-ci') ||
+    (github.event_name == 'pull_request_review' &&
+    (github.event.review.state != 'approved' || github.event.review.user.type == 'Bot')))
+    && github.run_id || github.event_name }}
+  cancel-in-progress: true
 
 jobs:
-  # An approval re-runs the pipeline only when this commit has no passing
-  # approval gate yet (human-review times out after 6h). Fork approvals never
-  # run it, because the areas' fork guard only checks pull_request events.
-  check-run:
-    name: Check Whether to Run CI
+  # Re-runs keep the original payload; fetch current labels.
+  authorize:
+    name: CI Authorization
     if: >-
-      (github.event_name == 'pull_request' &&
-       (github.event.action != 'labeled' ||
-        github.event.label.name == 'skip-human-review')) ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved')
+      github.event_name == 'pull_request' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'run-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      checks: read
+      pull-requests: read
     outputs:
-      run: ${{ steps.check-run.outputs.run }}
+      run: ${{ steps.authorize.outputs.run }}
     steps:
-      - id: check-run
+      - id: authorize
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-          HAS_SKIP_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'skip-human-review') }}
           REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          run=true
-          if [[ "$EVENT" == pull_request_review ]]; then
+          labels=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.labels[].name')
+          if grep -qx run-ci <<<"$labels"; then
+            run=true
+          else
             run=false
-            if [[ "$SAME_REPO" == true && "$HAS_SKIP_LABEL" != true ]]; then
-              passed=$(gh api --paginate \
-                "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" \
-                --jq '.check_runs[]
-                  | select(.conclusion == "success")
-                  | select(.name == "Human Review Gate / Human Review Gate"
-                           or .name == "Skip Human Review")
-                  | .id')
-              [[ -n "$passed" ]] || run=true
-            fi
           fi
           echo "run=$run" | tee -a "$GITHUB_OUTPUT"
+          if [[ "$run" == true ]]; then
+            echo "✅ PPU CI authorized for ${HEAD_SHA:0:12} by the \`run-ci\` label." >> "$GITHUB_STEP_SUMMARY"
+          else
+            msg="PPU CI not started for ${HEAD_SHA:0:12}: add the \`run-ci\` label."
+            echo "::notice::$msg"
+            echo "⏸️ $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   precheck:
     name: Pre-check
-    needs: check-run
-    if: needs.check-run.outputs.run == 'true'
+    if: >-
+      (github.event_name == 'pull_request' &&
+       (github.event.action != 'labeled' || github.event.label.name == 'run-ci')) ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       github.event.review.user.type != 'Bot')
     uses: flytiger-eco/.github/.github/workflows/user-precheck.yml@main
 
   smoke-test:
@@ -91,131 +97,71 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
-  # Main wheel plus test toolchain wheels, shared by the areas.
-  build-wheel:
-    name: Build PPU Wheel
-    needs: precheck
-    uses: ./.github/workflows/build-ppu-wheel.yml
-
-  # Exactly one approval channel runs; the areas need it to succeed.
+  # Waits up to 6h; later approvals start a new gate-only run.
   human-review:
     name: Human Review Gate
     needs: [smoke-test, ai-code-review]
-    if: >-
-      !contains(github.event.pull_request.labels.*.name, 'skip-human-review') &&
-      contains(fromJSON('["v0.26.0", "v0.27.0", "v0.28.0"]'), github.event.pull_request.base.ref)
     uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
     secrets: inherit
 
-  # Authors cannot approve their own PRs, so the label (triage permission,
-  # logged on the PR timeline) serves as the human approval.
-  skip-human-review:
-    name: Skip Human Review
-    needs: [smoke-test, ai-code-review]
-    if: >-
-      contains(github.event.pull_request.labels.*.name, 'skip-human-review') &&
-      contains(fromJSON('["v0.26.0", "v0.27.0", "v0.28.0"]'), github.event.pull_request.base.ref)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Record skip human review
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          echo "✅ Human review skipped via the skip-human-review label."
-          echo "PR   : $PR_URL"
-          echo "base : $BASE_REF   head: $HEAD_REF"
-          echo "Reason: the label was added by a user with triage permission; the PR timeline keeps an audit trail."
+  build-wheel:
+    name: Build PPU Wheel
+    needs: [authorize, precheck]
+    if: needs.authorize.outputs.run == 'true'
+    uses: ./.github/workflows/build-ppu-wheel.yml
 
   ppu-attention:
-    needs: [human-review, skip-human-review, build-wheel]
-    if: >-
-      !cancelled() &&
-      needs.build-wheel.result == 'success' &&
-      (needs.human-review.result == 'success' ||
-       needs.skip-human-review.result == 'success')
+    needs: [smoke-test, build-wheel]
     uses: ./.github/workflows/test-area-ppu-attention.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-samplers:
-    needs: [human-review, skip-human-review, build-wheel]
-    if: >-
-      !cancelled() &&
-      needs.build-wheel.result == 'success' &&
-      (needs.human-review.result == 'success' ||
-       needs.skip-human-review.result == 'success')
+    needs: [smoke-test, build-wheel]
     uses: ./.github/workflows/test-area-ppu-samplers.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-benchmarks:
-    needs: [human-review, skip-human-review, build-wheel]
-    if: >-
-      !cancelled() &&
-      needs.build-wheel.result == 'success' &&
-      (needs.human-review.result == 'success' ||
-       needs.skip-human-review.result == 'success')
+    needs: [smoke-test, build-wheel]
     uses: ./.github/workflows/test-area-ppu-benchmarks.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
-  # Requires every job plus one approval channel. Runs with a skipped precheck
-  # report no conclusion.
+  # Aggregate PPU results only; review gates are separate.
   ci:
     name: Full CI
     needs:
-      - check-run
+      - authorize
       - precheck
       - smoke-test
-      - ai-code-review
       - build-wheel
-      - human-review
-      - skip-human-review
       - ppu-attention
       - ppu-samplers
       - ppu-benchmarks
     if: >-
       !cancelled() &&
-      (needs.precheck.result != 'skipped' ||
-       needs.check-run.result == 'failure')
+      (needs.authorize.outputs.run == 'true' ||
+       needs.authorize.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Check all dependent job statuses
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
         run: |
-          python3 -c "
-          import json, sys, os
-          needs = json.loads(os.environ['NEEDS_JSON'])
-          for job, info in needs.items():
-              print('{}: {}'.format(job, info.get('result', 'unknown')))
+          python3 - <<'EOF'
+          import json, os, sys
 
-          required_success = (
-              'precheck', 'smoke-test', 'ai-code-review', 'build-wheel',
-              'ppu-attention', 'ppu-samplers', 'ppu-benchmarks',
-          )
-          failed = [
-              '{} ({})'.format(
-                  job, needs.get(job, {}).get('result', 'missing'))
-              for job in required_success
-              if needs.get(job, {}).get('result') != 'success'
-          ]
-
-          approval_jobs = ('human-review', 'skip-human-review')
-          if not any(
-              needs.get(job, {}).get('result') == 'success'
-              for job in approval_jobs
-          ):
-              failed.append('approval gate (no successful channel)')
-
+          failed = []
+          for job, info in json.loads(os.environ["NEEDS_JSON"]).items():
+              result = info.get("result", "unknown")
+              print(f"{job}: {result}")
+              if result != "success":
+                  failed.append(f"{job} ({result})")
           if failed:
-              print('Failed jobs: ' + ','.join(failed))
-              sys.exit(1)
-          print('All required jobs completed successfully')
-          "
+              sys.exit("Failed jobs: " + ", ".join(failed))
+          print("All required jobs completed successfully")
+          EOF
