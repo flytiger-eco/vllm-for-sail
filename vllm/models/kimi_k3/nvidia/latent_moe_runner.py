@@ -13,6 +13,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -74,6 +75,15 @@ class LatentMoERunner(MoERunner):
             current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)
         )
+        # Tier 0 and tier 2 both consume the raw up-proj weight (the CuTeDSL
+        # op and the narrow()+addmm_ shard respectively); a quantized
+        # up-proj can only run through the layer's quant method, i.e. tier 1.
+        transform = self.routed_output_transform
+        self._up_proj_is_quantized = transform is not None and not isinstance(
+            transform.up_proj.quant_method, UnquantizedLinearMethod
+        )
+        if self._up_proj_is_quantized:
+            self.enable_k3_latent_moe_tail_fusion = False
         # Overlap the shared-expert all-reduce with the tier-1 up-projection.
         self._shared_ar_events = (torch.cuda.Event(), torch.cuda.Event())
         use_fused_path = self._use_fused_path()
@@ -167,10 +177,12 @@ class LatentMoERunner(MoERunner):
         transform = self.routed_output_transform
         assert transform is not None
         # tier 1
-        if (
+        if self._up_proj_is_quantized or (
             num_tokens <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
             and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
         ):
+            # A quantized up-proj always takes this path: only the layer's
+            # quant method can run its GEMM.
             return LatentTailTier.ALLREDUCE_OVERLAP
         # tier 2
         return LatentTailTier.COLUMN_PARALLEL
@@ -212,7 +224,11 @@ class LatentMoERunner(MoERunner):
         """
         transform = self.routed_output_transform
         assert transform is not None
-        assert shared_output.size(0) <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        if not self._up_proj_is_quantized:
+            assert (
+                shared_output.size(0)
+                <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            )
         if transform.norm is not None:
             fused_latent = self.allreduce_norm_latent_out(fused_output, transform.norm)
         else:
@@ -221,7 +237,7 @@ class LatentMoERunner(MoERunner):
         # Overlap the shared-expert all-reduce with the up-projection GEMM while
         # the batch is small enough for it to pay off.
         result, shared_output = maybe_execute_in_parallel(
-            lambda: torch.mm(fused_latent, transform.up_proj.weight.t()),
+            lambda: transform.up_proj(fused_latent)[0],
             lambda: tensor_model_parallel_all_reduce(shared_output),
             self._shared_ar_events[0],
             self._shared_ar_events[1],
@@ -242,6 +258,9 @@ class LatentMoERunner(MoERunner):
     ) -> torch.Tensor:
         """
         Tier 2: column-parallel up-projection folded into the final reduce.
+
+        Requires an unquantized up-proj: the raw weight is narrow()ed and fed
+        to addmm_ directly. Quantized up-projs are kept on tier 1 instead.
         """
         transform = self.routed_output_transform
         assert transform is not None
