@@ -1,12 +1,8 @@
-# flytiger-eco 组织 PR 门禁 + PPU per-PR CI 编排入口：
-#   precheck → (smoke-test ∥ ai-code-review ∥ build-wheel)
-#            → human-review | skip-human-review → PPU area ×3 → Full CI
-#
-# - precheck / ai-code-review / human-review 是 flytiger-eco/.github 的
-#   reusable workflow，本文件只做编排。
-# - 标签 skip-human-review：跳过真人审批，改走本地 skip-human-review job。
-# - human-review 受托管 runner 6h 上限约束；超时后有人 approve 会自动重跑。
-# - 其他标签及非 approve 的 review 也会触发 run，这类 run 全部跳过。
+# PR gates and PPU CI. precheck, ai-code-review and human-review are reusable
+# workflows from flytiger-eco/.github:
+#   precheck -> smoke-test | ai-code-review | build-wheel
+#            -> human-review | skip-human-review -> PPU areas -> Full CI
+# Runs triggered by other labels or non-approval reviews skip every job.
 
 name: CI Pipeline
 
@@ -18,7 +14,7 @@ on:
 
 permissions:
   contents: read
-  actions: read # 透传 area：callee 权限只降不升
+  actions: read # Needed by the areas; callees cannot widen permissions
   pull-requests: read
 
 concurrency:
@@ -26,8 +22,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'pull_request_review' }}
 
 jobs:
-  # 判定是否执行流水线；approve 仅在本 commit 尚无审批通过时执行。
-  # fork PR 的 approve 不执行：area 的 fork 拦截只认 pull_request 事件。
+  # An approval re-runs the pipeline only when this commit has no passing
+  # approval gate yet (human-review times out after 6h). Fork approvals never
+  # run it, because the areas' fork guard only checks pull_request events.
   check-run:
     name: Check Whether to Run CI
     if: >-
@@ -94,13 +91,13 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@main
     secrets: inherit
 
-  # 产出主 wheel + 测试依赖 wheel，供 3 个 area 共用。
+  # Main wheel plus test toolchain wheels, shared by the areas.
   build-wheel:
     name: Build PPU Wheel
     needs: precheck
     uses: ./.github/workflows/build-ppu-wheel.yml
 
-  # 两条审批通道互斥，下游 area 任一 success 即放行。
+  # Exactly one approval channel runs; the areas need it to succeed.
   human-review:
     name: Human Review Gate
     needs: [smoke-test, ai-code-review]
@@ -110,8 +107,8 @@ jobs:
     uses: flytiger-eco/.github/.github/workflows/human-review.yml@main
     secrets: inherit
 
-  # GitHub 禁止作者 approve 自己的 PR，单人仓库下 human-review 会空等 6h 失败；
-  # 打标签即人工授权（需 triage 权限，PR 时间线留痕）。
+  # Authors cannot approve their own PRs, so the label (triage permission,
+  # logged on the PR timeline) serves as the human approval.
   skip-human-review:
     name: Skip Human Review
     needs: [smoke-test, ai-code-review]
@@ -127,10 +124,10 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          echo "✅ 已根据 skip-human-review 标签跳过 human review。"
+          echo "✅ Human review skipped via the skip-human-review label."
           echo "PR   : $PR_URL"
           echo "base : $BASE_REF   head: $HEAD_REF"
-          echo "依据：标签由具 triage 权限者添加，PR 时间线留痕可审计。"
+          echo "Reason: the label was added by a user with triage permission; the PR timeline keeps an audit trail."
 
   ppu-attention:
     needs: [human-review, skip-human-review, build-wheel]
@@ -168,7 +165,8 @@ jobs:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
-  # 聚合点：审批通道至少一个成功，其余 job 全部成功；precheck 被跳过的 run 不出结论。
+  # Requires every job plus one approval channel. Runs with a skipped precheck
+  # report no conclusion.
   ci:
     name: Full CI
     needs:

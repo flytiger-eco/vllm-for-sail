@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""校验 PPU area 脚本里引用的测试路径仍然存在。
+"""Check that test paths referenced by the PPU area scripts still exist.
 
-背景：三个 test-area-ppu-*.sh 中的 `--ignore=` / `--deselect` 以及
-一批直接列出的测试文件，全部是从 `.buildkite/test_areas/` + `legacy_ci/ppu_extras/`
-的某一时刻快照手抄过来的。上游改名/删除文件后：
+Background: the `--ignore=` / `--deselect` entries and the directly listed
+test files in the three test-area-ppu-*.sh scripts were all copied by hand from
+a point-in-time snapshot of `.buildkite/test_areas/` + `legacy_ci/ppu_extras/`.
+After upstream renames or deletes a file:
 
-- `--ignore=` 指向不存在的路径：pytest 静默忽略，被排除的用例其实**没有**被跑，
-  但也没有任何提示（legacy CI 侧已发生过 entrypoints 4 条、kernels 1 条失效）。
-- 直接列出的测试文件不存在：pytest 直接报 error，属显式失败，问题较小。
+- `--ignore=` pointing at a missing path: pytest silently ignores it, so the
+  excluded tests are **not** actually run, with no warning at all (legacy CI
+  already hit this with 4 stale entrypoints entries and 1 stale kernels entry).
+- A directly listed test file that is missing: pytest reports an error, which
+  is an explicit failure and less of a problem.
 
-本检查纯静态、不需要 PPU 设备，跑在 ubuntu-latest 上，命中即让 PR 转红，
-迫使排除项跟着上游一起维护。
+This check is purely static, needs no PPU device and runs on ubuntu-latest. Any
+hit turns the PR red, forcing the exclusions to be maintained along with
+upstream.
 
-用法：python3 scripts/ppu/check-exclusions.py [--quiet]
+Usage: python3 scripts/ppu/check-exclusions.py [--quiet]
 """
 
 from __future__ import annotations
@@ -25,14 +29,16 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT_GLOB = "scripts/ppu/test-area-ppu-*.sh"
 
-# 取路径的两个 pytest 开关；--ignore=<path> 与 --ignore <path> 两种写法都要支持。
-# 刻意不用正则：仓库禁用 `import re`（要求换 regex），而本脚本要在
-# ubuntu-latest 的裸 python3 上跑，不能引入第三方依赖。
+# The two pytest flags that take a path; both --ignore=<path> and
+# --ignore <path> forms must be supported.
+# Regular expressions are avoided on purpose: the repo bans `import re` (it
+# requires `regex`), while this script runs on the bare python3 of
+# ubuntu-latest and must not pull in third-party dependencies.
 PATH_FLAGS = ("--ignore", "--deselect")
 
 
 def _tokens(line: str) -> list[str]:
-    """按 shell 词切分：剥掉行内注释、行尾续行符与引号。"""
+    """Split into shell words, dropping comments, trailing backslash and quotes."""
     if " #" in line:
         line = line.split(" #", 1)[0]
     tokens = line.replace('"', " ").replace("'", " ").split()
@@ -42,7 +48,7 @@ def _tokens(line: str) -> list[str]:
 
 
 def referenced_paths(script: pathlib.Path) -> list[tuple[int, str]]:
-    """返回 [(行号, 仓库相对路径)]，已剥掉 pytest nodeid 的 ::xxx 部分。"""
+    """Return [(lineno, repo-relative path)] with any pytest `::xxx` stripped."""
     found: list[tuple[int, str]] = []
     for lineno, raw in enumerate(script.read_text().splitlines(), start=1):
         line = raw.strip()
@@ -56,12 +62,13 @@ def referenced_paths(script: pathlib.Path) -> list[tuple[int, str]]:
                     candidates.append(token[len(flag) + 1 :])
                 elif token == flag and idx + 1 < len(tokens):
                     candidates.append(tokens[idx + 1])
-        # 选集条目单独占一行（无开关）的形式：`tests/foo/test_bar.py`
+        # A selection entry on its own line (no flag): `tests/foo/test_bar.py`
         if not candidates and len(tokens) == 1 and tokens[0].startswith("tests/"):
             candidates.append(tokens[0])
         for candidate in candidates:
             path = candidate.split("::", 1)[0].strip().rstrip("/")
-            # 变量插值（如 ${STUB_MODEL_DIR}）无法静态判定，跳过
+            # Variable interpolation (e.g. ${STUB_MODEL_DIR}) cannot be
+            # resolved statically; skip it.
             if not path.startswith("tests/") or "$" in path:
                 continue
             found.append((lineno, path))
@@ -91,20 +98,22 @@ def main() -> int:
         )
     if missing:
         print(
-            "\n[check-exclusions] 以下测试路径在当前分支不存在——"
-            "上游改名/删除后排除项未同步，被排除的用例实际未被执行：",
+            "\n[check-exclusions] The following test paths do not exist on "
+            "this branch: upstream renamed/deleted them without the "
+            "exclusions being updated, so the excluded tests are not "
+            "actually being run:",
             file=sys.stderr,
         )
         for item in missing:
             print(f"  {item}", file=sys.stderr)
         print(
-            "\n修复方式：对照 .buildkite/test_areas/<area>.yaml 更新对应脚本的"
-            "选集与 --ignore/--deselect 列表。",
+            "\nFix: update the selection and the --ignore/--deselect lists "
+            "in the matching script against .buildkite/test_areas/<area>.yaml.",
             file=sys.stderr,
         )
         return 1
     if not quiet:
-        print("[check-exclusions] OK — 所有引用的测试路径都存在")
+        print("[check-exclusions] OK - all referenced test paths exist")
     return 0
 
 

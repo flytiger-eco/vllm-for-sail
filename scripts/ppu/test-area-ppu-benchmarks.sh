@@ -1,17 +1,19 @@
 #!/bin/bash
 # ==============================================================================
-# scripts/ppu/test-area-ppu-benchmarks.sh — PPU Benchmarks 测试执行（GitHub Actions）
+# scripts/ppu/test-area-ppu-benchmarks.sh - PPU Benchmarks test runner (GitHub Actions)
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/test-area-ppu-benchmarks.yml（容器内，cwd = /workspace）。
+# Caller: .github/workflows/test-area-ppu-benchmarks.yml (in the container,
+# cwd = /workspace).
 #
-# 环境变量：
-#   TEST_MODE   all(默认) | single   — 本 area 为 single-only
+# Environment variables:
+#   TEST_MODE   all (default) | single - this area is single-only
 #
-# 上游对位 .buildkite/test_areas/benchmarks.yaml（3 step）,PPU scope 仅取
-# "Benchmarks CLI Test" → pytest tests/benchmarks/；另两个 step 红区不可用：
-#   - Benchmarks（run-benchmarks.sh）：运行时下载 Llama-2-7b + ShareGPT 数据集,
-#     红区无外网 → 排除
-#   - Attention Benchmarks Smoke Test：B200-only → 排除
+# Upstream counterpart: .buildkite/test_areas/benchmarks.yaml (3 steps). The PPU
+# scope only takes "Benchmarks CLI Test" -> pytest tests/benchmarks/; the other
+# two steps cannot run in the red zone:
+#   - Benchmarks (run-benchmarks.sh): downloads Llama-2-7b + the ShareGPT
+#     dataset at runtime, and the red zone has no internet access -> excluded
+#   - Attention Benchmarks Smoke Test: B200-only -> excluded
 # ==============================================================================
 
 set -euo pipefail
@@ -26,8 +28,9 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
-# workflow_call 的 pytest_args 透传：按空白切分后追加到每个 step 的
-# pytest 命令尾部（如 `-k test_foo -x`）,排障时缩小范围而不必改脚本。
+# pytest_args passthrough from workflow_call: split on whitespace and appended
+# to every step's pytest command (e.g. `-k test_foo -x`) to narrow the scope
+# while debugging without editing this script.
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -35,7 +38,7 @@ TMP_JUNIT="/tmp/ppu-benchmarks-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [deps] area 特有依赖：pandas
+# [deps] Area-specific dependency: pandas
 # ------------------------------------------------------------------------------
 if python3 -c "import pandas" 2>/dev/null; then
   echo "[deps] pandas already installed: $(python3 -c 'import pandas; print(pandas.__version__)')"
@@ -46,16 +49,19 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# [tests] 用例选集（快照自 legacy_ci/ppu_extras/benchmarks.yaml single 段）
+# [tests] Test selection (snapshot of the single stage in
+# legacy_ci/ppu_extras/benchmarks.yaml)
 # ------------------------------------------------------------------------------
-# single = legacy CI "benchmarks single" job（1-PPU pod）：
-#   tests/benchmarks/ — benchmark CLI 单元测试 + 参数解析测试。
+# single = legacy CI "benchmarks single" job (1-PPU pod):
+#   tests/benchmarks/ - benchmark CLI unit tests + argument parsing tests.
 
-# 以下两个文件 ignore：需 gpt2 tokenizer,红区离线不可用,
-# run 49488451 确认全量跑时这两个文件共 18 ERROR：
-#   - test_random_dataset.py                  需 gpt2 tokenizer offline
-#   - test_random_multimodal_dataset_video.py 需 cv2 + gpt2 tokenizer
-# 恢复条件：gpt2 tokenizer 入库红区后可移除对应 --ignore（并补 MODEL_MAP）。
+# The two files below are ignored: they need the gpt2 tokenizer, which is not
+# available offline in the red zone; run 49488451 confirmed 18 ERROR results
+# from these two files in a full run:
+#   - test_random_dataset.py                  needs gpt2 tokenizer offline
+#   - test_random_multimodal_dataset_video.py needs cv2 + gpt2 tokenizer
+# Restore once the gpt2 tokenizer is added to the red zone: drop the matching
+# --ignore (and extend MODEL_MAP).
 BENCH_SINGLE_ARGS=(
   tests/benchmarks/
   "--ignore=tests/benchmarks/test_random_dataset.py"
@@ -63,20 +69,21 @@ BENCH_SINGLE_ARGS=(
 )
 
 # ------------------------------------------------------------------------------
-# [env] 离线 + 运行时配置
+# [env] Offline + runtime configuration
 # ------------------------------------------------------------------------------
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
-# 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
+# Offline by default (models come from the preloaded /nas_aisw volume); set
+# PPU_TEST_ONLINE=1 when online downloads are needed
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
   export HF_HUB_OFFLINE=1
   export TRANSFORMERS_OFFLINE=1
 fi
 
-# HF 缓存：workflow 已注入 HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub；
-# 未注入时（本地调试）探测 /nas_aisw 下的候选路径
+# HF cache: the workflow injects HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub;
+# when it is not injected (local debugging), probe candidate paths under /nas_aisw
 if [ -z "${HF_HUB_CACHE:-}" ]; then
   for _cand in /nas_aisw/datasets/hf_cache/hub "$HOME/.cache/huggingface/hub"; do
     if [ -d "${_cand}" ]; then
@@ -87,8 +94,8 @@ if [ -z "${HF_HUB_CACHE:-}" ]; then
 fi
 echo "[env] HF_HUB_CACHE=${HF_HUB_CACHE:-<unset>}"
 
-# PPU SDK: Triton/Inductor 编译需要 cuda.h + ptxas + libcuda（缺失时
-# torch.compile 类测试 BackendCompilerFailed）
+# PPU SDK: Triton/Inductor compilation needs cuda.h + ptxas + libcuda (without
+# them torch.compile tests fail with BackendCompilerFailed)
 PPU_SDK_DIR="/usr/local/PPU_SDK/CUDA_SDK"
 if [ -d "${PPU_SDK_DIR}" ]; then
   export C_INCLUDE_PATH="${PPU_SDK_DIR}/include:${C_INCLUDE_PATH:-}"
@@ -98,23 +105,25 @@ if [ -d "${PPU_SDK_DIR}" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# [setup] HF hub cache symlink：HF id → /nas_aisw 本地检查点
+# [setup] HF hub cache symlinks: HF id -> local checkpoint on /nas_aisw
 # ------------------------------------------------------------------------------
-# 路径优先取红区已存模型清单 full 分支的模型清单 的 path 字段
-# （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的按 legacy CI
-# /ppusw 同构路径标注"待确认"。路径不存在时 WARN 并跳过。
+# Paths prefer the path field of the full-branch model list of models stored in
+# the red zone (absolute NAS path = /nas_aisw/datasets/ + path); models not in
+# the list follow the legacy CI /ppusw layout and are marked "to be confirmed".
+# Missing paths are reported as WARN and skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
-    # test_latency_cli.py / test_throughput_cli.py / test_serve_cli.py：
+    # test_latency_cli.py / test_throughput_cli.py / test_serve_cli.py:
     # `vllm bench {latency,throughput,serve} --model meta-llama/Llama-3.2-1B-Instruct
-    # --load-format dummy`——dummy 权重不下载,但仍需模型 config/tokenizer,
-    # 故必须落地本地检查点。
-    # 清单命中：checkpoints_cleaned.json path=checkpoints/LLM/Llama/v3.2/
-    # Llama-3.2-1B-Instruct（清单 ms_name 为 unsloth/...,按 name 匹配；legacy CI
-    # /ppusw 侧是 v3.1 目录,以红区清单的 v3.2 为准,与 basic-correctness 一致）
+    # --load-format dummy` - dummy weights are not downloaded, but the model
+    # config/tokenizer are still needed, so a local checkpoint is required.
+    # List hit: checkpoints_cleaned.json path=checkpoints/LLM/Llama/v3.2/
+    # Llama-3.2-1B-Instruct (the list's ms_name is unsloth/..., matched by name;
+    # legacy CI /ppusw uses a v3.1 directory, but the red-zone list's v3.2 wins,
+    # consistent with basic-correctness)
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
 }
@@ -148,11 +157,11 @@ print(f"[setup] symlinks: created={created} skipped={skipped} "
 PYEOF
 
 # ------------------------------------------------------------------------------
-# [junit] 合并基础设施（含 pytest 崩溃兜底）
+# [junit] Merge infrastructure (including a fallback for pytest crashes)
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
-# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
+# shellcheck disable=SC2329  # only called via `trap _emit_junit EXIT` below
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -192,7 +201,7 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）
+# ---- step summary: per-shard stats table (markdown)
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
@@ -245,24 +254,27 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
-  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT,一并收进 artifact 便于排障
+  # pytest output of sharded steps goes to TMP_JUNIT; collect it into the
+  # artifact as well for debugging
   cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
-  # 容器以 root 运行,产物须可被 runner 用户读取（upload-artifact）
+  # The container runs as root; artifacts must be readable by the runner user
+  # (upload-artifact)
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
-  # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
+  # [k8s-summary] Return the per-unit stats table via NAS: RESULTS_DIR lives in
+  # the Pod and is lost once the Pod is reclaimed.
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
       echo "[k8s-summary] summary.md -> ${PPU_SUMMARY_NAS_DIR}/summary.md"
     else
-      echo "[k8s-summary] WARN: NAS 回传失败（${PPU_SUMMARY_NAS_DIR} 不可写？）"
+      echo "[k8s-summary] WARN: failed to return summary via NAS (${PPU_SUMMARY_NAS_DIR} not writable?)"
     fi
   fi
 }
 trap _emit_junit EXIT
 
 # ------------------------------------------------------------------------------
-# [run] 单 step 执行器：shards>1 → 并发分片；shards==1 → 单进程
+# [run] Single-step runner: shards>1 -> concurrent shards; shards==1 -> single process
 # ------------------------------------------------------------------------------
 TOTAL_RC=0
 
@@ -309,12 +321,14 @@ _run_step() {
   fi
 }
 
-# benchmarks 是 single-only（legacy CI extras 仅 single 段）：single 与 all 均跑
-# 同一个 benchmarks_cli step；multi 在上方 case 已拦截报错。
+# benchmarks is single-only (legacy CI extras only have a single stage): both
+# single and all run the same benchmarks_cli step; multi is rejected by the case
+# statement above.
 _run_step "benchmarks_cli" 1 "${BENCH_SINGLE_ARGS[@]}"
 
 # ------------------------------------------------------------------------------
-# [summary] 聚合退出码（sh 退出码 = 聚合 rc,保证 CI 信号不失真）
+# [summary] Aggregate exit code (script exit code = aggregate rc, so the CI
+# signal stays accurate)
 # ------------------------------------------------------------------------------
 echo "========== [summary] steps:${STEP_LABELS_LIST} TOTAL_RC=${TOTAL_RC} =========="
 exit "${TOTAL_RC}"

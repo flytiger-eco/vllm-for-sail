@@ -1,10 +1,11 @@
 #!/bin/bash
 # ==============================================================================
-# scripts/ppu/test-area-ppu-attention.sh — PPU Attention 测试执行（GitHub Actions）
-# 调用方：.github/workflows/test-area-ppu-attention.yml（容器内，cwd=/workspace）
-# 环境变量：TEST_MODE=all(默认)|single（本 area 无 multi 用例）
-# 模型：无真模型；唯 test_indexer_deepseek_v4_slot_mapping.py 需解析
-#   Llama-3-8B 的 HF config，由下方 [stub] 段本地满足。
+# scripts/ppu/test-area-ppu-attention.sh - PPU Attention test runner (GitHub Actions)
+# Caller: .github/workflows/test-area-ppu-attention.yml (in the container,
+#   cwd=/workspace)
+# Environment variables: TEST_MODE=all (default)|single (no multi tests in this area)
+# Models: no real models; only test_indexer_deepseek_v4_slot_mapping.py needs to
+#   parse the Llama-3-8B HF config, which the [stub] section below provides locally.
 # ==============================================================================
 
 set -euo pipefail
@@ -18,8 +19,9 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
-# workflow_call 的 pytest_args 透传：按空白切分后追加到每个 step 的
-# pytest 命令尾部（如 `-k test_foo -x`），排障时缩小范围而不必改脚本。
+# pytest_args passthrough from workflow_call: split on whitespace and appended
+# to every step's pytest command (e.g. `-k test_foo -x`) to narrow the scope
+# while debugging without editing this script.
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -27,40 +29,47 @@ TMP_JUNIT="/tmp/ppu-attention-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] 用例选集（快照自 legacy_ci/ppu_extras/attention.yaml single 段）
+# [tests] Test selection (snapshot of the single stage in
+# legacy_ci/ppu_extras/attention.yaml)
 # ------------------------------------------------------------------------------
-# attention_default = 上游 "V1 attention (H100)"/"(B200)" 两 step 的合并版：
-#   -k "not _correctness"：排除所有依赖真模型的 correctness 用例（模型未
-#   stage 到红区，离线必挂）。恢复条件：模型 stage 到 /nas_aisw 后删除该
-#   -k 并补 MODEL_MAP。注意 -k 是子串匹配，`not _backend_correctness`
-#   盖不住 `test_sparse_backend_decode_correctness`，故用 `not _correctness`。
-#   另排除 test_gdn_metadata_builder.py 2 用例（root cause TBD，F2 跟踪）。
+# attention_default = merge of the two upstream steps "V1 attention (H100)" and
+# "(B200)":
+#   -k "not _correctness": excludes every correctness test that needs a real
+#   model (models are not staged in the red zone, so they always fail offline).
+#   Restore once the models are staged to /nas_aisw: drop this -k and extend
+#   MODEL_MAP. Note that -k is a substring match: `not _backend_correctness`
+#   does not cover `test_sparse_backend_decode_correctness`, hence
+#   `not _correctness`.
+#   Also excludes 2 tests in test_gdn_metadata_builder.py (root cause TBD,
+#   tracked as F2).
 ATTN_SINGLE_ARGS=(
   tests/v1/attention/
   -k
   'not _correctness and not test_gdn_build_classification and not test_has_initial_state_after_reclassification'
-  # Run 38499841007: PPU attention backend/cache marker 行为不兼容。
+  # Run 38499841007: PPU attention backend/cache marker behavior is incompatible.
   --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[auto-0]"
   --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[fp8_ds_mla-1]"
   --deselect "tests/v1/attention/test_mla_noncausal.py::test_mla_cache_marker_is_preserved_and_cannot_be_mixed"
 )
 
-# multi：无（tests/v1/attention/ 无 @multi_gpu_test）
+# multi: none (tests/v1/attention/ has no @multi_gpu_test)
 
 # ------------------------------------------------------------------------------
-# [env] 离线 + 运行时配置
+# [env] Offline + runtime configuration
 # ------------------------------------------------------------------------------
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
-# 默认离线；PPU_TEST_ONLINE=1 可放开（本 area 无下载需求，仅为行为一致）
+# Offline by default; PPU_TEST_ONLINE=1 lifts it (this area downloads nothing;
+# kept only for consistent behavior)
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
   export HF_HUB_OFFLINE=1
   export TRANSFORMERS_OFFLINE=1
 fi
 
-# HF 缓存：优先用 workflow 注入值，未注入时（本地调试）探测常见路径
+# HF cache: prefer the value injected by the workflow; otherwise (local
+# debugging) probe common paths
 if [ -z "${HF_HUB_CACHE:-}" ]; then
   for _cand in /nas_aisw/datasets/hf_cache/hub "$HOME/.cache/huggingface/hub"; do
     if [ -d "${_cand}" ]; then
@@ -72,18 +81,21 @@ fi
 echo "[env] HF_HUB_CACHE=${HF_HUB_CACHE:-<unset>}"
 
 # ------------------------------------------------------------------------------
-# [stub] config-only 用例的离线模型 stub（VLLM_MODEL_REDIRECT_PATH）
+# [stub] Offline model stubs for config-only tests (VLLM_MODEL_REDIRECT_PATH)
 # ------------------------------------------------------------------------------
-# test_indexer_deepseek_v4_slot_mapping.py 等用例经 create_vllm_config() 构造
-# ModelConfig(model="meta-llama/Meta-Llama-3-8B")，只解析 HF config；但该
-# gated 仓库不在 NAS 缓存，HF_HUB_OFFLINE=1 下直接 ValidationError。
-# 此处用官方 VLLM_MODEL_REDIRECT_PATH 把 repo id 重定向到本地 stub（仅
-# config.json，真实参数），不改上游测试文件（zero-diff）。
-# 恢复条件：Meta-Llama-3-8B stage 到 /nas_aisw HF 缓存后删除本段。
+# test_indexer_deepseek_v4_slot_mapping.py and others build
+# ModelConfig(model="meta-llama/Meta-Llama-3-8B") via create_vllm_config() and
+# only parse the HF config; but that gated repo is not in the NAS cache, so
+# HF_HUB_OFFLINE=1 raises ValidationError right away.
+# The official VLLM_MODEL_REDIRECT_PATH redirects the repo id to a local stub
+# (config.json only, with the real parameters) without touching upstream test
+# files (zero-diff).
+# Restore once Meta-Llama-3-8B is staged into the /nas_aisw HF cache: drop this
+# section.
 STUB_ROOT="/tmp/ppu-attention-stubs"
 STUB_MODEL_DIR="${STUB_ROOT}/Meta-Llama-3-8B"
 mkdir -p "${STUB_MODEL_DIR}"
-# Meta-Llama-3-8B 公开 config（仅供 config 解析，无权重/tokenizer）
+# Public Meta-Llama-3-8B config (for config parsing only; no weights/tokenizer)
 cat > "${STUB_MODEL_DIR}/config.json" <<'STUB_CONFIG_EOF'
 {
   "architectures": ["LlamaForCausalLM"],
@@ -117,8 +129,8 @@ printf '{"meta-llama/Meta-Llama-3-8B": "%s"}\n' "${STUB_MODEL_DIR}" \
 export VLLM_MODEL_REDIRECT_PATH="${STUB_ROOT}/model_redirect.json"
 echo "[stub] VLLM_MODEL_REDIRECT_PATH -> meta-llama/Meta-Llama-3-8B = ${STUB_MODEL_DIR}"
 
-# PPU SDK: Triton/Inductor 编译需要 cuda.h + ptxas + libcuda
-# （缺失时 torch.compile 类测试 BackendCompilerFailed）
+# PPU SDK: Triton/Inductor compilation needs cuda.h + ptxas + libcuda
+# (without them torch.compile tests fail with BackendCompilerFailed)
 PPU_SDK_DIR="/usr/local/PPU_SDK/CUDA_SDK"
 if [ -d "${PPU_SDK_DIR}" ]; then
   export C_INCLUDE_PATH="${PPU_SDK_DIR}/include:${C_INCLUDE_PATH:-}"
@@ -128,11 +140,11 @@ if [ -d "${PPU_SDK_DIR}" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# [junit] 合并基础设施（含 pytest 崩溃兜底）
+# [junit] Merge infrastructure (including a fallback for pytest crashes)
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
-# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
+# shellcheck disable=SC2329  # only called via `trap _emit_junit EXIT` below
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -172,9 +184,11 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary（markdown 表）：合并 test.xml 已把 testsuite name 改写为
-# label（丢失 shard 维度），故从原始 shard xml 统计；宿主 workflow 把本文件
-# cat 进 GITHUB_STEP_SUMMARY（容器内拿不到该 env，需 workflow 接力）
+# ---- step summary (markdown table): the merged test.xml already renamed each
+# testsuite to its label (losing the shard dimension), so stats come from the
+# raw shard xml files; the host workflow cats this file into
+# GITHUB_STEP_SUMMARY (that env is not available in the container, so the
+# workflow has to relay it)
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
@@ -227,24 +241,27 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
-  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT，一并收进 artifact 便于排障
+  # pytest output of sharded steps goes to TMP_JUNIT; collect it into the
+  # artifact as well for debugging
   cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
-  # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
+  # The container runs as root; artifacts must be readable by the runner user
+  # (upload-artifact)
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
-  # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
+  # [k8s-summary] Return the per-unit stats table via NAS: RESULTS_DIR lives in
+  # the Pod and is lost once the Pod is reclaimed.
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
       echo "[k8s-summary] summary.md -> ${PPU_SUMMARY_NAS_DIR}/summary.md"
     else
-      echo "[k8s-summary] WARN: NAS 回传失败（${PPU_SUMMARY_NAS_DIR} 不可写？）"
+      echo "[k8s-summary] WARN: failed to return summary via NAS (${PPU_SUMMARY_NAS_DIR} not writable?)"
     fi
   fi
 }
 trap _emit_junit EXIT
 
 # ------------------------------------------------------------------------------
-# [run] 单 step 执行器：shards>1 → 并发分片；shards==1 → 单进程
+# [run] Single-step runner: shards>1 -> concurrent shards; shards==1 -> single process
 # ------------------------------------------------------------------------------
 TOTAL_RC=0
 
@@ -301,7 +318,8 @@ else  # all
 fi
 
 # ------------------------------------------------------------------------------
-# [summary] 聚合退出码（sh 退出码 = 聚合 rc，保证 CI 信号不失真）
+# [summary] Aggregate exit code (script exit code = aggregate rc, so the CI
+# signal stays accurate)
 # ------------------------------------------------------------------------------
 echo "========== [summary] steps:${STEP_LABELS_LIST} TOTAL_RC=${TOTAL_RC} =========="
 exit "${TOTAL_RC}"
