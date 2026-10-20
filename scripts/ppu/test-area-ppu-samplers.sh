@@ -1,17 +1,19 @@
 #!/bin/bash
 # ==============================================================================
-# scripts/ppu/test-area-ppu-samplers.sh — PPU Samplers 测试执行（GitHub Actions）
+# scripts/ppu/test-area-ppu-samplers.sh - PPU Samplers test runner (GitHub Actions)
 # ------------------------------------------------------------------------------
-# 调用方：.github/workflows/test-area-ppu-samplers.yml（容器内，cwd = /workspace）。
+# Caller: .github/workflows/test-area-ppu-samplers.yml (in the container,
+# cwd = /workspace).
 #
-# 环境变量：
-#   TEST_MODE   all(默认) | single   — 本 area 无 multi 段（tests/samplers/
-#                                      无 @multi_gpu_test，纯 single PPU）
+# Environment variables:
+#   TEST_MODE   all (default) | single - this area has no multi stage
+#               (tests/samplers/ has no @multi_gpu_test; single PPU only)
 #
-# 已知 follow-up：
-#   - Flashinfer 变体：上游跑 2 次（第 2 次 VLLM_USE_FLASHINFER_SAMPLER=1），
-#     legacy CI 侧 sh_renderer 无 per-step env 字段故未拆；GHA 侧如需可加第 2 个
-#     step（env 在 _run_step 调用处 export 即可）。
+# Known follow-up:
+#   - Flashinfer variant: upstream runs twice (the 2nd time with
+#     VLLM_USE_FLASHINFER_SAMPLER=1). The legacy CI sh_renderer has no per-step
+#     env field, so it was not split; on GHA a 2nd step can be added if needed
+#     (just export the env at the _run_step call site).
 # ==============================================================================
 
 set -euo pipefail
@@ -25,8 +27,9 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
-# workflow_call 的 pytest_args 透传：按空白切分后追加到每个 step 的
-# pytest 命令尾部（如 `-k test_foo -x`），排障时缩小范围而不必改脚本。
+# pytest_args passthrough from workflow_call: split on whitespace and appended
+# to every step's pytest command (e.g. `-k test_foo -x`) to narrow the scope
+# while debugging without editing this script.
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -34,43 +37,49 @@ TMP_JUNIT="/tmp/ppu-samplers-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] 用例选集（快照自 legacy_ci/ppu_extras/samplers.yaml single 段）
+# [tests] Test selection (snapshot of the single stage in
+# legacy_ci/ppu_extras/samplers.yaml)
 # ------------------------------------------------------------------------------
-# samplers_default = 上游 "Samplers Test" step 的 PPU 版（4 file 跑 2 个）：
+# samplers_default = PPU version of the upstream "Samplers Test" step (runs 2
+# of its 4 files):
 SAMPLERS_SINGLE_ARGS=(
   tests/samplers
-  # test_beam_search.py：TinyLlama/TinyLlama-1.1B-Chat-v1.0 未 stage（原 yaml
-  # 注释）。注意：该模型现已入红区清单（checkpoints/LLM/TinyLlama/v1.0/...），
-  # MODEL_MAP 已建 symlink；beam search 在 PPU 的正确性尚未验证，首跑稳定后
-  # 可删除本行放开
+  # test_beam_search.py: TinyLlama/TinyLlama-1.1B-Chat-v1.0 is not staged
+  # (original yaml comment). Note: the model is now in the red-zone list
+  # (checkpoints/LLM/TinyLlama/v1.0/...) and MODEL_MAP already links it; beam
+  # search correctness on PPU is not verified yet, so drop this line once the
+  # first runs are stable
   --ignore=tests/samplers/test_beam_search.py
-  # test_no_bad_words.py（2026-05-28，原 yaml 注释）：setup_method 直接调
-  # transformers AutoTokenizer.from_pretrained(MODEL)，绕过 vLLM 的
-  # maybe_model_redirect → legacy CI 红区 cache miss → 2/8 fail。
-  # GHA 侧用 HF 标准缓存布局 symlink（见下方 MODEL_MAP），from_pretrained
-  # 离线直读缓存、不经 vllm redirect，原缺口结构上不存在；distilgpt2 的 NAS
-  # 路径未经清单证实（legacy CI aliases 同构），保守起见本版仍保持 ignore，
-  # 首跑确认 symlink MISS/OK 后可删除本行验证放开
+  # test_no_bad_words.py (2026-05-28, original yaml comment): setup_method
+  # calls transformers AutoTokenizer.from_pretrained(MODEL) directly, bypassing
+  # vLLM's maybe_model_redirect -> red-zone cache miss on legacy CI -> 2/8 fail.
+  # GHA uses symlinks in the standard HF cache layout (see MODEL_MAP below), so
+  # from_pretrained reads the cache offline without going through the vllm
+  # redirect and the original gap does not exist structurally. The NAS path of
+  # distilgpt2 is not confirmed by the list (same layout as the legacy CI
+  # aliases), so this version still ignores it to be safe; drop this line to
+  # verify once the first run confirms symlink MISS/OK
   --ignore=tests/samplers/test_no_bad_words.py
 )
 
-# multi：无（samplers area 无 multi_gpu_test，纯 single PPU）
+# multi: none (the samplers area has no multi_gpu_test; single PPU only)
 
 # ------------------------------------------------------------------------------
-# [env] 离线 + 运行时配置
+# [env] Offline + runtime configuration
 # ------------------------------------------------------------------------------
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
-# 默认离线（模型走 /nas_aisw 预置卷）；需要在线下载时设 PPU_TEST_ONLINE=1
+# Offline by default (models come from the preloaded /nas_aisw volume); set
+# PPU_TEST_ONLINE=1 when online downloads are needed
 if [[ "${PPU_TEST_ONLINE:-0}" != "1" ]]; then
   export HF_HUB_OFFLINE=1
   export TRANSFORMERS_OFFLINE=1
 fi
 
-# HF 缓存：workflow 已注入 HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub；
-# 未注入时（本地调试）探测 /nas_aisw 下的候选路径
+# HF cache: the workflow injects HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub;
+# when it is not injected (local debugging), probe candidate paths under /nas_aisw
 if [ -z "${HF_HUB_CACHE:-}" ]; then
   for _cand in /nas_aisw/datasets/hf_cache/hub "$HOME/.cache/huggingface/hub"; do
     if [ -d "${_cand}" ]; then
@@ -81,8 +90,8 @@ if [ -z "${HF_HUB_CACHE:-}" ]; then
 fi
 echo "[env] HF_HUB_CACHE=${HF_HUB_CACHE:-<unset>}"
 
-# PPU SDK: Triton/Inductor 编译需要 cuda.h + ptxas + libcuda（缺失时
-# torch.compile 类测试 BackendCompilerFailed）
+# PPU SDK: Triton/Inductor compilation needs cuda.h + ptxas + libcuda (without
+# them torch.compile tests fail with BackendCompilerFailed)
 PPU_SDK_DIR="/usr/local/PPU_SDK/CUDA_SDK"
 if [ -d "${PPU_SDK_DIR}" ]; then
   export C_INCLUDE_PATH="${PPU_SDK_DIR}/include:${C_INCLUDE_PATH:-}"
@@ -92,30 +101,33 @@ if [ -d "${PPU_SDK_DIR}" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# [setup] HF hub cache symlink：HF id → /nas_aisw 本地检查点
+# [setup] HF hub cache symlinks: HF id -> local checkpoint on /nas_aisw
 # ------------------------------------------------------------------------------
-# 路径优先取红区已存模型清单 full 分支的模型清单 的 path 字段
-# （NAS 绝对路径 = /nas_aisw/datasets/ + path）；清单未收录的取 legacy CI 侧
-# ppu_model_aliases.json 同构路径（/ppusw/ → /nas_aisw/）。路径不存在时 WARN 并跳过。
+# Paths prefer the path field of the full-branch model list of models stored in
+# the red zone (absolute NAS path = /nas_aisw/datasets/ + path); models not in
+# the list use the same layout as legacy CI's ppu_model_aliases.json
+# (/ppusw/ -> /nas_aisw/). Missing paths are reported as WARN and skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
     # test_logprobs.py + test_ignore_eos.py
-    # 清单 MISS，取 legacy CI aliases 同构路径
+    # Missing from the list; use the same layout as the legacy CI aliases
     "distilbert/distilgpt2":
         "/nas_aisw/datasets/checkpoints/LLM/gpt/v1.0/distilgpt2",
-    # test_ignore_eos.py（legacy CI 侧曾 redirect 到 Instruct；GHA symlink 机制
-    # 直接映射本名，清单命中 path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B）
+    # test_ignore_eos.py (legacy CI used to redirect it to Instruct; the GHA
+    # symlink maps the real name directly, list hit
+    # path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B)
     "meta-llama/Llama-3.2-1B":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B",
-    # test_beam_search.py（当前 ignore，模型已入清单，放开后即用）：
-    # 清单命中 path=checkpoints/LLM/TinyLlama/v1.0/TinyLlama-1.1B-Chat-v1.0
+    # test_beam_search.py (currently ignored; the model is in the list and is
+    # used once re-enabled): list hit
+    # path=checkpoints/LLM/TinyLlama/v1.0/TinyLlama-1.1B-Chat-v1.0
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v1.0/TinyLlama-1.1B-Chat-v1.0",
-    # test_no_bad_words.py（当前 ignore，放开后即用）；与 basic-correctness
-    # 同源（runner 已 ls 确认存在）
+    # test_no_bad_words.py (currently ignored; used once re-enabled); same
+    # source as basic-correctness (the runner confirmed it exists via ls)
     "hmellor/tiny-random-LlamaForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
 }
@@ -149,11 +161,11 @@ print(f"[setup] symlinks: created={created} skipped={skipped} "
 PYEOF
 
 # ------------------------------------------------------------------------------
-# [junit] 合并基础设施（含 pytest 崩溃兜底）
+# [junit] Merge infrastructure (including a fallback for pytest crashes)
 # ------------------------------------------------------------------------------
 STEP_LABELS_LIST=""
 
-# shellcheck disable=SC2329  # 只由下方 `trap _emit_junit EXIT` 调用
+# shellcheck disable=SC2329  # only called via `trap _emit_junit EXIT` below
 _emit_junit() {
   python3 - <<PYEOF
 import glob, os
@@ -193,7 +205,7 @@ for label in LABELS:
 ET.ElementTree(root).write(OUT, encoding="UTF-8", xml_declaration=True)
 print(f"[junit] test.xml emitted -> {OUT}")
 
-# ---- step summary：分 shard 统计表（markdown）
+# ---- step summary: per-shard stats table (markdown)
 SUMMARY = os.path.join(os.path.dirname(OUT), "summary.md")
 COLS = ("tests", "failures", "errors", "skipped", "time")
 
@@ -246,24 +258,27 @@ with open(SUMMARY, "w") as sf:
     sf.write("\n".join(lines) + "\n")
 print(f"[summary-md] {SUMMARY} emitted")
 PYEOF
-  # 分片 step 的 pytest 输出重定向到 TMP_JUNIT，一并收进 artifact 便于排障
+  # pytest output of sharded steps goes to TMP_JUNIT; collect it into the
+  # artifact as well for debugging
   cp -f "${TMP_JUNIT}"/*.log "${RESULTS_DIR}/" 2>/dev/null || true
-  # 容器以 root 运行，产物须可被 runner 用户读取（upload-artifact）
+  # The container runs as root; artifacts must be readable by the runner user
+  # (upload-artifact)
   chmod -R a+rwX "${RESULTS_DIR}" 2>/dev/null || true
-  # [k8s-summary] 经 NAS 回传 per-unit 统计表：RESULTS_DIR 在 Pod 内、回收即失；
+  # [k8s-summary] Return the per-unit stats table via NAS: RESULTS_DIR lives in
+  # the Pod and is lost once the Pod is reclaimed.
   if [ -n "${PPU_SUMMARY_NAS_DIR:-}" ] && [ -f "${RESULTS_DIR}/summary.md" ]; then
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
       echo "[k8s-summary] summary.md -> ${PPU_SUMMARY_NAS_DIR}/summary.md"
     else
-      echo "[k8s-summary] WARN: NAS 回传失败（${PPU_SUMMARY_NAS_DIR} 不可写？）"
+      echo "[k8s-summary] WARN: failed to return summary via NAS (${PPU_SUMMARY_NAS_DIR} not writable?)"
     fi
   fi
 }
 trap _emit_junit EXIT
 
 # ------------------------------------------------------------------------------
-# [run] 单 step 执行器：shards>1 → 并发分片；shards==1 → 单进程
+# [run] Single-step runner: shards>1 -> concurrent shards; shards==1 -> single process
 # ------------------------------------------------------------------------------
 TOTAL_RC=0
 
@@ -320,7 +335,8 @@ else  # all
 fi
 
 # ------------------------------------------------------------------------------
-# [summary] 聚合退出码（sh 退出码 = 聚合 rc，保证 CI 信号不失真）
+# [summary] Aggregate exit code (script exit code = aggregate rc, so the CI
+# signal stays accurate)
 # ------------------------------------------------------------------------------
 echo "========== [summary] steps:${STEP_LABELS_LIST} TOTAL_RC=${TOTAL_RC} =========="
 exit "${TOTAL_RC}"

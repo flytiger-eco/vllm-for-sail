@@ -1,17 +1,16 @@
-# 为当前 PR 构建 PPU wheel，供三个 area 共用。
+# Builds the PR's PPU wheel, shared by the three areas.
 name: Build PPU Wheel
 
 on:
   workflow_call:
     outputs:
       artifact_name:
-        description: "上传的 wheel artifact 名（供调用方 download-artifact）"
+        description: "Name of the uploaded wheel artifact (for the caller's download-artifact)"
         value: ${{ jobs.build-wheel.outputs.artifact_name }}
       wheel_version:
-        description: "构建的 wheel 版本号"
+        description: "Version of the built wheel"
         value: ${{ jobs.build-wheel.outputs.wheel_version }}
 
-# 排队不取消。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -31,7 +30,7 @@ jobs:
       matrix:
         python-version: ["3.12"]
         cuda-version: ["13.0"]
-        # （PR #6 同款限制），届时需按 PR #6 模式拆独立 job。
+        # arm64 needs a separate job (see PR #6).
         arch: [x86_64]
     outputs:
       wheel_version: ${{ steps.version.outputs.wheel_version }}
@@ -42,14 +41,12 @@ jobs:
           docker run --rm -v "${{ github.workspace }}:/workspace" alpine:3 \
             sh -c 'rm -rf /workspace/..?* /workspace/.[!.]* /workspace/*' || true
 
-      # 构建对象 = 触发 run 的分支本身。
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: "recursive"
 
-      # 跨 run 恢复 ccache；restore-keys 前缀命中最近一次保存的缓存。
-      # 首轮（本 PR 第一次跑）必然 miss——这是预期，用于填充缓存。
+      # restore-keys falls back to the latest cache; a PR's first run misses.
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
@@ -58,7 +55,7 @@ jobs:
           restore-keys: |
             ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-
 
-      # 固定本轮实际使用的镜像；同名 tag 更新也必须让 Rust 二进制缓存失效。
+      # Key on the image digest so a re-pushed tag invalidates the Rust cache.
       - name: Compute Rust cache key
         id: rust-key
         env:
@@ -72,7 +69,7 @@ jobs:
           echo "RUST_CACHE_DIR=$RUNNER_TEMP/ppu-rust-artifacts" >> "$GITHUB_ENV"
           echo "key=ppu-rust-v1-v027-${{ runner.os }}-${{ matrix.arch }}-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${image_id#sha256:}-$RUST_INPUT_HASH" >> "$GITHUB_OUTPUT"
 
-      # 最终二进制只接受精确命中，不使用 restore-keys 回退，也不按提交 SHA 失效。
+      # Exact hits only: no restore-keys and no commit SHA in the key.
       - name: Restore Rust artifacts
         id: rust-cache
         uses: actions/cache/restore@v4
@@ -87,9 +84,9 @@ jobs:
           parsers=("$RUST_CACHE_DIR"/_rust_tool_parser*.so)
           if [[ -s "$RUST_CACHE_DIR/vllm-rs" && ${#parsers[@]} -eq 1 ]] && [[ -s "${parsers[0]}" ]]; then
             install -m 755 "$RUST_CACHE_DIR/vllm-rs" "${parsers[0]}" vllm/
-            echo "Rust 缓存完整：由 setup.py 复用，跳过本地 Rust 编译。"
+            echo "Rust cache is complete: reused by setup.py, skipping the local Rust build."
           else
-            echo "::warning::Rust 缓存不完整，将从源码重新编译。"
+            echo "::warning::Rust cache is incomplete; rebuilding from source."
           fi
 
       - name: Compute wheel version
@@ -108,8 +105,8 @@ jobs:
 
       - name: Build wheel
         env:
-          # 版本号经 workflow → 脚本 → docker -e → setup.py 四层传递，
-          # 任一环节断掉会静默产出 setuptools_scm 推导版本，故下一步硬校验。
+          # Passed via script -> docker -e -> setup.py; a break silently falls
+          # back to the setuptools_scm version, so it is verified below.
           VLLM_VERSION_OVERRIDE: ${{ steps.version.outputs.wheel_version }}
         run: |
           MAX_JOBS="$(nproc)"
@@ -123,7 +120,7 @@ jobs:
             "${{ matrix.cuda-version }}" \
             "${{ matrix.arch }}"
 
-      # 容器以 root 写入 ccache 目录，chown 回 runner 用户，save 才能打包。
+      # The container writes ccache as root.
       - name: Fix ccache ownership for save
         if: always()
         run: |
@@ -136,7 +133,6 @@ jobs:
           path: ${{ runner.temp }}/ppu-ccache
           key: ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-${{ github.sha }}
 
-      # 硬校验产物文件名中的版本段：断链时在这里响，而不是下游装错版本才发现。
       - name: Verify wheel version
         env:
           EXPECTED_VERSION: ${{ steps.version.outputs.wheel_version }}
@@ -158,7 +154,7 @@ jobs:
           fi
           echo "Verified: ${wheels[0]}"
 
-      # 只从本轮成功且版本正确的 wheel 提取；不缓存整个 wheel 或 Cargo target。
+      # Cache only the Rust binaries from the verified wheel.
       - name: Extract Rust artifacts from wheel
         id: rust-artifacts
         run: |
@@ -167,7 +163,7 @@ jobs:
           rm -rf "$RUST_CACHE_DIR"
           mkdir -p "$RUST_CACHE_DIR"
           if ! unzip -jo "${wheels[0]}" 'vllm/vllm-rs' 'vllm/_rust_tool_parser*.so' -d "$RUST_CACHE_DIR"; then
-            echo "::warning::Wheel 未提供完整 Rust 产物，不保存缓存。"
+            echo "::warning::Wheel does not contain complete Rust artifacts; not saving the cache."
             exit 0
           fi
           parsers=("$RUST_CACHE_DIR"/_rust_tool_parser*.so)
@@ -175,7 +171,7 @@ jobs:
             chmod 755 "$RUST_CACHE_DIR/vllm-rs" "${parsers[0]}"
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Rust 产物为空或不唯一，不保存缓存。"
+            echo "::warning::Rust artifacts are empty or not unique; not saving the cache."
           fi
 
       - name: Save Rust artifacts
@@ -185,13 +181,8 @@ jobs:
           path: ${{ runner.temp }}/ppu-rust-artifacts
           key: ${{ steps.rust-key.outputs.key }}
 
-      # pytest 测试工具链随 wheel 一起产出：在出网正常的云 runner 上预下载,
-      # 打进同一个 artifact 的 toolchain/ 子目录。area 端 download 后随 ci-wheel/
-      # 进 Pod（/workspace/source/ci-wheel/toolchain/），deps 脚本先 --no-index
-      # --find-links 离线装,规避 mirror 空页 / Pod 出网代理抖动;失败再回落索引。
-      # best-effort：云端偶发拉取失败不阻断构建（Pod 侧本就有索引回落兜底）。
-      # 5 个包与 ppu_install_dependency.sh 第 152 行一致;runner 与 Pod 同为
-      # linux/x86_64/cp312,pip download 得到的 wheel 平台匹配。
+      # Bundle the pytest toolchain so the Pod can install it offline (it falls
+      # back to the index). Keep the list in sync with ppu_install_dependency.sh.
       - name: Download test toolchain wheels
         continue-on-error: true
         run: |
@@ -207,8 +198,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_27_0
-          # dist/*.whl（主 wheel）+ dist/toolchain/*.whl；公共根 dist/ →
-          # artifact 内为 <wheel> 与 toolchain/<wheel>，area 下载后目录结构一致。
+          # Layout: <wheel> and toolchain/<wheel>.
           path: |
             dist/*.whl
             dist/toolchain/*.whl
