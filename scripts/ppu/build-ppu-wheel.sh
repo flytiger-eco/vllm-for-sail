@@ -1,11 +1,14 @@
 #!/bin/bash
-# 编译 PPU wheel：在 PPU 构建容器内装 SDK + PPU torch 后执行 setup.py bdist_wheel。
+# Build the PPU wheel: install the SDK and PPU torch inside the PPU build
+# container, then run setup.py bdist_wheel.
 #
-# 移植自 PR #6 的 .github/workflows/scripts/build_ppu.sh，随本分支携带
-# （本分支自带 CI 文件，不需要 PR #6 "脚本单点维护在默认分支" 的双 checkout）。
+# Ported from PR #6's .github/workflows/scripts/build_ppu.sh and carried on this
+# branch (this branch ships its own CI files, so it does not need PR #6's double
+# checkout for "scripts maintained only on the default branch").
 set -ex
 
-# CUDA_VERSION 是 $3 且下面无条件使用，所以至少要三个参数。
+# CUDA_VERSION is $3 and is used unconditionally below, so require at least
+# three arguments.
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <TARGET_VERSION> <PYTHON_VERSION> <CUDA_VERSION> [ARCH]"
   exit 1
@@ -14,13 +17,14 @@ fi
 TARGET_VERSION="$1"
 PYTHON_VERSION="$2"          # e.g. 3.12
 CUDA_VERSION="$3"            # e.g. 13.0
-ARCH="${4:-$(uname -m)}"     # optional override；uname -i 在部分发行版返回 unknown
+ARCH="${4:-$(uname -m)}"     # optional override; uname -i returns unknown on some distros
 
 if [ "${ARCH}" = "aarch64" ]; then
   echo "aarch64 is not supported yet: no aarch64 PPU base image / SDK tarball" >&2
   exit 1
 else
-  # CI 传入已用于 Rust 缓存键的镜像 ID；本地直接调用仍使用默认镜像。
+  # CI passes the image ID already used in the Rust cache key; direct local
+  # calls still use the default image.
   BASE_IMG="${PPU_BUILD_IMAGE:-pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06}"
 fi
 
@@ -30,8 +34,9 @@ PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
 DIST_DIR="dist"
 mkdir -p "${DIST_DIR}"
 
-# 宿主侧 ccache 目录：由 workflow 的 actions/cache 恢复/保存，跨 run 持久。
-# 容器内固定挂到 /root/.ccache（root 的默认位置）。缺省给一个本地路径便于本机跑。
+# Host-side ccache directory: restored/saved by the workflow's actions/cache and
+# persisted across runs. It is always mounted at /root/.ccache in the container
+# (root's default location). The default is a local path for running locally.
 HOST_CCACHE_DIR="${HOST_CCACHE_DIR:-$HOME/.cache/ppu-ccache}"
 mkdir -p "${HOST_CCACHE_DIR}"
 
@@ -49,14 +54,18 @@ echo "HOST_CCACHE_DIR: ${HOST_CCACHE_DIR}"
 echo "Output:          ${DIST_DIR}/"
 echo "----------------------------------------"
 
-# 用带引号的 heredoc（<<'INNER'）而不是 bash -c '...'：容器内脚本自身含单引号
-# （printf '%s\n%s'），嵌进单引号串会提前闭合，宿主 shell 会吃掉转义——PR #6
-# 实测 printf '%s\n%s' 传到容器里变成 printf %sn%s，版本比较恒走 else 分支。
-# 引号化 heredoc 不做任何宿主端展开，变量全靠下面的 -e 传入。
-# -i 是必需的：heredoc 走 stdin 喂进容器。
-# MAX_JOBS/NVCC_THREADS 经 docker -e 透传进容器，setup.py 据此决定编译并发
-# （不传时按容器 cpu_count）；CCACHE_DIR + ccache 挂载令 setup.py 探测到
-# 编译器 launcher，重复构建命中缓存跳过编译。
+# Use a quoted heredoc (<<'INNER') instead of bash -c '...': the in-container
+# script contains single quotes (printf '%s\n%s'), which would close a
+# single-quoted string early and let the host shell eat the escapes. In PR #6,
+# printf '%s\n%s' reached the container as printf %sn%s, so the version
+# comparison always took the else branch.
+# A quoted heredoc performs no host-side expansion; all variables come from the
+# -e flags below.
+# -i is required: the heredoc is fed to the container through stdin.
+# MAX_JOBS/NVCC_THREADS are passed through docker -e, and setup.py uses them to
+# decide build parallelism (container cpu_count when unset); CCACHE_DIR plus
+# the ccache mount let setup.py detect the compiler launcher, so repeated
+# builds hit the cache and skip compilation.
 docker run --rm -i \
   --network=host \
   -v "$(pwd):/workspace" \
@@ -77,13 +86,15 @@ set -ex
 
 apt update
 apt install -y protobuf-compiler ccache
-# ccache 就绪度自检：setup.py 靠 `which ccache` 决定是否接线，装不上就直接失败，
-# 免得静默退回全量编译还以为缓存生效。
+# ccache readiness check: setup.py relies on `which ccache` to wire it in, so
+# fail right away if it cannot be installed instead of silently falling back to
+# a full build while assuming the cache works.
 command -v ccache
 ccache --version | head -n1
 ccache --max-size="${CCACHE_MAXSIZE}"
 ccache --zero-stats
-# 与 PR #6 成功版本一致，先保留 Rust 环境准备；是否删除作为后续独立优化验证。
+# Keep the Rust environment setup to match PR #6's working version; removing it
+# is a separate optimization to verify later.
 if [ ! -d "$HOME/.cargo" ]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
@@ -134,7 +145,7 @@ clang --version
 nvcc --version
 asys --version
 ppu-smi --version
-# CCACHE_DIR 在 /root/.ccache，不受此清理影响
+# CCACHE_DIR is /root/.ccache and is not affected by this cleanup.
 rm -rf /tmp/*
 
 python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.13.0%2Bv0.1.0.ppu2.2.0/torch-2.13.0%2Bcu130ubuntu2404oe-cp312-cp312-linux_x86_64.whl --force-reinstall
@@ -142,13 +153,14 @@ python3 -m pip install https://pkg.flytiger-eco.com/artifactory/pypi_generic/tor
 export HGGC_ENABLE_COMPRESS=1
 export NVCC_APPEND_FLAGS="-Xfatbin -compress-all"
 export VLLM_REQUIRE_RUST_FRONTEND=0
-# 只编 SM80 kernel（沿用 PR #6 的收窄）；PPU 目标硬件之外的消费者会失败，
-# 如需扩展硬件支持再放开。
+# Only build SM80 kernels (the narrowing from PR #6); consumers outside the PPU
+# target hardware will fail. Widen this when broader hardware support is needed.
 export TORCH_CUDA_ARCH_LIST="8.0"
 
 python3 setup.py bdist_wheel
 
-# 缓存命中率自检：hit/miss 是判断 ccache 是否真的接上编译的唯一硬证据。
+# Cache hit-rate check: hit/miss counts are the only hard evidence that ccache
+# is actually wired into the build.
 echo "==== ccache stats after build ===="
 ccache --show-stats
 INNER
