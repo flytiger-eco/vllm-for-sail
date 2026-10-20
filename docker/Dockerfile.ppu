@@ -1,0 +1,275 @@
+# DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.ppu -t vllm-for-sail:v0.27.0-ppu .
+#
+# PPU (Zhenwu) image for vLLM-for-SAIL, used to build and test this branch.
+# It is built on top of the PPU PyTorch base image, which already ships the PPU
+# SDK, NCCL/PCCL, Python 3.12 and the PPU builds of torch/torchvision/triton.
+# This file adds the PPU builds of the vLLM kernel dependencies from the
+# flytiger index and builds vLLM-for-SAIL from the local source tree, so the
+# vLLM in the image always matches the checked-out branch.
+#
+# Stages (the two builders run in parallel via BuildKit):
+#
+#   base
+#     |
+#     +-- ppu_kernels_builder (build the PPU kernel sdists into wheels)
+#     +-- vllm_builder        (build the vLLM wheel from this source tree)
+#     |
+#     v
+#   runtime (default target)
+#
+# Global ARGs: redeclare `ARG NAME` (without a value) inside a stage to use them.
+ARG PPU_BASE_IMAGE=pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.13.0-ubuntu24.04-cuda13.0-py312-20261001
+ARG PIP_INDEX_URL=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+ARG PPU_PIP_INDEX=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+ARG UBUNTU_MIRROR
+# Version stamped into the vLLM wheel built from this branch.
+ARG VLLM_VERSION=0.27.0
+ARG MAX_JOBS=16
+ARG NVCC_THREADS=1
+# Same kernel arch list as the PPU CI wheel (scripts/ppu/build-ppu-wheel.sh).
+ARG TORCH_CUDA_ARCH_LIST="8.0"
+# PPU builds of the vLLM kernel dependencies. Use explicit local versions so
+# pip cannot select the upstream CUDA packages.
+ARG PPU_PACKAGES="\
+    acext==1.1.0+v0.2.0.ppu2.2.0 \
+    bitsandbytes==0.48.1+v0.1.0.ppu2.2.0 \
+    cpm-kernels==1.0.11+v0.1.0.ppu2.2.0 \
+    cupy==13.6.0+v0.1.0.ppu2.2.0 \
+    deep_ep==2.2.0+v0.1.0.ppu2.2.0 \
+    deep_gemm==1.1.0+v0.1.0.ppu2.2.0 \
+    flash-attn==2.7.4.post1+v0.2.0.ppu2.2.0 \
+    flash_attn_3==2.8.2+v0.2.0.ppu2.2.0 \
+    flash_mla==2.0.0+v0.2.0.ppu2.2.0 \
+    flashinfer_python==0.6.17+v0.1.0.ppu2.2.0 \
+    mooncake==0.3.9+v0.1.0.ppu2.2.0 \
+    nvidia-dali-cuda130==1.53.0+v0.1.0.ppu2.2.0 \
+    pla==1.0.0+v0.1.0.ppu2.2.0 \
+    tilelang==0.1.8+v0.2.0.ppu2.2.0 \
+    torchao==0.11.0+v0.1.0.ppu2.2.0 \
+    transformer-engine==2.8+v0.2.0.ppu2.2.0 \
+    xformers==0.0.30+v0.2.0.ppu2.2.0"
+# Same transformers pin as requirements/test/cuda.txt of this branch.
+ARG TRANSFORMERS_VERSION=5.14.1
+
+FROM ${PPU_BASE_IMAGE} AS base
+
+ARG PIP_INDEX_URL
+ARG UBUNTU_MIRROR
+
+# The base image ships torch in its own interpreter, so packages are installed
+# into that interpreter instead of a separate venv (a venv would hide torch).
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Replace Ubuntu sources if specified (24.04 uses deb822 ubuntu.sources)
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
+        [ -f "$f" ] && sed -i -e "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" \
+                              -e "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" "$f"; \
+    done; \
+fi
+
+# Install system dependencies
+RUN --mount=type=cache,target=/var/cache/apt,id=ppu-vllm-apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    # Core system utilities
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    git-lfs \
+    unzip \
+    lsof \
+    netcat-openbsd \
+    # Build essentials (needed to compile vLLM and the PPU sdists)
+    build-essential \
+    pkg-config \
+    patchelf \
+    ccache \
+    protobuf-compiler \
+    libprotobuf-dev \
+    # NUMA
+    libnuma1 \
+    libnuma-dev \
+    numactl \
+    # transformers multimodal / opencv runtime
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0t64 \
+    # InfiniBand/RDMA (DeepEP inter-node)
+    libibverbs1 \
+    libibverbs-dev \
+    librdmacm1 \
+    ibverbs-providers \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Build backends for the PPU sdists and vLLM itself. Everything is built with
+# --no-build-isolation so it compiles against the PPU torch in this image
+# (an isolated build env would pull a CUDA torch from PyPI instead).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install \
+        "setuptools>=77.0.3,<81.0.0" \
+        "setuptools-scm>=8" \
+        "setuptools-rust>=1.9.0" \
+        "packaging>=24.2" \
+        wheel \
+        ninja \
+        pybind11 \
+        cython \
+        scikit-build-core \
+    && python3 -c "import torch; print('base torch:', torch.__version__)"
+
+# Pin the PPU torch stack of the base image so no dependency solve below can
+# replace it with CUDA wheels from PyPI. The PPU numba/scipy builds need numpy<2.
+RUN mkdir -p /opt/vllm-ppu \
+    && python3 -m pip list --format=freeze \
+        | grep -iE '^(torch|torchvision|torchaudio|triton)==' > /opt/vllm-ppu/constraints.txt \
+    && echo "numpy<2" >> /opt/vllm-ppu/constraints.txt \
+    && cat /opt/vllm-ppu/constraints.txt
+
+########################################################
+# PARALLEL STAGE 1: PPU Kernels Builder
+########################################################
+FROM base AS ppu_kernels_builder
+
+ARG PPU_PIP_INDEX
+ARG MAX_JOBS
+ARG PPU_PACKAGES
+
+WORKDIR /build
+
+# Build one package per pip call so a failure points at the offending sdist.
+# No pip cache here: some PPU sdists (e.g. acext) download a prebuilt wheel and
+# os.rename() it into pip's output dir, which fails with EXDEV when that dir is
+# on a cache mount. --no-cache-dir keeps the output dir on the same filesystem.
+RUN mkdir -p /wheels \
+    && for spec in ${PPU_PACKAGES}; do \
+        echo "==> Building ${spec}" \
+        && MAX_JOBS=${MAX_JOBS} python3 -m pip wheel \
+            --no-cache-dir \
+            --no-deps \
+            --no-build-isolation \
+            --index-url ${PPU_PIP_INDEX} \
+            --wheel-dir /wheels \
+            "${spec}" \
+        || exit 1; \
+    done \
+    && ls -l /wheels
+
+# Some PPU sdists are shims that rename a prebuilt wheel of a differently named
+# project (e.g. mooncake -> mooncake-transfer-engine). pip refuses to install a
+# wheel whose filename disagrees with its metadata, so rename each wheel after
+# the project in its .dist-info.
+RUN python3 -c 'import glob, os, zipfile; \
+[os.rename(w, os.path.join("/wheels", d.split("-")[0] + "-" + os.path.basename(w).split("-", 1)[1])) \
+ for w in glob.glob("/wheels/*.whl") \
+ for d in {n.split("/")[0] for n in zipfile.ZipFile(w).namelist() if n.endswith(".dist-info/METADATA")} \
+ if d.split("-")[0] != os.path.basename(w).split("-")[0]]' \
+    && ls -l /wheels
+
+########################################################
+# PARALLEL STAGE 2: vLLM Builder
+########################################################
+FROM base AS vllm_builder
+
+ARG VLLM_VERSION
+ARG MAX_JOBS
+ARG NVCC_THREADS
+ARG TORCH_CUDA_ARCH_LIST
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+WORKDIR /workspace/vllm
+
+# Install the build and runtime requirements first so that source changes do
+# not invalidate this layer.
+COPY requirements /workspace/vllm/requirements
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -c /opt/vllm-ppu/constraints.txt \
+        -r requirements/build/ppu.txt \
+        -r requirements/ppu.txt
+
+# Rust toolchain for the optional Rust frontend, as in the PPU CI wheel build.
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+COPY . /workspace/vllm
+
+# Same build settings as scripts/ppu/build-ppu-wheel.sh.
+ENV VLLM_TARGET_DEVICE=ppu \
+    HGGC_ENABLE_COMPRESS=1 \
+    NVCC_APPEND_FLAGS="-Xfatbin -compress-all" \
+    VLLM_REQUIRE_RUST_FRONTEND=0 \
+    CCACHE_DIR=/root/.ccache
+RUN --mount=type=cache,target=/root/.ccache \
+    --mount=type=cache,target=/root/.cargo/registry \
+    if [ -f "${PPU_SDK}/envsetup.sh" ]; then source "${PPU_SDK}/envsetup.sh"; fi \
+    && VLLM_VERSION_OVERRIDE=${VLLM_VERSION} \
+       MAX_JOBS=${MAX_JOBS} \
+       NVCC_THREADS=${NVCC_THREADS} \
+       TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+       python3 setup.py bdist_wheel --dist-dir /dist \
+    && ls -l /dist \
+    && test "$(basename /dist/vllm-*.whl | cut -d- -f2)" = "${VLLM_VERSION}"
+
+########################################################
+# Runtime Image
+########################################################
+FROM base AS runtime
+
+ARG PPU_PIP_INDEX
+ARG VLLM_VERSION
+ARG TRANSFORMERS_VERSION
+
+# Install the PPU kernel wheels and the vLLM wheel in a single solve so their
+# dependencies are resolved together against the pinned PPU torch stack.
+COPY --from=ppu_kernels_builder /wheels /tmp/wheels/ppu
+COPY --from=vllm_builder /dist /tmp/wheels/vllm
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install \
+        -c /opt/vllm-ppu/constraints.txt \
+        --prefer-binary \
+        --extra-index-url ${PPU_PIP_INDEX} \
+        /tmp/wheels/ppu/*.whl \
+        /tmp/wheels/vllm/*.whl \
+    && rm -rf /tmp/wheels
+
+# Pinned transformers (see TRANSFORMERS_VERSION above), plus the pytest
+# toolchain used by the PPU CI (scripts/ppu/ppu_install_dependency.sh).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install \
+        -c /opt/vllm-ppu/constraints.txt \
+        --prefer-binary \
+        transformers==${TRANSFORMERS_VERSION} \
+        pytest \
+        pytest-asyncio \
+        pytest-xdist \
+        pytest-shard \
+        tblib \
+        pyyaml
+
+RUN python3 -c "import torch; print('torch', torch.__version__)" \
+    && python3 -c "import vllm; print('vllm', vllm.__version__)" \
+    && python3 -c "import vllm; assert vllm.__version__.startswith('${VLLM_VERSION}'), vllm.__version__"
+
+# List all python lib versions for record and trace
+RUN python3 -m pip freeze && (python3 -m pip check || true)
+
+WORKDIR /workspace
+
+COPY docker/Dockerfile.ppu /Dockerfile
+
+# Keep build provenance at the end so metadata changes do not invalidate build layers.
+ARG VLLM_BUILD_COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/flytiger-eco/vllm-for-sail" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_VERSION}"
