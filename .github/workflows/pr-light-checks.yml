@@ -60,6 +60,7 @@ jobs:
           ref: ${{ needs.source-check.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
+          allow-unsafe-pr-checkout: true
       - name: TruffleHog OSS secret scan
         uses: trufflesecurity/trufflehog@e7a8d17d2f726cf414310a625b55cca7dc9c898e
         with:

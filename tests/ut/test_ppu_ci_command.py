@@ -585,7 +585,8 @@ def test_stale_head_requires_explicit_override_and_warns(allow):
     [
         {"head": {"sha": OLD}},
         {"state": "closed"},
-        {"base": {"repo": {"full_name": "other/repo"}}},
+        {"base": {"ref": "v0.28.0", "repo": {"full_name": "other/repo"}}},
+        {"base": {"ref": "v0.27.0", "repo": {"full_name": REPO}}},
         {"draft": True},
     ],
 )
@@ -1587,3 +1588,27 @@ def test_cancel_includes_active_runs_from_previous_base():
     assert len(gh.writes("/actions/runs/100/cancel")) == 1
     payload = gh.writes(f"/statuses/{SHA}")[0][2]
     assert payload["context"] == "PPU CI / v0.26.0"
+
+
+def test_maintainer_retry_rejects_revoked_original_requester():
+    control, gh, _ = command_setup(
+        "/ci retry",
+        login="maintainer",
+        value="write",
+        existing=[run()],
+    )
+    draft = {**PR, "draft": True}
+    gh.add("GET", ROOT + "/pulls/7", draft)
+    permission(gh, "author", "read")
+    gh.page(
+        "/actions/runs/100/jobs",
+        [{"name": "PPU wheel build", "conclusion": "failure"}],
+        "jobs",
+        filter="latest",
+    )
+    gh.page("/actions/runs/100/artifacts", [], "artifacts")
+    gh.add("POST", ROOT + "/actions/runs/100/rerun-failed-jobs", None)
+    control.command()
+    assert not gh.writes("/rerun-failed-jobs")
+    assert "Original requester" in reply(gh)
+    assert reactions(gh)[-1] == "-1"

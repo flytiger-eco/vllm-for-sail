@@ -372,6 +372,8 @@ class Controller:
         fresh = self.api("GET", f"/pulls/{pr['number']}")
         if fresh["head"]["sha"] != sha:
             raise Rejected("PR head changed; use /ci run again.")
+        if (fresh.get("base") or {}).get("ref") != pr["base"]["ref"]:
+            raise Rejected("PR base changed; use /ci run again.")
         writer = self.authorize(fresh, login)
         if completed and not writer:
             raise Rejected(
@@ -460,6 +462,13 @@ class Controller:
         if fresh["head"]["sha"] != identity[2] or fresh["base"]["ref"] != identity[5]:
             raise Rejected("PR head or base changed; use /ci run again.")
         self.authorize(fresh, login)
+        if identity[3].lower() != login.lower():
+            try:
+                self.authorize(fresh, identity[3])
+            except Rejected as exc:
+                raise Rejected(
+                    "Original requester is no longer authorized; use /ci run."
+                ) from exc
         # Native retry can reuse successful validate; report depends on failed ppu.
         self.launch(
             fresh["head"]["sha"],

@@ -194,6 +194,7 @@ def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
     )
     assert checkout["with"]["ref"] == "${{ needs.source-check.outputs.head_sha }}"
     assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["allow-unsafe-pr-checkout"] is True
     assert jobs["secret-scan"]["permissions"] == {"contents": "read"}
     assert all("run" not in step for step in jobs["secret-scan"]["steps"])
     trufflehog = next(
