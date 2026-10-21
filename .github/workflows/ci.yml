@@ -5,7 +5,7 @@
 # PPU: authorize(run-ci) + build-wheel + smoke-test
 #      -> (attention + samplers + benchmarks) -> Full CI
 #
-# PRs build wheels automatically; `run-ci` enables PPU tests.
+# PRs build wheels automatically; `run-ci` enables same-repo PPU tests.
 # Approvals rerun checks only; Full CI excludes AI and human reviews.
 
 name: CI Pipeline
@@ -22,15 +22,15 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # Review and ignored events must not cancel PPU runs.
+  # Approvals wait for active CI; ignored events use isolated groups.
   group: >-
     ci-${{ github.event.pull_request.number }}-${{
     ((github.event_name == 'pull_request' && github.event.action == 'labeled' &&
     github.event.label.name != 'run-ci') ||
     (github.event_name == 'pull_request_review' &&
     (github.event.review.state != 'approved' || github.event.review.user.type == 'Bot')))
-    && github.run_id || github.event_name }}
-  cancel-in-progress: true
+    && github.run_id || 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Re-runs keep the original payload; fetch current labels.
@@ -53,7 +53,15 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
+          if [[ "$HEAD_REPO" != "$REPO" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            msg="PPU tests are not supported for fork PRs."
+            echo "::notice::$msg"
+            echo "⏸️ $msg" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           labels=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.labels[].name')
           if grep -qx run-ci <<<"$labels"; then
             run=true
