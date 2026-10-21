@@ -2,8 +2,8 @@
 # ==============================================================================
 # scripts/ppu/test-area-ppu-benchmarks.sh - PPU Benchmarks test runner (GitHub Actions)
 # ------------------------------------------------------------------------------
-# Caller: .github/workflows/test-area-ppu-benchmarks.yml (in the container,
-# cwd = /workspace).
+# 由 main 上的 .github/workflows/ppu-benchmarks-pr.yml 调用。
+# 在 PPU Pod 内执行，工作目录为 /workspace/source。
 #
 # Environment variables:
 #   TEST_MODE   all (default) | single - this area is single-only
