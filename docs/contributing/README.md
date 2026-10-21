@@ -308,13 +308,12 @@ review process:
 - Please respond to all comments within a reasonable time frame. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
-- Note that not all CI checks will be executed due to limited computational
-  resources. Reviewers with write access and configured trusted contributors
-  can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when
-  CI signals are needed before a PR is ready. After the PR is approved or has
-  the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
-  or the corresponding `/amd-ci` variants. New commits do not start upstream
-  CI automatically.
+- PPU CI runs on demand because device capacity is limited. Reviewers with
+  write access and configured trusted contributors can comment `/ci run` at any
+  time. After the PR is approved or has the `ready` or
+  `ready-run-all-tests` label, the PR author can use `/ci run`,
+  `/ci run --allow-stale`, `/ci retry`, and `/ci cancel`. New commits do not
+  start PPU CI automatically and need a new `/ci run` command.
 
 ### Pull Request Limits and Escalation
 

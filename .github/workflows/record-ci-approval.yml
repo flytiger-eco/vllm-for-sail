@@ -8,7 +8,10 @@ permissions: {}
 
 jobs:
   approved:
-    if: github.event.review.state == 'approved'
-    runs-on: [self-hosted, linux, x64, vllm-runners]
+    if: >-
+      github.repository == 'flytiger-eco/vllm-for-sail' &&
+      github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - run: echo "Approval recorded"
+      - run: echo "Approval recorded; the PR author may use /ci run."

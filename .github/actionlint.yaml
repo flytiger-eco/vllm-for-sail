@@ -3,5 +3,6 @@
 self-hosted-runner:
   labels:
     - vllm-runners
+    - k8s-runner-group-cpu-flytiger
     # Not yet in actionlint's known-label set.
     - macos-26
