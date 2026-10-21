@@ -52,6 +52,19 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     is_k = head >= num_q_heads
     local_head = tl.where(is_k, head - num_q_heads, head)
 
+    head_offs = tl.arange(0, HEAD_BLOCK)
+    head_mask = head_offs < head_dim
+    rot_offs = tl.arange(0, ROT_HALF_BLOCK)
+    rot_mask = rot_offs < half_rotary
+
+    # Start the position-dependent cache lookup before consuming the head input.
+    pos_t = tl.load(positions_ptr + token * positions_stride_t)
+    if HAS_MROPE:
+        pos_h = tl.load(positions_ptr + positions_stride_m + token * positions_stride_t)
+        pos_w = tl.load(
+            positions_ptr + 2 * positions_stride_m + token * positions_stride_t
+        )
+
     if is_k:
         in_base = k_ptr + token * k_stride_t + local_head * head_dim
         w_ptr = k_weight_ptr
@@ -61,13 +74,37 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
         w_ptr = q_weight_ptr
         out_base = q_out_ptr + token * q_out_stride_t + local_head * head_dim
 
-    # --- RMSNorm: variance over the full head_dim ---
-    head_offs = tl.arange(0, HEAD_BLOCK)
-    head_mask = head_offs < head_dim
-    x = tl.load(in_base + head_offs, mask=head_mask, other=0.0).to(tl.float32)
+    x_in = tl.load(in_base + head_offs, mask=head_mask, other=0.0)
+    w_in = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0)
+    gate_mask = head_mask & ~is_k
+    gate_in_base = (
+        q_gate_ptr + token * q_gate_stride_t + local_head * 2 * head_dim + head_dim
+    )
+    g = tl.load(gate_in_base + head_offs, mask=gate_mask, other=0.0)
+
+    # Convert positions before multiplying to avoid address overflow.
+    pos_t = pos_t.to(tl.int64)
+    if HAS_MROPE:
+        pos_h = pos_h.to(tl.int64)
+        pos_w = pos_w.to(tl.int64)
+        is_h = (rot_offs % 3 == 1) & (rot_offs < 3 * MROPE_SECTION_H)
+        is_w = (rot_offs % 3 == 2) & (rot_offs < 3 * MROPE_SECTION_W)
+        pos = tl.where(is_h, pos_h, tl.where(is_w, pos_w, pos_t))
+    else:
+        pos = pos_t
+    cache_offset = pos * cache_stride_p
+    cos = tl.load(cos_sin_cache_ptr + cache_offset + rot_offs, mask=rot_mask, other=0.0)
+    sin = tl.load(
+        cos_sin_cache_ptr + cache_offset + half_rotary + rot_offs,
+        mask=rot_mask,
+        other=0.0,
+    )
+
+    # Compute RMSNorm after prefetching the RoPE coefficients.
+    x = x_in.to(tl.float32)
+    w = w_in.to(tl.float32) + norm_beta
     var = tl.sum(x * x, axis=0) / head_dim
     inv_rms = tl.rsqrt(var + eps)
-    w = tl.load(w_ptr + head_offs, mask=head_mask, other=0.0).to(tl.float32) + norm_beta
     # Round-trip through INPUT_DTYPE so the RoPE input matches the bf16-storage
     # behavior of the unfused (qk_rmsnorm -> memory -> apply_rope) reference path.
     x_norm = (x * inv_rms * w).to(INPUT_DTYPE).to(tl.float32)
@@ -79,11 +116,7 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
         tl.store(out_base + head_offs, x_norm, mask=pass_mask)
 
     # --- Partial RoPE on the first rotary_dim elements ---
-    # Triton lacks easy sub-vector slicing of x_norm, so we recompute the
-    # normalized rotary halves on a smaller block (next_pow2(half_rotary)).
-    # The extra ~rotary_dim element reload hits L1, so the cost is negligible.
-    rot_offs = tl.arange(0, ROT_HALF_BLOCK)
-    rot_mask = rot_offs < half_rotary
+    # Reload the rotary halves on the smaller ROT_HALF_BLOCK layout.
     x_rot1 = tl.load(in_base + rot_offs, mask=rot_mask, other=0.0).to(tl.float32)
     x_rot2 = tl.load(in_base + half_rotary + rot_offs, mask=rot_mask, other=0.0).to(
         tl.float32
@@ -98,41 +131,15 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     x_rot1 = (x_rot1 * inv_rms * w_rot1).to(INPUT_DTYPE).to(tl.float32)
     x_rot2 = (x_rot2 * inv_rms * w_rot2).to(INPUT_DTYPE).to(tl.float32)
 
-    # Always use int64 for positions to avoid overflow in address computation.
-    pos_t = tl.load(positions_ptr + token * positions_stride_t).to(tl.int64)
-    if HAS_MROPE:
-        pos_h = tl.load(
-            positions_ptr + positions_stride_m + token * positions_stride_t
-        ).to(tl.int64)
-        pos_w = tl.load(
-            positions_ptr + 2 * positions_stride_m + token * positions_stride_t
-        ).to(tl.int64)
-        is_h = (rot_offs % 3 == 1) & (rot_offs < 3 * MROPE_SECTION_H)
-        is_w = (rot_offs % 3 == 2) & (rot_offs < 3 * MROPE_SECTION_W)
-        pos = tl.where(is_h, pos_h, tl.where(is_w, pos_w, pos_t))
-    else:
-        pos = pos_t
-    cache_offset = pos * cache_stride_p
-    cos = tl.load(
-        cos_sin_cache_ptr + cache_offset + rot_offs, mask=rot_mask, other=0.0
-    ).to(tl.float32)
-    sin = tl.load(
-        cos_sin_cache_ptr + cache_offset + half_rotary + rot_offs,
-        mask=rot_mask,
-        other=0.0,
-    ).to(tl.float32)
-
+    cos = cos.to(tl.float32)
+    sin = sin.to(tl.float32)
     o1 = x_rot1 * cos - x_rot2 * sin
     o2 = x_rot2 * cos + x_rot1 * sin
     tl.store(out_base + rot_offs, o1, mask=rot_mask)
     tl.store(out_base + half_rotary + rot_offs, o2, mask=rot_mask)
 
-    # --- Gate copy (q heads only, verbatim) ---
-    if not is_k:
-        gate_in_base = in_base + head_dim
-        gate_out_base = gate_out_ptr + token * gate_out_stride_t + local_head * head_dim
-        g = tl.load(gate_in_base + head_offs, mask=head_mask, other=0.0)
-        tl.store(gate_out_base + head_offs, g, mask=head_mask)
+    gate_out_base = gate_out_ptr + token * gate_out_stride_t + local_head * head_dim
+    tl.store(gate_out_base + head_offs, g, mask=gate_mask)
 
 
 def fused_qk_rmsnorm_rope_gate(
