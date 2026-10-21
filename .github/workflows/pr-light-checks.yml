@@ -69,7 +69,7 @@ jobs:
           BASE_REF: ${{ needs.source-check.outputs.base_ref }}
           BASE_SHA: ${{ needs.source-check.outputs.base_sha }}
         run: |
-          git fetch --no-tags --depth=1 \
+          git fetch --no-tags \
             "https://github.com/${BASE_REPOSITORY}.git" \
             "refs/heads/${BASE_REF}:refs/remotes/upstream/${BASE_REF}"
           git cat-file -e "${BASE_SHA}^{commit}"

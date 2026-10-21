@@ -202,7 +202,8 @@ def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
         for step in jobs["secret-scan"]["steps"]
         if step.get("name") == "Fetch the target branch commit"
     )
-    assert "git fetch --no-tags --depth=1" in fetch["run"]
+    assert "git fetch --no-tags" in fetch["run"]
+    assert "--depth" not in fetch["run"]
     assert "BASE_SHA" in fetch["run"]
     trufflehog = next(
         step["uses"]

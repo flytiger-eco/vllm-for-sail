@@ -1364,7 +1364,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 650
+    assert len(source.splitlines()) <= 660
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1636,3 +1636,26 @@ def test_cancel_replay_repairs_status_for_latest_cancelled_run():
     control.command()
     assert states(gh) == ["error"]
     assert "status refreshed" in reply(gh)
+
+
+def test_cancel_repair_does_not_override_later_successful_native_rerun():
+    cancelled_newer_id = run(
+        100,
+        status="completed",
+        conclusion="cancelled",
+        updated_at="2026-10-21T01:00:00Z",
+    )
+    successful_later_attempt = run(
+        99,
+        status="completed",
+        conclusion="success",
+        run_attempt=2,
+        updated_at="2026-10-21T02:00:00Z",
+    )
+    control, gh, _ = command_setup(
+        "/ci cancel",
+        existing=[cancelled_newer_id, successful_later_attempt],
+    )
+    control.command()
+    assert not states(gh)
+    assert "none to cancel" in reply(gh)

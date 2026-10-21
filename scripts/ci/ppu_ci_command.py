@@ -67,6 +67,16 @@ def parse_title(title):
     return title, number, sha, login, comment, base_ref
 
 
+def run_recency(run):
+    timestamp = (
+        run.get("updated_at")
+        or run.get("run_started_at")
+        or run.get("created_at")
+        or ""
+    )
+    return timestamp, int(run.get("run_attempt") or 0), int(run["id"])
+
+
 def bot_owned(item):
     user = item.get("user") or {}
     return user.get("type") == "Bot" and user.get("login") == "github-actions[bot]"
@@ -444,14 +454,18 @@ class Controller:
         latest = {}
         for run in runs:
             identity = parse_title(run["display_title"])
-            latest.setdefault((identity[2], identity[5]), run["id"])
+            key = identity[2], identity[5]
+            if key not in latest or run_recency(run) > run_recency(latest[key]):
+                latest[key] = run
         for run in runs:
             identity = parse_title(run["display_title"])
             key = identity[2], identity[5]
             if run["status"] != "completed":
                 if self.cancel_run(run, f"Cancelled by @{login}"):
                     links.append(run["html_url"])
-            elif run["id"] == latest[key] and run.get("conclusion") == "cancelled":
+            elif (
+                run["id"] == latest[key]["id"] and run.get("conclusion") == "cancelled"
+            ):
                 self.status(identity[2], identity[5], "error", "Cancelled")
                 repaired.append(run["html_url"])
         messages = []
