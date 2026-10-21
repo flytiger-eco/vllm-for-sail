@@ -182,8 +182,8 @@ class Controller:
             raise Rejected("PR must be open and target this repository.")
         if pr["base"]["ref"] not in SUPPORTED_BASES:
             raise Rejected("PPU CI supports v0.26.0, v0.27.0, and v0.28.0 only.")
-        head_repo = (pr.get("head", {}).get("repo") or {}).get("full_name", self.repo)
-        if head_repo != self.repo:
+        head_repo = (pr.get("head", {}).get("repo") or {}).get("full_name")
+        if not head_repo or head_repo != self.repo:
             raise Rejected("PPU CI does not execute code from fork pull requests.")
         writer = self.can_write(login)
         if writer or login.lower() in self.trusted:
@@ -442,6 +442,7 @@ class Controller:
             or self.event.get("label", {}).get("name") not in READY
             or pr.get("state") != "open"
             or pr.get("draft")
+            or pr.get("base", {}).get("ref") not in SUPPORTED_BASES
             or (pr.get("head", {}).get("repo") or {}).get("full_name") != self.repo
         ):
             return
@@ -456,7 +457,7 @@ class Controller:
         body = (
             f"{tag}\n@{login}: {HELP}. New commits require `/ci run`. "
             "`--allow-stale` permits running behind the base branch. "
-            "Security scans remain automatic."
+            "Security and lightweight checks remain automatic."
         )
         self.api("POST", f"/issues/{pr['number']}/comments", {"body": body})
 

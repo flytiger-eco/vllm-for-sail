@@ -22,6 +22,7 @@ permissions: {}
 concurrency:
   group: ppu-pr-ci-${{ inputs.pr_number }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   validate:

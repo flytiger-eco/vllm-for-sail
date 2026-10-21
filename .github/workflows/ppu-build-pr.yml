@@ -116,11 +116,13 @@ jobs:
         env:
           TARGET_VERSION: ${{ inputs.base_ref }}
         run: |
+          TARGET_VERSION="${TARGET_VERSION#v}"
           BUILD_DATE_COMPACT=$(date -u +%Y%m%d)
           HASH=$(git rev-parse --short HEAD)
           WHEEL_VERSION="${TARGET_VERSION}.dev${BUILD_DATE_COMPACT}+g${HASH}"
           echo "Wheel version: ${WHEEL_VERSION}"
           {
+            echo "target_version=${TARGET_VERSION}"
             echo "wheel_version=${WHEEL_VERSION}"
             echo "artifact_name=ppu-wheels-${{ github.run_id }}"
           } >> "$GITHUB_OUTPUT"
@@ -137,7 +139,7 @@ jobs:
           export HOST_CCACHE_DIR="$RUNNER_TEMP/ppu-ccache"
           mkdir -p "${HOST_CCACHE_DIR}"
           bash scripts/ppu/build-ppu-wheel.sh \
-            "${{ inputs.base_ref }}" \
+            "${{ steps.version.outputs.target_version }}" \
             "${{ matrix.python-version }}" \
             "${{ matrix.cuda-version }}" \
             "${{ matrix.arch }}"
@@ -232,3 +234,4 @@ jobs:
             dist/*.whl
             dist/toolchain/*.whl
           if-no-files-found: error
+          overwrite: true

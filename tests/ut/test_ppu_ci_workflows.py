@@ -28,6 +28,7 @@ def checkouts(job):
 def test_comment_controller_runs_trusted_default_branch_code():
     job = workflow("run-ci-command.yml")["jobs"]["command"]
     assert job["runs-on"] == "ubuntu-latest"
+    assert job["concurrency"]["queue"] == "max"
     assert job["permissions"] == {
         "contents": "read",
         "actions": "write",
@@ -69,6 +70,7 @@ def test_executor_is_manual_and_serialized_per_pr():
     assert config["concurrency"] == {
         "group": "ppu-pr-ci-${{ inputs.pr_number }}",
         "cancel-in-progress": False,
+        "queue": "max",
     }
     assert set(config["jobs"]) == {
         "validate",
@@ -130,6 +132,8 @@ def test_build_checks_out_exact_head_and_names_retry_artifact():
     assert checkout["with"]["persist-credentials"] is False
     assert any(step.get("name") == "Verify checkout SHA" for step in job["steps"])
     text = (WORKFLOWS / "ppu-build-pr.yml").read_text()
+    assert 'TARGET_VERSION="${TARGET_VERSION#v}"' in text
+    assert '"${{ steps.version.outputs.target_version }}"' in text
     assert "artifact_name=ppu-wheels-${{ github.run_id }}" in text
     upload = next(
         step
@@ -137,6 +141,7 @@ def test_build_checks_out_exact_head_and_names_retry_artifact():
         if step.get("uses") == "actions/upload-artifact@v4"
     )
     assert upload["with"]["name"] == "${{ steps.version.outputs.artifact_name }}"
+    assert upload["with"]["overwrite"] is True
     assert '"${{ inputs.base_ref }}"' in text
 
 
@@ -150,6 +155,35 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
         assert checkout["with"]["ref"] == HEAD_SHA
         assert checkout["with"]["persist-credentials"] is False
         assert any(step.get("name") == "Verify checkout SHA" for step in job["steps"])
+        action = next(
+            step["uses"]
+            for step in job["steps"]
+            if step.get("uses", "").startswith("flytiger-eco/ppu-distributed-action@")
+        )
+        assert action.endswith("@06c8ee7cadaae2086db4977e571b19f461653f16")
+
+
+def test_lightweight_checks_replace_non_ppu_legacy_jobs():
+    config = workflow("pr-light-checks.yml")
+    assert set(config[True]) == {"pull_request_target", "pull_request_review"}
+    jobs = config["jobs"]
+    assert set(jobs) == {"secret-scan", "smoke-test", "ai-code-review"}
+    for job_id in ("secret-scan", "smoke-test"):
+        checkout = checkouts(jobs[job_id])[0]
+        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+        assert checkout["with"]["persist-credentials"] is False
+        assert jobs[job_id]["permissions"] == {"contents": "read"}
+    trufflehog = next(
+        step["uses"]
+        for step in jobs["secret-scan"]["steps"]
+        if step.get("uses", "").startswith("trufflesecurity/trufflehog@")
+    )
+    assert trufflehog == (
+        "trufflesecurity/trufflehog@e7a8d17d2f726cf414310a625b55cca7dc9c898e"
+    )
+    assert jobs["ai-code-review"]["uses"].endswith(
+        "@c03108c83177ebf0038bb5f49b0e15db9b2f78de"
+    )
 
 
 def test_legacy_automatic_pipeline_is_cancelled_before_heavy_jobs():

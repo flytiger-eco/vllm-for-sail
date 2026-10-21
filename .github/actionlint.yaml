@@ -6,3 +6,13 @@ self-hosted-runner:
     - k8s-runner-group-cpu-flytiger
     # Not yet in actionlint's known-label set.
     - macos-26
+
+# queue:max is supported by the flytiger GitHub Actions platform but is newer
+# than actionlint 1.7.12.
+paths:
+  .github/workflows/run-ci-command.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
+  .github/workflows/ppu-pr-ci.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

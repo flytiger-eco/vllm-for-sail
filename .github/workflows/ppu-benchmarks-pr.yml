@@ -138,7 +138,7 @@ jobs:
 
       - name: Run PPU benchmarks tests
         id: ppu
-        uses: flytiger-eco/ppu-distributed-action@main
+        uses: flytiger-eco/ppu-distributed-action@06c8ee7cadaae2086db4977e571b19f461653f16
         with:
           # 单机；nproc_per_node = 本 area 实际需要的 PPU 卡数
           #（benchmarks single-only,CLI 单卡即可）

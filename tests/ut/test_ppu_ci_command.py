@@ -982,7 +982,11 @@ def test_notify_filters_event_author_and_labels(change, notify):
             assert command in text
         assert "<!-- ppu-ci-authorized -->" in text
         assert "new commits" in text.lower()
-        assert "Security scans" in text and "automatic" in text and "behind" in text
+        assert (
+            "Security and lightweight checks" in text
+            and "automatic" in text
+            and "behind" in text
+        )
 
 
 @pytest.mark.parametrize("user,sent", [(BOT, False), (USER, True)])
@@ -1357,3 +1361,26 @@ def test_validate_exports_the_release_branch_for_the_build(tmp_path):
     control.env["GITHUB_OUTPUT"] = str(output)
     control.validate()
     assert output.read_text() == "base_ref=v0.28.0\n"
+
+
+def test_deleted_fork_repository_fails_closed():
+    control, gh, _ = make_controller()
+    pr = copy.deepcopy(PR)
+    pr["head"]["repo"] = None
+    with pytest.raises(module().Rejected, match="fork"):
+        control.authorize(pr, "maintainer")
+    assert gh.calls == []
+
+
+def test_ready_notification_ignores_unsupported_base_branch():
+    event = {
+        "action": "labeled",
+        "label": {"name": "ready"},
+        "pull_request": {
+            **PR,
+            "base": {"ref": "main", "repo": {"full_name": REPO}},
+        },
+    }
+    control, gh, _ = make_controller(event)
+    control.notify()
+    assert gh.calls == []
