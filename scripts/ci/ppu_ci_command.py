@@ -191,7 +191,7 @@ class Controller:
         if (
             login.lower() != pr["user"]["login"].lower()
             or pr.get("draft")
-            or pr.get("author_association", "COLLABORATOR") not in TRUSTED_ASSOCIATIONS
+            or pr.get("author_association", "") not in TRUSTED_ASSOCIATIONS
         ):
             raise Rejected(
                 "Only maintainers, trusted users, or an authorized non-draft "
@@ -405,13 +405,23 @@ class Controller:
             + f"{self.url}/actions/workflows/{WORKFLOW}"
         )
 
+    def cancel_run(self, run, description):
+        try:
+            self.api("POST", f"/actions/runs/{run['id']}/cancel")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {409, 422}:
+                raise
+            return False
+        sha = parse_title(run["display_title"])[2]
+        self.status(sha, "error", description)
+        return True
+
     def cancel(self, pr, login):
         links = []
         for run in self.find_runs(pr):
-            if run["status"] != "completed":
-                self.api("POST", f"/actions/runs/{run['id']}/cancel")
-                sha = parse_title(run["display_title"])[2]
-                self.status(sha, "error", f"Cancelled by @{login}")
+            if run["status"] != "completed" and self.cancel_run(
+                run, f"Cancelled by @{login}"
+            ):
                 links.append(run["html_url"])
         return (
             f"Cancellation requested for {len(links)} runs: " + " ".join(links)

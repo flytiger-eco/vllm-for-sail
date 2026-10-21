@@ -12,7 +12,8 @@ jobs:
   cancel:
     if: >-
       github.repository == 'flytiger-eco/vllm-for-sail' &&
-      github.event.workflow_run.event == 'pull_request'
+      contains(fromJSON('["pull_request", "pull_request_review"]'),
+      github.event.workflow_run.event)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

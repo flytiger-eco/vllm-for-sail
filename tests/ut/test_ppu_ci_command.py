@@ -47,6 +47,10 @@ def module():
     return importlib.import_module("scripts.ci.ppu_ci_command")
 
 
+def lifecycle_module():
+    return importlib.import_module("scripts.ci.ppu_ci_lifecycle")
+
+
 def http_error(code):
     return HTTPError("https://github.example", code, "test rejection", {}, None)
 
@@ -350,6 +354,10 @@ def states(gh):
     return [c[2]["state"] for c in gh.writes(f"/statuses/{SHA}")]
 
 
+def states_for_sha(gh, sha):
+    return [c[2]["state"] for c in gh.writes(f"/statuses/{sha}")]
+
+
 def reactions(gh):
     return [c[2]["content"] for c in gh.writes(REACTIONS)]
 
@@ -639,14 +647,22 @@ def test_cancel_all_active_heads_writes_terminal_status_on_each_title_sha(status
         assert gh.calls.index(cancel) < gh.calls.index(status)
 
 
-@pytest.mark.parametrize("code", [403, 409, 500])
+@pytest.mark.parametrize("code", [403, 500])
 def test_rejected_cancellation_does_not_write_cancelled_status(code):
     control, gh, _ = command_setup("/ci cancel", existing=[run(status="queued")])
     gh.add("POST", ROOT + "/actions/runs/100/cancel", http_error(code))
     with pytest.raises(HTTPError):
         control.command()
     assert not states(gh)
-    assert reactions(gh)[-1] == "confused"
+
+
+def test_terminal_cancellation_race_does_not_write_cancelled_status():
+    control, gh, _ = command_setup("/ci cancel", existing=[run(status="queued")])
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", http_error(409))
+    control.command()
+    assert not states(gh)
+    assert "none to cancel" in reply(gh)
+    assert reactions(gh)[-1] == "rocket"
 
 
 def test_cancellation_status_failure_is_not_reported_as_success():
@@ -1318,7 +1334,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 580
+    assert len(source.splitlines()) <= 590
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1406,3 +1422,51 @@ def test_untrusted_non_author_cannot_cancel_ci():
     control.command()
     assert not gh.writes("/actions/runs/100/cancel")
     assert reactions(gh)[-1] == "-1"
+
+
+def test_missing_author_association_fails_closed():
+    control, gh, _ = make_controller()
+    permission(gh)
+    pr = copy.deepcopy(PR)
+    pr.pop("author_association")
+    with pytest.raises(module().Rejected, match="authorized non-draft"):
+        control.authorize(pr, "author")
+
+
+def test_lifecycle_cancels_superseded_head_but_keeps_current_run():
+    event = {
+        "action": "synchronize",
+        "repository": {"default_branch": "main"},
+        "pull_request": PR,
+    }
+    control, gh, _ = make_controller(event)
+    runs(
+        gh,
+        [
+            run(101, sha=SHA, status="in_progress", conclusion=None),
+            run(100, sha=OLD, status="in_progress", conclusion=None),
+        ],
+    )
+    permission(gh)
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
+    gh.add("POST", ROOT + f"/statuses/{OLD}", {})
+    lifecycle_module().run(control)
+    assert len(gh.writes("/actions/runs/100/cancel")) == 1
+    assert not gh.writes("/actions/runs/101/cancel")
+    assert states_for_sha(gh, OLD) == ["error"]
+
+
+def test_lifecycle_cancels_current_run_after_pr_closes():
+    pr = {**PR, "state": "closed"}
+    event = {
+        "action": "closed",
+        "repository": {"default_branch": "main"},
+        "pull_request": pr,
+    }
+    control, gh, _ = make_controller(event)
+    runs(gh, [run(status="in_progress", conclusion=None)])
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
+    gh.add("POST", ROOT + f"/statuses/{SHA}", {})
+    lifecycle_module().run(control)
+    assert len(gh.writes("/actions/runs/100/cancel")) == 1
+    assert states(gh) == ["error"]

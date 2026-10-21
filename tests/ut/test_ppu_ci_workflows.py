@@ -166,22 +166,22 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
         assert action.endswith("@06c8ee7cadaae2086db4977e571b19f461653f16")
 
 
-def test_lightweight_checks_replace_non_ppu_legacy_jobs():
+def test_lightweight_checks_treat_pr_content_as_data_only():
     config = workflow("pr-light-checks.yml")
     assert set(config[True]) == {"pull_request_target"}
     jobs = config["jobs"]
-    assert set(jobs) == {"source-check", "secret-scan", "smoke-test"}
+    assert set(jobs) == {"source-check", "secret-scan"}
     assert jobs["source-check"]["outputs"]["repository"] == (
         "${{ steps.source.outputs.repository }}"
     )
-    for job_id in ("secret-scan", "smoke-test"):
-        checkout = checkouts(jobs[job_id])[0]
-        assert checkout["with"]["repository"] == (
-            "${{ needs.source-check.outputs.repository }}"
-        )
-        assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
-        assert checkout["with"]["persist-credentials"] is False
-        assert jobs[job_id]["permissions"] == {"contents": "read"}
+    checkout = checkouts(jobs["secret-scan"])[0]
+    assert checkout["with"]["repository"] == (
+        "${{ needs.source-check.outputs.repository }}"
+    )
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert jobs["secret-scan"]["permissions"] == {"contents": "read"}
+    assert all("run" not in step for step in jobs["secret-scan"]["steps"])
     trufflehog = next(
         step["uses"]
         for step in jobs["secret-scan"]["steps"]
@@ -190,6 +190,25 @@ def test_lightweight_checks_replace_non_ppu_legacy_jobs():
     assert trufflehog == (
         "trufflesecurity/trufflehog@e7a8d17d2f726cf414310a625b55cca7dc9c898e"
     )
+
+
+def test_lifecycle_controller_runs_only_default_branch_code():
+    config = workflow("cancel-obsolete-ppu-ci.yml")
+    assert set(config[True]) == {
+        "pull_request_target",
+        "schedule",
+        "workflow_dispatch",
+    }
+    job = config["jobs"]["lifecycle"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert config["concurrency"]["queue"] == "max"
+    checkout = checkouts(job)[0]
+    assert checkout["with"] == {
+        "ref": DEFAULT_BRANCH,
+        "persist-credentials": False,
+    }
+    command = next(step for step in job["steps"] if "run" in step)["run"]
+    assert command == "python -m scripts.ci.ppu_ci_lifecycle"
 
 
 def test_credential_bearing_workflows_pin_actions_images_and_secrets():
@@ -214,4 +233,5 @@ def test_legacy_automatic_pipeline_is_cancelled_before_heavy_jobs():
     }
     job = config["jobs"]["cancel"]
     assert job["permissions"] if "permissions" in job else config["permissions"]
+    assert "pull_request_review" in job["if"]
     assert "cancelWorkflowRun" in str(job)

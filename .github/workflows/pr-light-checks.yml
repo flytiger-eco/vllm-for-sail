@@ -40,6 +40,8 @@ jobs:
     permissions:
       contents: read
     steps:
+      # PR content is scanned as data only. No PR-controlled program is run in
+      # this privileged pull_request_target workflow.
       - name: Checkout the exact PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -53,23 +55,3 @@ jobs:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           extra_args: --results=verified,unknown,unverified
-
-  smoke-test:
-    name: Smoke Test
-    needs: [source-check, secret-scan]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout the exact PR head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: ${{ needs.source-check.outputs.repository }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - name: Static smoke checks
-        run: |
-          for file in scripts/ppu/*.sh; do bash -n "$file"; done
-          python3 -m py_compile scripts/ppu/check-exclusions.py
-          python3 scripts/ppu/check-exclusions.py

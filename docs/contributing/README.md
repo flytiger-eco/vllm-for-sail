@@ -313,7 +313,10 @@ review process:
   time. After the PR is approved or has the `ready` or
   `ready-run-all-tests` label, the PR author can use `/ci run`,
   `/ci run --allow-stale`, `/ci retry`, and `/ci cancel`. New commits do not
-  start PPU CI automatically and need a new `/ci run` command.
+  start PPU CI automatically and need a new `/ci run` command. PPU CI is
+  restricted to same-repository PR branches because device jobs receive
+  internal credentials; fork PRs receive automatic security checks but cannot
+  use the `/ci` commands.
 
 ### Pull Request Limits and Escalation
 
