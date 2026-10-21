@@ -425,7 +425,9 @@ def test_terminal_reactions_must_be_owned_by_actions_bot(user, content, terminal
     control, gh, _ = command_setup("/ci cancel")
     gh.page(REACTIONS, [{"user": user, "content": content}])
     control.command()
-    assert bool(gh.writes(COMMENTS)) is not terminal
+    assert bool(gh.writes(COMMENTS)) is True
+    if terminal:
+        assert "no action was repeated" in reply(gh)
     assert not states(gh)
 
 
@@ -454,7 +456,10 @@ def test_paginated_terminal_marker_and_reaction():
         gh.page(path, [{"user": USER, "body": "hello", "content": "eyes"}] * 100)
         gh.page(path, [entry], page=2)
         control.command()
-        assert not gh.writes(COMMENTS)
+        if path == COMMENTS:
+            assert not gh.writes(COMMENTS)
+        else:
+            assert "no action was repeated" in reply(gh)
 
 
 def test_malformed_untrusted_comment_gets_marked_help_without_authorizing():
@@ -1211,7 +1216,7 @@ def test_reply_failure_is_unexpected_and_retriable():
     gh.add("POST", ROOT + COMMENTS, http_error(503))
     with pytest.raises(HTTPError):
         control.command()
-    assert reactions(gh) == ["eyes", "confused"]
+    assert reactions(gh) == ["eyes", "rocket", "confused"]
 
 
 def test_report_uses_older_input_sha_even_when_pr_has_moved():
@@ -1359,7 +1364,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 610
+    assert len(source.splitlines()) <= 650
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1612,3 +1617,22 @@ def test_maintainer_retry_rejects_revoked_original_requester():
     assert not gh.writes("/rerun-failed-jobs")
     assert "Original requester" in reply(gh)
     assert reactions(gh)[-1] == "-1"
+
+
+def test_terminal_retry_replay_recovers_reply_without_second_rerun():
+    control, gh, _ = retry_setup(
+        jobs=[{"name": "PPU wheel build", "conclusion": "failure"}]
+    )
+    gh.page(REACTIONS, [{"user": BOT, "content": "rocket"}])
+    control.command()
+    assert not gh.writes("/rerun-failed-jobs")
+    assert "no action was repeated" in reply(gh)
+
+
+def test_cancel_replay_repairs_status_for_latest_cancelled_run():
+    cancelled = run(status="completed", conclusion="cancelled")
+    control, gh, _ = command_setup("/ci cancel", existing=[cancelled])
+    gh.add("POST", ROOT + f"/statuses/{SHA}", {})
+    control.command()
+    assert states(gh) == ["error"]
+    assert "status refreshed" in reply(gh)

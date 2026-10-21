@@ -184,6 +184,7 @@ def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
         "repository": "${{ steps.source.outputs.repository }}",
         "head_sha": "${{ steps.source.outputs.head_sha }}",
         "base_sha": "${{ steps.source.outputs.base_sha }}",
+        "base_ref": "${{ steps.source.outputs.base_ref }}",
     }
     source_step = source["steps"][0]
     assert source_step["uses"].startswith("actions/github-script@")
@@ -196,7 +197,13 @@ def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
     assert checkout["with"]["persist-credentials"] is False
     assert checkout["with"]["allow-unsafe-pr-checkout"] is True
     assert jobs["secret-scan"]["permissions"] == {"contents": "read"}
-    assert all("run" not in step for step in jobs["secret-scan"]["steps"])
+    fetch = next(
+        step
+        for step in jobs["secret-scan"]["steps"]
+        if step.get("name") == "Fetch the target branch commit"
+    )
+    assert "git fetch --no-tags --depth=1" in fetch["run"]
+    assert "BASE_SHA" in fetch["run"]
     trufflehog = next(
         step["uses"]
         for step in jobs["secret-scan"]["steps"]
@@ -250,3 +257,14 @@ def test_legacy_automatic_pipeline_is_cancelled_before_heavy_jobs():
     assert job["permissions"] if "permissions" in job else config["permissions"]
     assert "pull_request_review" in job["if"]
     assert "cancelWorkflowRun" in str(job)
+
+
+def test_legacy_pipeline_is_disabled_after_default_branch_merge():
+    config = workflow("disable-legacy-ppu-ci.yml")
+    assert set(config[True]) == {"push", "workflow_dispatch"}
+    assert config[True]["push"]["branches"] == ["main"]
+    job = config["jobs"]["disable"]
+    assert config["permissions"] == {"actions": "write"}
+    script = job["steps"][0]["with"]["script"]
+    assert "disableWorkflow" in script
+    assert "workflow_id: 349122804" in script

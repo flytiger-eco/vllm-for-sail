@@ -1,0 +1,26 @@
+name: Disable legacy automatic PPU CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/disable-legacy-ppu-ci.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  disable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Disable the legacy CI Pipeline workflow
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            await github.rest.actions.disableWorkflow({
+              ...context.repo,
+              workflow_id: 349122804,
+            });
+            core.info('Disabled legacy CI Pipeline workflow 349122804.');

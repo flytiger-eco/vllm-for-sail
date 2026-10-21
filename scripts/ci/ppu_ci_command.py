@@ -326,9 +326,23 @@ class Controller:
         try:
             path = f"/issues/comments/{cid}/reactions"
             reactions = best_effort(lambda: list(self.pages(path))) or []
-            if any(
-                bot_owned(r) and r["content"] in {"rocket", "-1"} for r in reactions
-            ) or self.find_comment(number, marker(cid)):
+            terminal = next(
+                (
+                    reaction["content"]
+                    for reaction in reactions
+                    if bot_owned(reaction) and reaction["content"] in {"rocket", "-1"}
+                ),
+                None,
+            )
+            if self.find_comment(number, marker(cid)):
+                return
+            if terminal:
+                outcome = "accepted" if terminal == "rocket" else "rejected"
+                self.reply(
+                    number,
+                    cid,
+                    f"Command was already {outcome}; no action was repeated.",
+                )
                 return
             self.react(cid, "eyes")
             reaction = "rocket"
@@ -349,8 +363,8 @@ class Controller:
                         )
             except Rejected as exc:
                 text, reaction = str(exc), "-1"
-            self.reply(number, cid, text)
             self.react(cid, reaction)
+            self.reply(number, cid, text)
         except Exception:
             self.react(cid, "confused")
             raise
@@ -425,16 +439,32 @@ class Controller:
 
     def cancel(self, pr, login):
         links = []
-        for run in self.find_runs(pr, match_base=False):
-            if run["status"] != "completed" and self.cancel_run(
-                run, f"Cancelled by @{login}"
-            ):
-                links.append(run["html_url"])
-        return (
-            f"Cancellation requested for {len(links)} runs: " + " ".join(links)
-            if links
-            else "No active PPU CI runs (none to cancel)."
-        )
+        repaired = []
+        runs = self.find_runs(pr, match_base=False)
+        latest = {}
+        for run in runs:
+            identity = parse_title(run["display_title"])
+            latest.setdefault((identity[2], identity[5]), run["id"])
+        for run in runs:
+            identity = parse_title(run["display_title"])
+            key = identity[2], identity[5]
+            if run["status"] != "completed":
+                if self.cancel_run(run, f"Cancelled by @{login}"):
+                    links.append(run["html_url"])
+            elif run["id"] == latest[key] and run.get("conclusion") == "cancelled":
+                self.status(identity[2], identity[5], "error", "Cancelled")
+                repaired.append(run["html_url"])
+        messages = []
+        if links:
+            messages.append(
+                f"Cancellation requested for {len(links)} runs: " + " ".join(links)
+            )
+        if repaired:
+            messages.append(
+                f"Cancellation status refreshed for {len(repaired)} runs: "
+                + " ".join(repaired)
+            )
+        return " ".join(messages) or "No active PPU CI runs (none to cancel)."
 
     def retry(self, pr, login):
         runs = self.find_runs(pr, pr["head"]["sha"])
@@ -456,7 +486,9 @@ class Controller:
             a["name"] == f"ppu-wheels-{run['id']}" and not a.get("expired", True)
             for a in self.pages(path + "/artifacts", "artifacts")
         ):
-            raise Rejected("Wheel artifact missing or expired; use /ci run.")
+            raise Rejected(
+                "Wheel artifact missing or expired; ask a maintainer to run /ci run."
+            )
         identity = parse_title(run["display_title"])
         fresh = self.api("GET", f"/pulls/{pr['number']}")
         if fresh["head"]["sha"] != identity[2] or fresh["base"]["ref"] != identity[5]:
