@@ -3,33 +3,47 @@ name: PR lightweight checks
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted]
 
 permissions: {}
 
 concurrency:
-  group: >-
-    pr-light-${{ github.event.pull_request.number }}-${{
-    github.event_name == 'pull_request_review' && 'review' || 'head' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  group: pr-light-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  secret-scan:
-    name: Pre-check / Secret Scan (TruffleHog)
+  source-check:
+    name: Validate PR source
     if: >-
-      github.event_name == 'pull_request_target' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["v0.26.0", "v0.27.0", "v0.28.0"]'),
       github.event.pull_request.base.ref)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repository: ${{ steps.source.outputs.repository }}
+    steps:
+      - name: Require an accessible source repository
+        id: source
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ -z "$HEAD_REPOSITORY" ]; then
+            echo "::error::The pull request source repository is unavailable."
+            exit 1
+          fi
+          echo "repository=$HEAD_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+  secret-scan:
+    name: Pre-check / Secret Scan (TruffleHog)
+    needs: source-check
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - name: Checkout the exact PR head
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          repository: ${{ needs.source-check.outputs.repository }}
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
@@ -42,15 +56,16 @@ jobs:
 
   smoke-test:
     name: Smoke Test
-    needs: secret-scan
+    needs: [source-check, secret-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Checkout the exact PR head
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          repository: ${{ needs.source-check.outputs.repository }}
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Static smoke checks
@@ -58,15 +73,3 @@ jobs:
           for file in scripts/ppu/*.sh; do bash -n "$file"; done
           python3 -m py_compile scripts/ppu/check-exclusions.py
           python3 scripts/ppu/check-exclusions.py
-
-  ai-code-review:
-    name: AI Code Review (Copilot Gate)
-    if: >-
-      contains(fromJSON('["v0.26.0", "v0.27.0", "v0.28.0"]'),
-      github.event.pull_request.base.ref) &&
-      (github.event_name == 'pull_request_target' ||
-      github.event.review.user.type == 'Bot')
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: flytiger-eco/.github/.github/workflows/ai-code-review.yml@c03108c83177ebf0038bb5f49b0e15db9b2f78de

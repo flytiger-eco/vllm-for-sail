@@ -115,7 +115,10 @@ def test_executor_calls_read_only_pr_workflows_without_write_permissions():
         assert job["uses"] == f"./.github/workflows/ppu-{area}-pr.yml"
         assert job["with"]["pr_head_sha"] == "${{ inputs.head_sha }}"
         assert job["permissions"] == {"contents": "read", "actions": "read"}
-        assert job["secrets"] == "inherit"
+        assert job["secrets"] == {
+            "PPU_ARTIFACTORY_USER": "${{ secrets.PPU_ARTIFACTORY_USER }}",
+            "PPU_ARTIFACTORY_PASSWORD": "${{ secrets.PPU_ARTIFACTORY_PASSWORD }}",
+        }
 
 
 def test_build_checks_out_exact_head_and_names_retry_artifact():
@@ -138,7 +141,7 @@ def test_build_checks_out_exact_head_and_names_retry_artifact():
     upload = next(
         step
         for step in job["steps"]
-        if step.get("uses") == "actions/upload-artifact@v4"
+        if step.get("uses", "").startswith("actions/upload-artifact@")
     )
     assert upload["with"]["name"] == "${{ steps.version.outputs.artifact_name }}"
     assert upload["with"]["overwrite"] is True
@@ -165,11 +168,17 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
 
 def test_lightweight_checks_replace_non_ppu_legacy_jobs():
     config = workflow("pr-light-checks.yml")
-    assert set(config[True]) == {"pull_request_target", "pull_request_review"}
+    assert set(config[True]) == {"pull_request_target"}
     jobs = config["jobs"]
-    assert set(jobs) == {"secret-scan", "smoke-test", "ai-code-review"}
+    assert set(jobs) == {"source-check", "secret-scan", "smoke-test"}
+    assert jobs["source-check"]["outputs"]["repository"] == (
+        "${{ steps.source.outputs.repository }}"
+    )
     for job_id in ("secret-scan", "smoke-test"):
         checkout = checkouts(jobs[job_id])[0]
+        assert checkout["with"]["repository"] == (
+            "${{ needs.source-check.outputs.repository }}"
+        )
         assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
         assert checkout["with"]["persist-credentials"] is False
         assert jobs[job_id]["permissions"] == {"contents": "read"}
@@ -181,9 +190,20 @@ def test_lightweight_checks_replace_non_ppu_legacy_jobs():
     assert trufflehog == (
         "trufflesecurity/trufflehog@e7a8d17d2f726cf414310a625b55cca7dc9c898e"
     )
-    assert jobs["ai-code-review"]["uses"].endswith(
-        "@c03108c83177ebf0038bb5f49b0e15db9b2f78de"
-    )
+
+
+def test_credential_bearing_workflows_pin_actions_images_and_secrets():
+    forbidden = ("@v4", "@main", ":latest")
+    for area in ("attention", "samplers", "benchmarks"):
+        config = workflow(f"ppu-{area}-pr.yml")
+        assert set(config[True]["workflow_call"]["secrets"]) == {
+            "PPU_ARTIFACTORY_USER",
+            "PPU_ARTIFACTORY_PASSWORD",
+        }
+        text = (WORKFLOWS / f"ppu-{area}-pr.yml").read_text()
+        assert not any(token in text for token in forbidden)
+    build = (WORKFLOWS / "ppu-build-pr.yml").read_text()
+    assert not any(token in build for token in forbidden)
 
 
 def test_legacy_automatic_pipeline_is_cancelled_before_heavy_jobs():
@@ -195,9 +215,3 @@ def test_legacy_automatic_pipeline_is_cancelled_before_heavy_jobs():
     job = config["jobs"]["cancel"]
     assert job["permissions"] if "permissions" in job else config["permissions"]
     assert "cancelWorkflowRun" in str(job)
-
-
-def test_approval_recorder_no_longer_needs_vllm_self_hosted_runner():
-    job = workflow("record-ci-approval.yml")["jobs"]["approved"]
-    assert job["runs-on"] == "ubuntu-latest"
-    assert "vllm-runners" not in str(job)

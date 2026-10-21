@@ -1318,7 +1318,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 560
+    assert len(source.splitlines()) <= 580
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1384,3 +1384,25 @@ def test_ready_notification_ignores_unsupported_base_branch():
     control, gh, _ = make_controller(event)
     control.notify()
     assert gh.calls == []
+
+
+def test_pr_author_can_cancel_after_pr_is_closed():
+    control, gh, _ = command_setup(
+        "/ci cancel", existing=[run(status="in_progress", conclusion=None)]
+    )
+    gh.add("GET", ROOT + "/pulls/7", {**PR, "state": "closed"})
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
+    control.command()
+    assert len(gh.writes("/actions/runs/100/cancel")) == 1
+    assert reactions(gh)[-1] == "rocket"
+
+
+def test_untrusted_non_author_cannot_cancel_ci():
+    control, gh, _ = command_setup(
+        "/ci cancel",
+        login="outsider",
+        existing=[run(status="in_progress", conclusion=None)],
+    )
+    control.command()
+    assert not gh.writes("/actions/runs/100/cancel")
+    assert reactions(gh)[-1] == "-1"

@@ -69,7 +69,9 @@ jobs:
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       wheel_artifact: ${{ needs.build.outputs.artifact_name }}
-    secrets: inherit
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
 
   samplers:
     needs: [validate, build]
@@ -80,7 +82,9 @@ jobs:
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       wheel_artifact: ${{ needs.build.outputs.artifact_name }}
-    secrets: inherit
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
 
   benchmarks:
     needs: [validate, build]
@@ -91,7 +95,9 @@ jobs:
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       wheel_artifact: ${{ needs.build.outputs.artifact_name }}
-    secrets: inherit
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
 
   report:
     needs: [validate, build, attention, samplers, benchmarks]

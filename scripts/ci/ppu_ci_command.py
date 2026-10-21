@@ -229,6 +229,17 @@ class Controller:
             "trusted reviewer."
         )
 
+    def authorize_cancel(self, pr, login):
+        if (
+            self.can_write(login)
+            or login.lower() in self.trusted
+            or login.lower() == (pr.get("user") or {}).get("login", "").lower()
+        ):
+            return
+        raise Rejected(
+            "Only the PR author, maintainers, or trusted users may cancel CI."
+        )
+
     @cached_property
     def default_branch(self):
         return (
@@ -322,13 +333,17 @@ class Controller:
                 if action == "help":
                     raise Rejected(HELP)
                 pr = self.api("GET", f"/pulls/{number}")
-                self.authorize(pr, login)
                 if action == "/ci cancel":
+                    self.authorize_cancel(pr, login)
                     text = self.cancel(pr, login)
-                elif action == "/ci retry":
-                    text = self.retry(pr, login)
                 else:
-                    text = self.run(pr, login, cid, action.endswith("--allow-stale"))
+                    self.authorize(pr, login)
+                    if action == "/ci retry":
+                        text = self.retry(pr, login)
+                    else:
+                        text = self.run(
+                            pr, login, cid, action.endswith("--allow-stale")
+                        )
             except Rejected as exc:
                 text, reaction = str(exc), "-1"
             self.reply(number, cid, text)
