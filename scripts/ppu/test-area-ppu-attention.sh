@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
 # scripts/ppu/test-area-ppu-attention.sh - PPU Attention test runner (GitHub Actions)
-# Caller: .github/workflows/test-area-ppu-attention.yml (in the container,
-#   cwd=/workspace)
+# 由 main 上的 .github/workflows/ppu-attention-pr.yml 调用。
+# 在 PPU Pod 内执行，工作目录为 /workspace/source。
 # Environment variables: TEST_MODE=all (default)|single (no multi tests in this area)
 # Models: no real models; only test_indexer_deepseek_v4_slot_mapping.py needs to
 #   parse the Llama-3-8B HF config, which the [stub] section below provides locally.

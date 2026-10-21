@@ -14,11 +14,10 @@ After upstream renames or deletes a file:
 - A directly listed test file that is missing: pytest reports an error, which
   is an explicit failure and less of a problem.
 
-This check is purely static, needs no PPU device and runs on ubuntu-latest. Any
-hit turns the PR red, forcing the exclusions to be maintained along with
-upstream.
+此静态检查无需 PPU 设备，可在本地维护测试路径时手动执行。
+旧自动流水线已移除，本脚本不再自动作为 PR 门禁运行。
 
-Usage: python3 scripts/ppu/check-exclusions.py [--quiet]
+用法：.venv/bin/python scripts/ppu/check-exclusions.py [--quiet]
 """
 
 from __future__ import annotations
@@ -31,9 +30,7 @@ SCRIPT_GLOB = "scripts/ppu/test-area-ppu-*.sh"
 
 # The two pytest flags that take a path; both --ignore=<path> and
 # --ignore <path> forms must be supported.
-# Regular expressions are avoided on purpose: the repo bans `import re` (it
-# requires `regex`), while this script runs on the bare python3 of
-# ubuntu-latest and must not pull in third-party dependencies.
+# 仓库禁止 import re；此检查仅使用标准库，避免为本地校验安装 regex。
 PATH_FLAGS = ("--ignore", "--deselect")
 
 
