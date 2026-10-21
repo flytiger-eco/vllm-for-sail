@@ -300,10 +300,17 @@ COMMENTS = "/issues/7/comments"
 MARKER = "<!-- ppu-ci-command:42 -->"
 
 
-def run(ident=100, sha=SHA, status="completed", conclusion="failure", **extra):
+def run(
+    ident=100,
+    sha=SHA,
+    base_ref="v0.28.0",
+    status="completed",
+    conclusion="failure",
+    **extra,
+):
     return {
         "id": ident,
-        "display_title": f"PPU PR #7 @ {sha} by author (comment 42)",
+        "display_title": (f"PPU PR #7 base {base_ref} @ {sha} by author (comment 42)"),
         "head_sha": "c" * 40,
         "head_branch": "main",
         "path": ".github/workflows/ppu-pr-ci.yml",
@@ -365,9 +372,17 @@ def reactions(gh):
 @pytest.mark.parametrize(
     "extra",
     [
-        {"display_title": f"PPU PR #8 @ {SHA} by author (comment 42)"},
-        {"display_title": f"PPU PR #7 @ {SHA.upper()} by author (comment 42)"},
-        {"display_title": f"PPU PR #7 @ {SHA} by author (comment 42) suffix"},
+        {"display_title": f"PPU PR #8 base v0.28.0 @ {SHA} by author (comment 42)"},
+        {
+            "display_title": (
+                f"PPU PR #7 base v0.28.0 @ {SHA.upper()} by author (comment 42)"
+            )
+        },
+        {
+            "display_title": (
+                f"PPU PR #7 base v0.28.0 @ {SHA} by author (comment 42) suffix"
+            )
+        },
         {"display_title": "ppu / arbitrary"},
         {"path": ".github/workflows/evil.yaml"},
         {"head_branch": "feature"},
@@ -512,6 +527,7 @@ def test_successful_dispatch_uses_default_ref_and_exact_inputs():
         "inputs": {
             "pr_number": "7",
             "head_sha": SHA,
+            "base_ref": "v0.28.0",
             "requester": "maintainer",
             "comment_id": "42",
         },
@@ -531,7 +547,9 @@ def test_successful_dispatch_uses_default_ref_and_exact_inputs():
 
 def test_dispatch_poll_requires_exact_comment_id_and_accepts_timeout():
     control, gh, sleeps = command_setup()
-    foreign = run(display_title=f"PPU PR #7 @ {SHA} by author (comment 43)")
+    foreign = run(
+        display_title=(f"PPU PR #7 base v0.28.0 @ {SHA} by author (comment 43)")
+    )
     runs(gh, [], [foreign])
     control.command()
     assert "accepted" in reply(gh).lower()
@@ -820,7 +838,13 @@ def test_retry_uses_newest_run_and_paginates_jobs_and_artifacts():
     assert not any("/actions/runs/99/" in c[1] for c in gh.calls)
 
 
-INPUTS = {"pr_number": "7", "head_sha": SHA, "requester": "author", "comment_id": "42"}
+INPUTS = {
+    "pr_number": "7",
+    "head_sha": SHA,
+    "base_ref": "v0.28.0",
+    "requester": "author",
+    "comment_id": "42",
+}
 
 
 def executor_setup(inputs=None, needs=None):
@@ -886,7 +910,7 @@ def test_validate_sets_running_for_expected_sha_and_attempt():
         {"head": {"sha": OLD}},
         {"state": "closed"},
         {"draft": True},
-        {"base": {"repo": {"full_name": "wrong/repo"}}},
+        {"base": {"ref": "v0.28.0", "repo": {"full_name": "wrong/repo"}}},
         {"labels": []},
     ],
 )
@@ -1334,7 +1358,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 590
+    assert len(source.splitlines()) <= 610
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1447,6 +1471,7 @@ def test_lifecycle_cancels_superseded_head_but_keeps_current_run():
             run(100, sha=OLD, status="in_progress", conclusion=None),
         ],
     )
+    gh.add("GET", ROOT + "/pulls/7", PR)
     permission(gh)
     gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
     gh.add("POST", ROOT + f"/statuses/{OLD}", {})
@@ -1465,6 +1490,70 @@ def test_lifecycle_cancels_current_run_after_pr_closes():
     }
     control, gh, _ = make_controller(event)
     runs(gh, [run(status="in_progress", conclusion=None)])
+    gh.add("GET", ROOT + "/pulls/7", pr)
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
+    gh.add("POST", ROOT + f"/statuses/{SHA}", {})
+    lifecycle_module().run(control)
+    assert len(gh.writes("/actions/runs/100/cancel")) == 1
+    assert states(gh) == ["error"]
+
+
+def test_retry_rechecks_live_base_before_native_rerun():
+    control, gh, _ = retry_setup(
+        jobs=[{"name": "PPU wheel build", "conclusion": "failure"}]
+    )
+    retargeted = {
+        **PR,
+        "base": {"ref": "v0.27.0", "repo": {"full_name": REPO}},
+    }
+    gh.add("GET", ROOT + "/pulls/7", PR, retargeted)
+    control.command()
+    assert not gh.writes("/rerun-failed-jobs")
+    assert "head or base changed" in reply(gh)
+    assert reactions(gh)[-1] == "-1"
+
+
+def test_delayed_lifecycle_event_uses_live_pr_before_cancelling():
+    stale_pr = {**PR, "head": {**PR["head"], "sha": OLD}}
+    event = {
+        "action": "synchronize",
+        "repository": {"default_branch": "main"},
+        "pull_request": stale_pr,
+    }
+    control, gh, _ = make_controller(event)
+    runs(gh, [run(status="in_progress", conclusion=None)])
+    gh.add("GET", ROOT + "/pulls/7", PR)
+    permission(gh)
+    lifecycle_module().run(control)
+    assert not gh.writes("/actions/runs/100/cancel")
+
+
+def test_lifecycle_cancels_same_sha_run_for_old_base():
+    old_base = {
+        **PR,
+        "base": {"ref": "v0.26.0", "repo": {"full_name": REPO}},
+    }
+    new_base = {
+        **PR,
+        "base": {"ref": "v0.27.0", "repo": {"full_name": REPO}},
+    }
+    event = {
+        "action": "edited",
+        "repository": {"default_branch": "main"},
+        "pull_request": old_base,
+    }
+    control, gh, _ = make_controller(event)
+    runs(
+        gh,
+        [
+            run(
+                base_ref="v0.26.0",
+                status="in_progress",
+                conclusion=None,
+            )
+        ],
+    )
+    gh.add("GET", ROOT + "/pulls/7", new_base)
     gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
     gh.add("POST", ROOT + f"/statuses/{SHA}", {})
     lifecycle_module().run(control)

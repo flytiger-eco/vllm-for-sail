@@ -64,6 +64,7 @@ def test_executor_is_manual_and_serialized_per_pr():
     assert set(config[True]["workflow_dispatch"]["inputs"]) == {
         "pr_number",
         "head_sha",
+        "base_ref",
         "requester",
         "comment_id",
     }
@@ -130,6 +131,8 @@ def test_build_checks_out_exact_head_and_names_retry_artifact():
     }
     job = config["jobs"]["build-wheel"]
     assert job["name"] == "PPU wheel build"
+    assert "github.event_name == 'workflow_dispatch'" in job["if"]
+    assert "github.event.repository.default_branch" in job["if"]
     checkout = checkouts(job)[0]
     assert checkout["with"]["ref"] == HEAD_SHA
     assert checkout["with"]["persist-credentials"] is False
@@ -153,6 +156,8 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
         config = workflow(f"ppu-{area}-pr.yml")
         assert config["permissions"] == {"contents": "read", "actions": "read"}
         job = next(iter(config["jobs"].values()))
+        assert "github.event_name == 'workflow_dispatch'" in job["if"]
+        assert "github.event.repository.default_branch" in job["if"]
         assert job["runs-on"] == "k8s-runner-group-cpu-flytiger"
         checkout = checkouts(job)[0]
         assert checkout["with"]["ref"] == HEAD_SHA
@@ -169,6 +174,7 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
 def test_lightweight_checks_treat_pr_content_as_data_only():
     config = workflow("pr-light-checks.yml")
     assert set(config[True]) == {"pull_request_target"}
+    assert "edited" in config[True]["pull_request_target"]["types"]
     jobs = config["jobs"]
     assert set(jobs) == {"source-check", "secret-scan"}
     assert jobs["source-check"]["outputs"]["repository"] == (

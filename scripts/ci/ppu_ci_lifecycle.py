@@ -11,7 +11,11 @@ from .ppu_ci_command import WORKFLOW, Controller, GitHub, Rejected, parse_title
 
 def run_is_eligible(control, run, pr):
     identity = parse_title(run.get("display_title", ""))
-    if not identity or identity[2] != (pr.get("head") or {}).get("sha"):
+    if (
+        not identity
+        or identity[2] != (pr.get("head") or {}).get("sha")
+        or identity[5] != (pr.get("base") or {}).get("ref")
+    ):
         return False
     try:
         control.authorize(pr, identity[3])
@@ -40,7 +44,15 @@ def active_executor_runs(control):
 def run(control):
     event_pr = control.event.get("pull_request")
     if event_pr:
-        candidates = [(item, event_pr) for item in control.find_runs(event_pr)]
+        try:
+            live_pr = control.api("GET", f"/pulls/{event_pr['number']}")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            live_pr = None
+        candidates = [
+            (item, live_pr) for item in control.find_runs(event_pr, match_base=False)
+        ]
     else:
         prs = {}
         candidates = []

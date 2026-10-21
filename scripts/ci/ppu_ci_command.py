@@ -44,25 +44,27 @@ def valid_login(value):
 def parse_title(title):
     parts = title.split()
     if (
-        len(parts) != 9
+        len(parts) != 11
         or parts[:2] != ["PPU", "PR"]
         or not parts[2].startswith("#")
-        or parts[3] != "@"
-        or parts[5] != "by"
-        or parts[7] != "(comment"
-        or not parts[8].endswith(")")
+        or parts[3] != "base"
+        or parts[5] != "@"
+        or parts[7] != "by"
+        or parts[9] != "(comment"
+        or not parts[10].endswith(")")
     ):
         return None
-    number, sha = parts[2][1:], parts[4]
-    login, comment = parts[6], parts[8][:-1]
+    number, base_ref, sha = parts[2][1:], parts[4], parts[6]
+    login, comment = parts[8], parts[10][:-1]
     if not (
         positive_integer(number)
+        and base_ref in SUPPORTED_BASES
         and valid_sha(sha)
         and valid_login(login)
         and positive_integer(comment)
     ):
         return None
-    return title, number, sha, login, comment
+    return title, number, sha, login, comment, base_ref
 
 
 def bot_owned(item):
@@ -253,7 +255,7 @@ class Controller:
         attempt = self.env.get("GITHUB_RUN_ATTEMPT", "1")
         return f"{self.url}/actions/runs/{run_id}/attempts/{attempt}"
 
-    def find_runs(self, pr, head_sha=None):
+    def find_runs(self, pr, head_sha=None, match_base=True):
         found = []
         for run in self.pages(
             f"/actions/workflows/{WORKFLOW}/runs",
@@ -267,6 +269,7 @@ class Controller:
                 title
                 and int(title[1]) == pr["number"]
                 and (head_sha is None or title[2] == head_sha)
+                and (not match_base or title[5] == pr["base"]["ref"])
                 and run.get("path") == f".github/workflows/{WORKFLOW}"
                 and run.get("head_branch") == self.default_branch
                 and run.get("repository", {}).get("full_name") == self.repo
@@ -385,6 +388,7 @@ class Controller:
                 "inputs": {
                     "pr_number": str(pr["number"]),
                     "head_sha": sha,
+                    "base_ref": pr["base"]["ref"],
                     "requester": login,
                     "comment_id": str(cid),
                 },
@@ -450,6 +454,11 @@ class Controller:
             for a in self.pages(path + "/artifacts", "artifacts")
         ):
             raise Rejected("Wheel artifact missing or expired; use /ci run.")
+        identity = parse_title(run["display_title"])
+        fresh = self.api("GET", f"/pulls/{pr['number']}")
+        if fresh["head"]["sha"] != identity[2] or fresh["base"]["ref"] != identity[5]:
+            raise Rejected("PR head or base changed; use /ci run again.")
+        self.authorize(fresh, login)
         # Native retry can reuse successful validate; report depends on failed ppu.
         self.launch(
             pr["head"]["sha"],
@@ -491,6 +500,7 @@ class Controller:
         validators = dict(
             pr_number=positive_integer,
             head_sha=valid_sha,
+            base_ref=lambda value: value in SUPPORTED_BASES,
             requester=valid_login,
             comment_id=positive_integer,
         )
@@ -505,6 +515,8 @@ class Controller:
         pr = self.api("GET", f"/pulls/{inputs['pr_number']}")
         if pr["head"]["sha"] != inputs["head_sha"]:
             raise Rejected("PR head changed; use /ci run again.")
+        if pr["base"]["ref"] != inputs["base_ref"]:
+            raise Rejected("PR base changed; use /ci run again.")
         self.authorize(pr, inputs["requester"])
         output = self.env.get("GITHUB_OUTPUT")
         if output:

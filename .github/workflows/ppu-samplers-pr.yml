@@ -50,7 +50,10 @@ jobs:
   ppu-samplers-test:
     # fork PR 不进 PPU worker Pod（设备访问 +
     # NAS 挂载 + artifactory 凭证，不能被外部 PR 的代码驱动）
-    if: github.repository == 'flytiger-eco/vllm-for-sail'
+    if: >-
+      github.repository == 'flytiger-eco/vllm-for-sail' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
