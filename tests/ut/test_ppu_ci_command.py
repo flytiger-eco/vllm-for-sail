@@ -535,7 +535,7 @@ def test_successful_dispatch_uses_default_ref_and_exact_inputs():
     status = gh.writes(f"/statuses/{SHA}")[0][2]
     assert status == {
         "state": "pending",
-        "context": "PPU CI",
+        "context": "PPU CI / v0.28.0",
         "description": "Queued by @maintainer",
         "target_url": f"https://github.example/{REPO}/actions/runs/900/attempts/2",
     }
@@ -657,7 +657,7 @@ def test_cancel_all_active_heads_writes_terminal_status_on_each_title_sha(status
         status = gh.writes(f"/statuses/{sha}")[0]
         assert status[2] == {
             "state": "error",
-            "context": "PPU CI",
+            "context": "PPU CI / v0.28.0",
             "description": "Cancelled by @maintainer",
             "target_url": control.execution_url,
         }
@@ -898,7 +898,7 @@ def test_validate_sets_running_for_expected_sha_and_attempt():
     control.validate()
     status = gh.writes(f"/statuses/{SHA}")[0][2]
     assert status["state"] == "pending"
-    assert status["context"] == "PPU CI"
+    assert status["context"] == "PPU CI / v0.28.0"
     assert status["description"] == "Running (attempt 2)"
     assert status["target_url"].endswith("/900/attempts/2")
     assert all(c[0] == "GET" or "/statuses/" in c[1] for c in gh.calls)
@@ -948,7 +948,7 @@ def test_report_mapping_and_finishes_old_sha_without_reauthorization(
     control.report()
     status = gh.writes(f"/statuses/{SHA}")[0][2]
     assert status["state"] == state
-    assert status["context"] == "PPU CI"
+    assert status["context"] == "PPU CI / v0.28.0"
     assert description in status["description"] and "attempt 2" in status["description"]
     assert status["target_url"].endswith("/900/attempts/2")
     assert MARKER in reply(gh)
@@ -1559,3 +1559,31 @@ def test_lifecycle_cancels_same_sha_run_for_old_base():
     lifecycle_module().run(control)
     assert len(gh.writes("/actions/runs/100/cancel")) == 1
     assert states(gh) == ["error"]
+
+
+def test_status_context_is_scoped_to_release_branch():
+    control, gh, _ = make_controller()
+    gh.add("POST", ROOT + f"/statuses/{SHA}", {})
+    control.status(SHA, "v0.26.0", "success", "Passed")
+    payload = gh.writes(f"/statuses/{SHA}")[0][2]
+    assert payload["context"] == "PPU CI / v0.26.0"
+
+
+def test_cancel_includes_active_runs_from_previous_base():
+    old_run = run(
+        base_ref="v0.26.0",
+        status="in_progress",
+        conclusion=None,
+    )
+    control, gh, _ = command_setup("/ci cancel", existing=[old_run])
+    current = {
+        **PR,
+        "base": {"ref": "v0.27.0", "repo": {"full_name": REPO}},
+    }
+    gh.add("GET", ROOT + "/pulls/7", current)
+    gh.add("POST", ROOT + "/actions/runs/100/cancel", {})
+    gh.add("POST", ROOT + f"/statuses/{SHA}", {})
+    control.command()
+    assert len(gh.writes("/actions/runs/100/cancel")) == 1
+    payload = gh.writes(f"/statuses/{SHA}")[0][2]
+    assert payload["context"] == "PPU CI / v0.26.0"

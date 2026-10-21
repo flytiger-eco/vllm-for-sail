@@ -290,17 +290,17 @@ class Controller:
         path = f"/issues/comments/{comment_id}/reactions"
         best_effort(lambda: self.api("POST", path, {"content": content}))
 
-    def status(self, sha, state, description):
+    def status(self, sha, base_ref, state, description):
         payload = dict(
             state=state,
-            context="PPU CI",
+            context=f"PPU CI / {base_ref}",
             description=description[:140],
             target_url=self.execution_url,
         )
         self.api("POST", f"/statuses/{sha}", payload)
 
-    def launch(self, sha, description, path, data=None, fallback=None):
-        self.status(sha, "pending", description)
+    def launch(self, sha, base_ref, description, path, data=None, fallback=None):
+        self.status(sha, base_ref, "pending", description)
         try:
             try:
                 self.api("POST", path, data)
@@ -309,7 +309,7 @@ class Controller:
                     raise
                 self.api("POST", fallback)
         except Exception as exc:
-            self.status(sha, "error", "CI request failed")
+            self.status(sha, base_ref, "error", "CI request failed")
             if isinstance(exc, urllib.error.HTTPError):
                 raise Rejected(f"CI request failed (HTTP {exc.code}).") from exc
             raise
@@ -381,6 +381,7 @@ class Controller:
             )
         self.launch(
             sha,
+            pr["base"]["ref"],
             f"Queued by @{login}",
             f"/actions/workflows/{WORKFLOW}/dispatches",
             {
@@ -416,13 +417,13 @@ class Controller:
             if exc.code not in {409, 422}:
                 raise
             return False
-        sha = parse_title(run["display_title"])[2]
-        self.status(sha, "error", description)
+        identity = parse_title(run["display_title"])
+        self.status(identity[2], identity[5], "error", description)
         return True
 
     def cancel(self, pr, login):
         links = []
-        for run in self.find_runs(pr):
+        for run in self.find_runs(pr, match_base=False):
             if run["status"] != "completed" and self.cancel_run(
                 run, f"Cancelled by @{login}"
             ):
@@ -461,7 +462,8 @@ class Controller:
         self.authorize(fresh, login)
         # Native retry can reuse successful validate; report depends on failed ppu.
         self.launch(
-            pr["head"]["sha"],
+            fresh["head"]["sha"],
+            fresh["base"]["ref"],
             f"Retry requested by @{login}",
             path + "/rerun-failed-jobs",
             fallback=path + "/rerun",
@@ -524,6 +526,7 @@ class Controller:
                 stream.write(f"base_ref={pr['base']['ref']}\n")
         self.status(
             inputs["head_sha"],
+            inputs["base_ref"],
             "pending",
             f"Running (attempt {self.env.get('GITHUB_RUN_ATTEMPT', '1')})",
         )
@@ -548,7 +551,7 @@ class Controller:
             )
             state, description = "failure", f"{stage} failed"
         description += f" (attempt {self.env.get('GITHUB_RUN_ATTEMPT', '1')})"
-        self.status(inputs["head_sha"], state, description)
+        self.status(inputs["head_sha"], inputs["base_ref"], state, description)
 
         def comment():
             number, cid = inputs["pr_number"], inputs["comment_id"]

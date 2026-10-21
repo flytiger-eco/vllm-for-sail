@@ -171,20 +171,28 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
         assert action.endswith("@06c8ee7cadaae2086db4977e571b19f461653f16")
 
 
-def test_lightweight_checks_treat_pr_content_as_data_only():
+def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
     config = workflow("pr-light-checks.yml")
     assert set(config[True]) == {"pull_request_target"}
     assert "edited" in config[True]["pull_request_target"]["types"]
     jobs = config["jobs"]
     assert set(jobs) == {"source-check", "secret-scan"}
-    assert jobs["source-check"]["outputs"]["repository"] == (
-        "${{ steps.source.outputs.repository }}"
-    )
+    source = jobs["source-check"]
+    assert source["permissions"] == {"pull-requests": "read"}
+    assert source["outputs"] == {
+        "eligible": "${{ steps.source.outputs.eligible }}",
+        "repository": "${{ steps.source.outputs.repository }}",
+        "head_sha": "${{ steps.source.outputs.head_sha }}",
+        "base_sha": "${{ steps.source.outputs.base_sha }}",
+    }
+    source_step = source["steps"][0]
+    assert source_step["uses"].startswith("actions/github-script@")
+    assert "github.rest.pulls.get" in source_step["with"]["script"]
     checkout = checkouts(jobs["secret-scan"])[0]
     assert checkout["with"]["repository"] == (
         "${{ needs.source-check.outputs.repository }}"
     )
-    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+    assert checkout["with"]["ref"] == "${{ needs.source-check.outputs.head_sha }}"
     assert checkout["with"]["persist-credentials"] is False
     assert jobs["secret-scan"]["permissions"] == {"contents": "read"}
     assert all("run" not in step for step in jobs["secret-scan"]["steps"])
