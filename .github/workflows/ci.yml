@@ -1,11 +1,12 @@
 # PR checks and PPU CI, with shared gates from flytiger-eco/.github.
 #
 # Checks: precheck -> (smoke-test + ai-code-review) -> human-review
-# PPU: authorize(run-ci) + precheck -> build-wheel
-#      build-wheel + smoke-test -> (attention + samplers + benchmarks) -> Full CI
+# Build: precheck -> build-wheel (PR events only)
+# PPU: authorize(run-ci) + build-wheel + smoke-test
+#      -> (attention + samplers + benchmarks) -> Full CI
 #
-# The `run-ci` label enables PPU CI; approvals rerun checks only.
-# Full CI excludes AI and human reviews; their checks report separately.
+# PRs build wheels automatically; `run-ci` enables PPU tests.
+# Approvals rerun checks only; Full CI excludes AI and human reviews.
 
 name: CI Pipeline
 
@@ -61,9 +62,9 @@ jobs:
           fi
           echo "run=$run" | tee -a "$GITHUB_OUTPUT"
           if [[ "$run" == true ]]; then
-            echo "✅ PPU CI authorized for ${HEAD_SHA:0:12} by the \`run-ci\` label." >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ PPU tests authorized for ${HEAD_SHA:0:12} by the \`run-ci\` label." >> "$GITHUB_STEP_SUMMARY"
           else
-            msg="PPU CI not started for ${HEAD_SHA:0:12}: add the \`run-ci\` label."
+            msg="PPU tests not started for ${HEAD_SHA:0:12}: add the \`run-ci\` label."
             echo "::notice::$msg"
             echo "⏸️ $msg" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -106,26 +107,29 @@ jobs:
 
   build-wheel:
     name: Build PPU Wheel
-    needs: [authorize, precheck]
-    if: needs.authorize.outputs.run == 'true'
+    needs: precheck
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/build-ppu-wheel.yml
 
   ppu-attention:
-    needs: [smoke-test, build-wheel]
+    needs: [authorize, smoke-test, build-wheel]
+    if: needs.authorize.outputs.run == 'true'
     uses: ./.github/workflows/test-area-ppu-attention.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-samplers:
-    needs: [smoke-test, build-wheel]
+    needs: [authorize, smoke-test, build-wheel]
+    if: needs.authorize.outputs.run == 'true'
     uses: ./.github/workflows/test-area-ppu-samplers.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
     secrets: inherit
 
   ppu-benchmarks:
-    needs: [smoke-test, build-wheel]
+    needs: [authorize, smoke-test, build-wheel]
+    if: needs.authorize.outputs.run == 'true'
     uses: ./.github/workflows/test-area-ppu-benchmarks.yml
     with:
       wheel_artifact: ${{ needs.build-wheel.outputs.artifact_name }}
