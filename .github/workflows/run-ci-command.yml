@@ -35,13 +35,14 @@ jobs:
           python-version: "3.12"
       - name: Handle PPU CI command
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
         run: python scripts/ci/ppu_ci_command.py command
       - name: Report unexpected controller failure
         if: failure()
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          github-token: ${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}
           script: |
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await github.rest.issues.createComment({

@@ -49,7 +49,7 @@ jobs:
       - name: Validate PPU CI request
         id: validate
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
         run: python scripts/ci/ppu_ci_command.py validate
 
@@ -125,6 +125,6 @@ jobs:
       - name: Report PPU CI result
         if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}
           NEEDS: ${{ toJSON(needs) }}
         run: python scripts/ci/ppu_ci_command.py report

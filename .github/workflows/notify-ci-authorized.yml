@@ -31,6 +31,6 @@ jobs:
           python-version: "3.12"
       - name: Explain PPU CI commands
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
         run: python scripts/ci/ppu_ci_command.py notify
