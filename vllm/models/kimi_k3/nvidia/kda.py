@@ -201,8 +201,6 @@ def _flashkda_prefill(
         from pla.prefill.flashkdapro import flashkda_fwd
 
         logger.info_once("Using PLA KDA kernel: flashkda_fwd")
-        out = torch.empty(v.shape, dtype=v.dtype, device=v.device)
-        final_state = torch.empty_like(initial_state)
         B, T, H, D = q.shape
         flashkda_fwd(
             q=q.view(B * T, H, D),
@@ -466,9 +464,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
             H, D = self.local_num_heads, self.head_dim
-            import vllm._flashkda_C  # noqa: F401
+            if current_platform.is_ppu():
+                # The PLA flashkda_fwd path ignores the workspace buffer,
+                # and vllm._flashkda_C is not built for PPU.
+                workspace_size = 0
+            else:
+                import vllm._flashkda_C  # noqa: F401
 
-            workspace_size = torch.ops._flashkda_C.get_workspace_size(T, H, N)
+                workspace_size = torch.ops._flashkda_C.get_workspace_size(T, H, N)
             self._flashkda_buffer_specs = (
                 ((1, T, H, D), self.model_config.dtype),
                 ((N, H, D, D), self.get_state_dtype()[1]),
