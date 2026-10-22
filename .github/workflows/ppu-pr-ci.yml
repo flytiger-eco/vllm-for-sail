@@ -1,0 +1,130 @@
+name: PPU PR CI
+run-name: "PPU PR #${{ inputs.pr_number }} base ${{ inputs.base_ref }} @ ${{ inputs.head_sha }} by ${{ inputs.requester }} (comment ${{ inputs.comment_id }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      base_ref:
+        required: true
+        type: string
+      requester:
+        required: true
+        type: string
+      comment_id:
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ppu-pr-ci-${{ inputs.pr_number }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      base_ref: ${{ steps.validate.outputs.base_ref }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+      - name: Validate PPU CI request
+        id: validate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+        run: python scripts/ci/ppu_ci_command.py validate
+
+  build:
+    needs: validate
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ppu-build-pr.yml
+    with:
+      pr_head_sha: ${{ inputs.head_sha }}
+      base_ref: ${{ needs.validate.outputs.base_ref }}
+
+  attention:
+    needs: [validate, build]
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ppu-attention-pr.yml
+    with:
+      pr_head_sha: ${{ inputs.head_sha }}
+      wheel_artifact: ${{ needs.build.outputs.artifact_name }}
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+
+  samplers:
+    needs: [validate, build]
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ppu-samplers-pr.yml
+    with:
+      pr_head_sha: ${{ inputs.head_sha }}
+      wheel_artifact: ${{ needs.build.outputs.artifact_name }}
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+
+  benchmarks:
+    needs: [validate, build]
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ppu-benchmarks-pr.yml
+    with:
+      pr_head_sha: ${{ inputs.head_sha }}
+      wheel_artifact: ${{ needs.build.outputs.artifact_name }}
+    secrets:
+      PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
+      PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+
+  report:
+    needs: [validate, build, attention, samplers, benchmarks]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      statuses: write
+      issues: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          python-version: "3.12"
+      - name: Report PPU CI result
+        if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: python scripts/ci/ppu_ci_command.py report

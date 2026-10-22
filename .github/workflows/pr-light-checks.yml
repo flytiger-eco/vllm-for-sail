@@ -1,0 +1,81 @@
+name: PR lightweight checks
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions: {}
+
+concurrency:
+  group: pr-light-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  source-check:
+    name: Validate live PR source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.source.outputs.eligible }}
+      repository: ${{ steps.source.outputs.repository }}
+      head_sha: ${{ steps.source.outputs.head_sha }}
+      base_sha: ${{ steps.source.outputs.base_sha }}
+      base_ref: ${{ steps.source.outputs.base_ref }}
+    steps:
+      - name: Read the current pull request
+        id: source
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const {data: pr} = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const supported = new Set(['v0.26.0', 'v0.27.0', 'v0.28.0']);
+            core.setOutput('eligible', supported.has(pr.base.ref) ? 'true' : 'false');
+            if (!pr.head.repo?.full_name) {
+              core.setFailed('The pull request source repository is unavailable.');
+              return;
+            }
+            core.setOutput('repository', pr.head.repo.full_name);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('base_ref', pr.base.ref);
+
+  secret-scan:
+    name: Pre-check / Secret Scan (TruffleHog)
+    needs: source-check
+    if: needs.source-check.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # PR content is scanned as data only. No PR-controlled program is run in
+      # this privileged pull_request_target workflow.
+      - name: Checkout the current PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ needs.source-check.outputs.repository }}
+          ref: ${{ needs.source-check.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Fetch the target branch commit
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ needs.source-check.outputs.base_ref }}
+          BASE_SHA: ${{ needs.source-check.outputs.base_sha }}
+        run: |
+          git fetch --no-tags \
+            "https://github.com/${BASE_REPOSITORY}.git" \
+            "refs/heads/${BASE_REF}:refs/remotes/upstream/${BASE_REF}"
+          git cat-file -e "${BASE_SHA}^{commit}"
+      - name: TruffleHog OSS secret scan
+        uses: trufflesecurity/trufflehog@e7a8d17d2f726cf414310a625b55cca7dc9c898e
+        with:
+          base: ${{ needs.source-check.outputs.base_sha }}
+          head: ${{ needs.source-check.outputs.head_sha }}
+          extra_args: --results=verified,unknown,unverified

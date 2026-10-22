@@ -1,0 +1,50 @@
+name: Cancel legacy automatic PPU CI
+
+on:
+  workflow_run:
+    workflows: [CI Pipeline]
+    types: [requested, in_progress]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    if: >-
+      github.repository == 'flytiger-eco/vllm-for-sail' &&
+      contains(fromJSON('["pull_request", "pull_request_review"]'),
+      github.event.workflow_run.event)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel the automatic run
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const run_id = context.payload.workflow_run.id;
+            for (let attempt = 1; attempt <= 6; attempt++) {
+              try {
+                await github.rest.actions.cancelWorkflowRun({
+                  ...context.repo,
+                  run_id,
+                });
+                core.info(`Cancellation requested for legacy run ${run_id}.`);
+                return;
+              } catch (error) {
+                if (![409, 422].includes(error.status)) {
+                  throw error;
+                }
+                const {data: run} = await github.rest.actions.getWorkflowRun({
+                  ...context.repo,
+                  run_id,
+                });
+                if (run.status === 'completed') {
+                  core.info(`Legacy run ${run_id} is already completed.`);
+                  return;
+                }
+                if (attempt === 6) {
+                  throw error;
+                }
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              }
+            }
