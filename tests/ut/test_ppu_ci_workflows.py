@@ -269,3 +269,29 @@ def test_legacy_pipeline_is_disabled_after_default_branch_merge():
     script = job["steps"][0]["with"]["script"]
     assert "disableWorkflow" in script
     assert "workflow_id: 349122804" in script
+
+
+def test_write_control_jobs_use_configured_pat_with_github_token_fallback():
+    expected = "${{ secrets.CI_BRANCH_UPDATE_TOKEN || github.token }}"
+    cases = [
+        ("run-ci-command.yml", "command", "Handle PPU CI command"),
+        ("notify-ci-authorized.yml", "notify", "Explain PPU CI commands"),
+        ("ppu-pr-ci.yml", "validate", "Validate PPU CI request"),
+        ("ppu-pr-ci.yml", "report", "Report PPU CI result"),
+        (
+            "cancel-obsolete-ppu-ci.yml",
+            "lifecycle",
+            "Cancel ineligible or superseded PPU runs",
+        ),
+    ]
+    for workflow_name, job_id, step_name in cases:
+        job = workflow(workflow_name)["jobs"][job_id]
+        step = next(item for item in job["steps"] if item.get("name") == step_name)
+        assert step["env"]["GITHUB_TOKEN"] == expected
+    command = workflow("run-ci-command.yml")["jobs"]["command"]
+    reporter = next(
+        item
+        for item in command["steps"]
+        if item.get("name") == "Report unexpected controller failure"
+    )
+    assert reporter["with"]["github-token"] == expected
