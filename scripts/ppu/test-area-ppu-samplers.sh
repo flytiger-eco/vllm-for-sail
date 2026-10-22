@@ -2,8 +2,8 @@
 # ==============================================================================
 # scripts/ppu/test-area-ppu-samplers.sh - PPU Samplers test runner (GitHub Actions)
 # ------------------------------------------------------------------------------
-# 由 main 上的 .github/workflows/ppu-samplers-pr.yml 调用。
-# 在 PPU Pod 内执行，工作目录为 /workspace/source。
+# Called by .github/workflows/ppu-samplers-pr.yml on main.
+# Runs inside the PPU Pod with /workspace/source as the working directory.
 #
 # Environment variables:
 #   TEST_MODE   all (default) | single - this area has no multi stage

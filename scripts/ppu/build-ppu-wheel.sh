@@ -2,8 +2,8 @@
 # Build the PPU wheel: install the SDK and PPU torch inside the PPU build
 # container, then run setup.py bdist_wheel.
 #
-# 由 main 上的 .github/workflows/ppu-build-pr.yml 调用。
-# 此脚本与待构建源码均取自当前 PR 的精确 head SHA。
+# Called by .github/workflows/ppu-build-pr.yml on main.
+# This script and the source to build come from the PR's exact head SHA.
 set -ex
 
 # CUDA_VERSION is $3 and is used unconditionally below, so require at least

@@ -14,10 +14,10 @@ After upstream renames or deletes a file:
 - A directly listed test file that is missing: pytest reports an error, which
   is an explicit failure and less of a problem.
 
-此静态检查无需 PPU 设备，可在本地维护测试路径时手动执行。
-旧自动流水线已移除，本脚本不再自动作为 PR 门禁运行。
+This static check needs no PPU device and can be run locally to validate paths.
+It no longer runs automatically as a PR gate after the legacy pipeline removal.
 
-用法：.venv/bin/python scripts/ppu/check-exclusions.py [--quiet]
+Usage: .venv/bin/python scripts/ppu/check-exclusions.py [--quiet]
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ SCRIPT_GLOB = "scripts/ppu/test-area-ppu-*.sh"
 
 # The two pytest flags that take a path; both --ignore=<path> and
 # --ignore <path> forms must be supported.
-# 仓库禁止 import re；此检查仅使用标准库，避免为本地校验安装 regex。
+# The repo bans import re; keep this check stdlib-only instead of requiring regex.
 PATH_FLAGS = ("--ignore", "--deselect")
 
 
