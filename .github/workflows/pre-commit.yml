@@ -61,28 +61,30 @@ jobs:
         PUSH_BEFORE_SHA: ${{ github.event.before }}
       run: |
         to_ref=$(git rev-parse HEAD)
+        from_ref=""
         if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
           [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "$(git rev-parse HEAD^2)" == "$PR_HEAD_SHA" ]] || exit 1
           from_ref=$(git rev-parse HEAD^1)
         elif [[ "$PUSH_BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
-            git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null; then
+            git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null &&
+            git merge-base --is-ancestor "$PUSH_BEFORE_SHA" "$to_ref"; then
           from_ref=$PUSH_BEFORE_SHA
-        else
-          # New branch or force push: fall back to the pushed commit's first parent.
-          from_ref=$(git rev-parse HEAD^1)
         fi
-        args="--from-ref $from_ref --to-ref $to_ref"
-        config_changes=$(git diff --name-only --no-renames "$from_ref" "$to_ref" -- \
-          .pre-commit-config.yaml .github/actionlint.yaml .github/actionlint.yml \
-          requirements/lint.txt tools/pre_commit/ tools/generate_versions_json.py \
-          ':(glob)**/pyproject.toml' ':(glob)**/ruff.toml' ':(glob)**/.ruff.toml' \
-          ':(glob)**/mypy.ini' ':(glob)**/.mypy.ini' ':(glob)**/setup.cfg' \
-          ':(glob)**/.clang-format' ':(glob)**/.clang-format-ignore' \
-          ':(glob)**/.shellcheckrc' ':(glob)**/.markdownlint*' \
-          ':(glob)**/typos.toml' ':(glob)**/.typos.toml' ':(glob)**/_typos.toml')
-        if [[ -n "$config_changes" ]]; then
-          args=--all-files
+        args=--all-files
+        if [[ -n "$from_ref" ]]; then
+          args="--from-ref $from_ref --to-ref $to_ref"
+          config_changes=$(git diff --name-only --no-renames "$from_ref" "$to_ref" -- \
+            .pre-commit-config.yaml .github/actionlint.yaml .github/actionlint.yml \
+            requirements/lint.txt tools/pre_commit/ tools/generate_versions_json.py \
+            ':(glob)**/pyproject.toml' ':(glob)**/ruff.toml' ':(glob)**/.ruff.toml' \
+            ':(glob)**/mypy.ini' ':(glob)**/.mypy.ini' ':(glob)**/setup.cfg' \
+            ':(glob)**/.clang-format' ':(glob)**/.clang-format-ignore' \
+            ':(glob)**/.shellcheckrc' ':(glob)**/.markdownlint*' \
+            ':(glob)**/typos.toml' ':(glob)**/.typos.toml' ':(glob)**/_typos.toml')
+          if [[ -n "$config_changes" ]]; then
+            args=--all-files
+          fi
         fi
         echo "args=$args" >> "$GITHUB_OUTPUT"
         echo "pre-commit scope: $args"
