@@ -50,6 +50,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Select pre-commit scope
+      id: scope
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          echo "args=--from-ref $merge_base --to-ref $HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "PR incremental checks: $merge_base -> $HEAD_SHA"
+        else
+          echo "args=--all-files" >> "$GITHUB_OUTPUT"
+          echo "Full repository checks"
+        fi
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
@@ -59,4 +79,4 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
-        extra_args: --all-files --hook-stage manual
+        extra_args: ${{ steps.scope.outputs.args }} --hook-stage manual
