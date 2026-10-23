@@ -57,19 +57,28 @@ jobs:
       id: scope
       shell: bash
       env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
+        args=--all-files
         if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
-          echo "args=--from-ref $merge_base --to-ref $HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "PR incremental checks: $merge_base -> $HEAD_SHA"
-        else
-          echo "args=--all-files" >> "$GITHUB_OUTPUT"
-          echo "Full repository checks"
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          merge_sha=$(git rev-parse HEAD)
+          base_sha=$(git rev-parse HEAD^1)
+          [[ "$(git rev-parse HEAD^2)" == "$HEAD_SHA" ]] || exit 1
+          config_changes=$(git diff --name-only --no-renames "$base_sha" "$merge_sha" -- \
+            .pre-commit-config.yaml .github/actionlint.yaml .github/actionlint.yml \
+            requirements/lint.txt tools/pre_commit/ tools/generate_versions_json.py \
+            ':(glob)**/pyproject.toml' ':(glob)**/ruff.toml' ':(glob)**/.ruff.toml' \
+            ':(glob)**/mypy.ini' ':(glob)**/.mypy.ini' ':(glob)**/setup.cfg' \
+            ':(glob)**/.clang-format' ':(glob)**/.clang-format-ignore' \
+            ':(glob)**/.shellcheckrc' ':(glob)**/.markdownlint*' \
+            ':(glob)**/typos.toml' ':(glob)**/.typos.toml' ':(glob)**/_typos.toml')
+          if [[ -z "$config_changes" ]]; then
+            args="--from-ref $base_sha --to-ref $merge_sha"
+          fi
         fi
+        echo "args=$args" >> "$GITHUB_OUTPUT"
+        echo "pre-commit scope: $args"
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
