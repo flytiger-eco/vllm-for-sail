@@ -144,7 +144,7 @@ if not NVTX_PROFILE:
 
         return decorator
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = int(os.environ.get("VLLM_HANDSHAKE_TIMEOUT_MINS", "5"))
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
