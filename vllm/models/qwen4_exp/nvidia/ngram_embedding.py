@@ -31,6 +31,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptQuantConfigBase,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+from vllm.model_executor.layers.quantization.mixed_precision_w4 import (
+    MixedPrecisionW4Config,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
 )
@@ -192,6 +195,26 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             or any(name.startswith(f"{prefix}.shard_") for name in quant_config.ignore)
         ):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        # Task 88103407: mixed_precision_w4 checkpoints keep PLE ngram
+        # embedding tables in BF16 through the quantization `ignore` list.
+        # Route ignored PLE layers (including shard_ children) to the
+        # unquantized embedding method, mirroring the CompressedTensors
+        # branch above.
+        if isinstance(quant_config, MixedPrecisionW4Config):
+            if should_ignore_layer(
+                prefix,
+                ignore=quant_config.ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+            ) or any(
+                name.startswith(f"{prefix}.shard_")
+                for name in quant_config.ignored_layers
+            ):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            raise NotImplementedError(
+                "Qwen4Exp PLE embedding under mixed_precision_w4 requires "
+                "PLE layers to be listed in quantization_config.ignore "
+                f"(prefix={prefix})"
+            )
         if isinstance(quant_config, ModelOptMixedPrecisionConfig):
             if quant_config._resolve_quant_algo(prefix) == "FP8":
                 return Qwen4ExpPLEFp8EmbeddingMethod()
