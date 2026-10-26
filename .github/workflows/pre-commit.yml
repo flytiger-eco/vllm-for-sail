@@ -63,8 +63,16 @@ jobs:
         to_ref=$(git rev-parse HEAD)
         from_ref=""
         if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-          [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "$(git rev-parse HEAD^2)" == "$PR_HEAD_SHA" ]] || exit 1
+          if [[ ! "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pull_request event carries no usable head sha ('$PR_HEAD_SHA')"
+            exit 1
+          fi
+          merge_head=$(git rev-parse --verify HEAD^2 2>/dev/null || true)
+          if [[ "$merge_head" != "$PR_HEAD_SHA" ]]; then
+            echo "::error::HEAD^2='${merge_head:-none}' does not match the event head $PR_HEAD_SHA;"
+            echo "::error::this run checked out a different merge commit (stale re-run?). Trigger a new run."
+            exit 1
+          fi
           from_ref=$(git rev-parse HEAD^1)
         elif [[ "$PUSH_BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
             git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null &&
