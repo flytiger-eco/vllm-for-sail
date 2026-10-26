@@ -17,7 +17,7 @@ permissions:
 jobs:
   pre-run-check:
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux, x64, vllm-runners]
+    runs-on: ubuntu-latest
     steps:
     - name: Check PR label and author merge count
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -47,9 +47,47 @@ jobs:
   pre-commit:
     needs: pre-run-check
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
-    runs-on: [self-hosted, linux, x64, vllm-runners]
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Select pre-commit scope
+      id: scope
+      shell: bash
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PUSH_BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        to_ref=$(git rev-parse HEAD)
+        from_ref=""
+        if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$(git rev-parse HEAD^2)" == "$PR_HEAD_SHA" ]] || exit 1
+          from_ref=$(git rev-parse HEAD^1)
+        elif [[ "$PUSH_BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+            git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null &&
+            git merge-base --is-ancestor "$PUSH_BEFORE_SHA" "$to_ref"; then
+          from_ref=$PUSH_BEFORE_SHA
+        fi
+        args=--all-files
+        if [[ -n "$from_ref" ]]; then
+          args="--from-ref $from_ref --to-ref $to_ref"
+          config_changes=$(git diff --name-only --no-renames "$from_ref" "$to_ref" -- \
+            .pre-commit-config.yaml .github/actionlint.yaml .github/actionlint.yml \
+            requirements/lint.txt tools/pre_commit/ tools/generate_versions_json.py \
+            ':(glob)**/pyproject.toml' ':(glob)**/ruff.toml' ':(glob)**/.ruff.toml' \
+            ':(glob)**/mypy.ini' ':(glob)**/.mypy.ini' ':(glob)**/setup.cfg' \
+            ':(glob)**/.clang-format' ':(glob)**/.clang-format-ignore' \
+            ':(glob)**/.shellcheckrc' ':(glob)**/.markdownlint*' \
+            ':(glob)**/typos.toml' ':(glob)**/.typos.toml' ':(glob)**/_typos.toml')
+          if [[ -n "$config_changes" ]]; then
+            args=--all-files
+          fi
+        fi
+        echo "args=$args" >> "$GITHUB_OUTPUT"
+        echo "pre-commit scope: $args"
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
@@ -59,4 +97,4 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
-        extra_args: --all-files --hook-stage manual
+        extra_args: ${{ steps.scope.outputs.args }} --hook-stage manual
