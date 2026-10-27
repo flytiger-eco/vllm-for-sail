@@ -63,6 +63,10 @@ BENCH_SINGLE_ARGS=(
   # Run 38721031031：测试手工构造的 Namespace 缺少 v0.28 新增参数。
   # 上游测试补齐 skip_first_concurrency 后移除此项。
   "--deselect=tests/benchmarks/test_skip_tokenizer_init.py::test_main_async_skip_tokenizer_init_does_not_raise"
+  # 该用例裸跑 `vllm bench startup`，需 Qwen/Qwen3-0.6B 的离线缓存条目；共享 HF 缓存
+  # 条目缺 refs/main 且目录已 No space left on device，CI 内无法补写（run 40481158275）。
+  # 恢复条件：/nas_aisw/datasets/hf_cache/hub/models--Qwen--Qwen3-0.6B/refs/main 存在。
+  "--ignore=tests/benchmarks/test_bench_startup.py"
 )
 
 # ------------------------------------------------------------------------------
