@@ -1,0 +1,319 @@
+name: Release PyPI Nightly Wheels
+
+on:
+  # Run daily at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+  # Triggered by nightly Docker workflow to use same commit. client_payload is
+  # ignored: each job below pins its own maintenance branch.
+  repository_dispatch:
+    types: [nightly-release]
+  # Manual trigger for testing. No commit input — the refs are pinned per job,
+  # so what gets built is decided by the job, not by the run.
+  workflow_dispatch:
+
+# Must differ from release-pypi-ppu-nightly.yml: concurrency groups are
+# repo-wide across workflows, and both share the same cron and ref, so a shared
+# group name would make the two workflows cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+# ----------------------------v0.23.0--------------------------------
+  build-nightly-cu130-matrix-v_0_23_0:
+    if: |
+      github.repository == 'flytiger-eco/vllm-for-sail'
+    # PPU 整机 runner：编译要访问私有 registry 拉 base image、装 PPU_SDK、用
+    # --network=host。GitHub 托管 runner 都不具备，且只有 4 核。
+    # runs-on: [self-hosted, ppu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+        cuda-version: ["13.0"]
+        # build_ppu.sh 目前对 aarch64 直接 exit 1（无 aarch64 base image 与 SDK
+        # 包）。要加 aarch64 需同时补 runner 标签、base image 和 SDK tarball。
+        arch: [x86_64]
+    outputs:
+      nightly_version: ${{ steps.version.outputs.nightly_version }}
+      commit_hash: ${{ steps.version.outputs.commit_hash }}
+      commit_sha: ${{ steps.version.outputs.commit_sha }}
+      build_date: ${{ steps.version.outputs.build_date }}
+    steps:
+      # Self-hosted 构建机跨 job 保留工作区。build_ppu.sh 在容器里以 root 执行
+      # setup.py，遗留的 build/ 与 dist/ 归 root 所有，actions/checkout 清理时
+      # 会在 rmdir 上拿到 EACCES。先用一个一次性 root 容器抹平。
+      - name: Clean workspace (remove root-owned files from prior runs)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" alpine:3 \
+            sh -c 'rm -rf /workspace/..?* /workspace/.[!.]* /workspace/*' || true
+
+      # 顺序不能颠倒：actions/checkout 默认 clean: true，会对它所管理的路径执行
+      # git clean -ffdx。先拉 .ci 再拉根目录，根目录那次会把 .ci 当未跟踪目录删掉。
+      - name: Checkout source (maintenance branch)
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          ref: refs/heads/v0.23.0
+
+      # ref 用 github.workflow_sha（= 承载本 workflow 的那个提交）而不是写死
+      # 'main'：保证脚本和 workflow 严格同源。写 'main' 的话，一轮 run 跑到一半
+      # main 被推了新提交，两个分支的 job 就会用上不同版本的脚本。
+      # 只稀疏拉 scripts 目录，几秒完成，不会把整个仓库再 clone 一遍。
+      # 路径用点开头，避免被 setuptools 的包扫描当成源码目录。
+      - name: Checkout build script from default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci
+          sparse-checkout: .github/workflows/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      # 不需要 actions/setup-python：编译全程在 build_ppu.sh 起的容器里进行，
+      # 宿主只用到 docker / git / bash。
+      - name: Compute nightly version
+        id: version
+        env:
+          TARGET_VERSION: "0.23.0"
+        run: |
+          BUILD_DATE_COMPACT=$(date -u +%Y%m%d)
+          BUILD_DATE_ISO=$(date -u +%Y-%m-%d)
+          COMMIT_SHA=$(git rev-parse HEAD)
+          HASH=$(git rev-parse --short HEAD)
+          NIGHTLY_VERSION="${TARGET_VERSION}.dev${BUILD_DATE_COMPACT}+g${HASH}"
+
+          echo "Nightly version: ${NIGHTLY_VERSION}"
+          {
+            echo "nightly_version=${NIGHTLY_VERSION}"
+            echo "commit_hash=${HASH}"
+            echo "commit_sha=${COMMIT_SHA}"
+            echo "build_date=${BUILD_DATE_ISO}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        env:
+          # setup.py 的 get_vllm_version() 读这个变量覆盖 setuptools_scm 的结果。
+          # 真正的编译在 build_ppu.sh 起的容器里，脚本会用 -e 把它透传进去。
+          VLLM_VERSION_OVERRIDE: ${{ steps.version.outputs.nightly_version }}
+          # setup.py 读的是 MAX_JOBS（envs.MAX_JOBS），不是 BUILD_JOBS——后者是
+          # 别的项目的变量名，设了不起作用。
+          MAX_JOBS: 64
+          NVCC_THREADS: 8
+        run: |
+          bash .ci/.github/workflows/scripts/build_ppu.sh \
+            "0.23.0" \
+            "${{ matrix.python-version }}" \
+            "${{ matrix.cuda-version }}" \
+            "${{ matrix.arch }}"
+
+      - name: Verify wheel version
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.nightly_version }}
+        run: |
+          # 版本覆盖要穿过 workflow → 脚本 → docker -e → setup.py 四层，中间任何
+          # 一环断掉都会静默产出一个 setuptools_scm 推导版本的 wheel，所以按最终
+          # 文件名硬校验。wheel 文件名是
+          # {name}-{version}-{python}-{abi}-{platform}.whl，PEP 440 版本不含
+          # '-'，故第 2 段就是版本。
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::No wheel produced in dist/"
+            exit 1
+          fi
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one wheel, got ${#wheels[@]}: ${wheels[*]}"
+            exit 1
+          fi
+          wheel_version=$(basename "${wheels[0]}" | cut -d- -f2)
+          if [ "$wheel_version" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Built wheel version '$wheel_version' does not match expected '$EXPECTED_VERSION'"
+            exit 1
+          fi
+          echo "Verified: ${wheels[0]}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_23_0
+          path: dist/*.whl
+          if-no-files-found: error
+
+  release-nightly-cu130-matrix-v_0_23_0:
+    permissions:
+      contents: write
+    needs: build-nightly-cu130-matrix-v_0_23_0
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: this job only republishes the artifact built above.
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+          pattern: wheel-*-v0_23_0
+
+      - name: List downloaded wheels
+        run: ls -lh dist/
+
+      - name: Create GitHub Release for nightly wheel
+        uses: softprops/action-gh-release@v2
+        with:
+          # Branch is part of the tag: the two maintenance branches release on the
+          # same schedule, so without it the tags are indistinguishable at a glance.
+          tag_name: nightly-v0.23.0-${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.build_date }}-${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.commit_hash }}
+          # Tag the commit that was actually built, not the one that triggered the
+          # run (which is the default branch head on a schedule).
+          target_commitish: ${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.commit_sha }}
+          name: Nightly Build from branch v0.23.0 ${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.build_date }} (${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.commit_hash }})
+          prerelease: true
+          # Fail loudly instead of publishing an empty release when the glob misses.
+          fail_on_unmatched_files: true
+          body: |
+            Nightly build from branch v0.23.0, commit ${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.commit_hash }}
+            Build date: ${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.build_date }}
+            Version: ${{ needs.build-nightly-cu130-matrix-v_0_23_0.outputs.nightly_version }}
+          files: |
+            dist/*.whl
+
+
+# ----------------------------v0.20.1--------------------------------
+  build-nightly-cu130-matrix-v_0_20_1:
+    if: |
+      github.repository == 'flytiger-eco/vllm-for-sail'
+    # runs-on: [self-hosted, ppu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+        cuda-version: ["13.0"]
+        arch: [x86_64]
+    outputs:
+      nightly_version: ${{ steps.version.outputs.nightly_version }}
+      commit_hash: ${{ steps.version.outputs.commit_hash }}
+      commit_sha: ${{ steps.version.outputs.commit_sha }}
+      build_date: ${{ steps.version.outputs.build_date }}
+    steps:
+      - name: Clean workspace (remove root-owned files from prior runs)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" alpine:3 \
+            sh -c 'rm -rf /workspace/..?* /workspace/.[!.]* /workspace/*' || true
+
+      - name: Checkout source (maintenance branch)
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          ref: refs/heads/v0.20.1
+
+      - name: Checkout build script from default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci
+          sparse-checkout: .github/workflows/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Compute nightly version
+        id: version
+        env:
+          TARGET_VERSION: "0.20.1"
+        run: |
+          BUILD_DATE_COMPACT=$(date -u +%Y%m%d)
+          BUILD_DATE_ISO=$(date -u +%Y-%m-%d)
+          COMMIT_SHA=$(git rev-parse HEAD)
+          HASH=$(git rev-parse --short HEAD)
+          NIGHTLY_VERSION="${TARGET_VERSION}.dev${BUILD_DATE_COMPACT}+g${HASH}"
+
+          echo "Nightly version: ${NIGHTLY_VERSION}"
+          {
+            echo "nightly_version=${NIGHTLY_VERSION}"
+            echo "commit_hash=${HASH}"
+            echo "commit_sha=${COMMIT_SHA}"
+            echo "build_date=${BUILD_DATE_ISO}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        env:
+          VLLM_VERSION_OVERRIDE: ${{ steps.version.outputs.nightly_version }}
+          MAX_JOBS: 64
+          NVCC_THREADS: 8
+        run: |
+          bash .ci/.github/workflows/scripts/build_ppu.sh \
+            "0.20.1" \
+            "${{ matrix.python-version }}" \
+            "${{ matrix.cuda-version }}" \
+            "${{ matrix.arch }}"
+
+      - name: Verify wheel version
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.nightly_version }}
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::No wheel produced in dist/"
+            exit 1
+          fi
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one wheel, got ${#wheels[@]}: ${wheels[*]}"
+            exit 1
+          fi
+          wheel_version=$(basename "${wheels[0]}" | cut -d- -f2)
+          if [ "$wheel_version" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Built wheel version '$wheel_version' does not match expected '$EXPECTED_VERSION'"
+            exit 1
+          fi
+          echo "Verified: ${wheels[0]}"
+
+      # -v0_20_1 后缀把本 job 的产物和 v0.23.0 那个 job 区分开，否则同名会 409。
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-${{ matrix.arch }}-v0_20_1
+          path: dist/*.whl
+          if-no-files-found: error
+
+  release-nightly-cu130-matrix-v_0_20_1:
+    permissions:
+      contents: write
+    needs: build-nightly-cu130-matrix-v_0_20_1
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: this job only republishes the artifact built above.
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+          pattern: wheel-*-v0_20_1
+
+      - name: List downloaded wheels
+        run: ls -lh dist/
+
+      - name: Create GitHub Release for nightly wheel
+        uses: softprops/action-gh-release@v2
+        with:
+          # Branch is part of the tag: the two maintenance branches release on the
+          # same schedule, so without it the tags are indistinguishable at a glance.
+          tag_name: nightly-v0.20.1-${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.build_date }}-${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.commit_hash }}
+          # Tag the commit that was actually built, not the one that triggered the
+          # run (which is the default branch head on a schedule).
+          target_commitish: ${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.commit_sha }}
+          name: Nightly Build from branch v0.20.1 ${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.build_date }} (${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.commit_hash }})
+          prerelease: true
+          # Fail loudly instead of publishing an empty release when the glob misses.
+          fail_on_unmatched_files: true
+          body: |
+            Nightly build from branch v0.20.1, commit ${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.commit_hash }}
+            Build date: ${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.build_date }}
+            Version: ${{ needs.build-nightly-cu130-matrix-v_0_20_1.outputs.nightly_version }}
+          files: |
+            dist/*.whl
