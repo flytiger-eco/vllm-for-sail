@@ -6,7 +6,7 @@ vLLM-for-SAIL Inference Engine
 ---
 *Latest News* 🔥
 
-- [2026/10] **vLLM-for-SAIL v0.28.0 is now available as a PREVIEW (release candidate `0.28.0+rc1`).** It has **not** been officially released yet, so there is **no released Docker image and no PyPI wheel** for v0.28.0. To try it, build the PPU Docker image of this branch or build v0.28.0 from source — see [Usage Guide](#usage-guide) below.
+- [2026/10] **vLLM-for-SAIL v0.28.0 has been officially released!** You can start using vLLM-for-SAIL via the [User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=11669).
 
 - [2026/10] vLLM-for-SAIL v0.27.0 has been officially released! You can start using vLLM-for-SAIL via the [User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=2977).
 
@@ -18,15 +18,7 @@ vLLM-for-SAIL Inference Engine
 
 ---
 
-> This is the PPU README of vLLM-for-SAIL. The original vLLM community README is kept in [README.md](https://github.com/flytiger-eco/vllm-for-sail/blob/v0.28.0/README.md).
->
-> ⚠️ **PREVIEW NOTICE**
->
-> v0.28.0 is a **preview / release-candidate** branch and has **not** been officially released.
->
-> - There is **no** released `vllm0.28.0` Docker image and **no** v0.28.0 wheel on PyPI yet.
-> - To use v0.28.0 right now, either **build the PPU Docker image of this branch** with `docker/Dockerfile.ppu` (it builds v0.28.0 from source), or **build v0.28.0 from source inside the released v0.27.0 PPU Docker image**, which provides the matching CUDA / PyTorch / SDK toolchain.
-> - Interfaces, environment variables and model support on this preview branch may change before the official release. Once v0.28.0 is officially released, a dedicated Docker image, PyPI wheel and User Guide will be published, and building from source will no longer be required.
+> This is the PPU README of vLLM-for-SAIL. The original vLLM community README is kept in [README.md](https://github.com/flytiger-eco/vllm-for-sail/blob/0.28.0+v0.1.0/README.md).
 
 ## Overview
 
@@ -36,37 +28,18 @@ vLLM-for-SAIL is a customized and optimized version of the [vLLM inference engin
 
 - Hardware: Zhenwu 810 / Zhenwu 810E / Zhenwu M890
 - Operating System: Linux (Ubuntu 24.04 recommended)
-- Because v0.28.0 has no published artifacts, you must build it yourself (see below). The build machine needs network access to pkg.flytiger-eco.com, GitHub and PyPI.
+- SAIL SDK v2.2.0 with PyTorch 2.13.0, CUDA 13.0 and Python 3.12
+- Network access to `pkg.flytiger-eco.com` for the PPU PyPI index and Docker images
 
-## Usage Guide
+## Installation
 
-Since v0.28.0 has not been officially released, you cannot install it via Docker or PyPI directly. Use one of the following options instead.
+The officially released v0.28.0 wheel, the matching PPU kernel packages and their full installation steps are described in the [vLLM-for-SAIL v0.28.0 User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=11669).
 
-### Option 1. Build the PPU Docker Image (recommended)
+v0.28.0 does not ship a dedicated Docker image: start from the officially released v0.27.0 PPU image and upgrade vLLM inside it, or install the wheel from the PPU PyPI index.
 
-[`docker/Dockerfile.ppu`](https://github.com/flytiger-eco/vllm-for-sail/blob/v0.28.0/docker/Dockerfile.ppu) builds a PPU image for this branch. On top of the PPU PyTorch base image (PPU SDK, NCCL/PCCL, PyTorch 2.13.0) it installs the PPU builds of the vLLM kernel dependencies (FlashInfer, DeepGEMM, DeepEP, FlashMLA, etc.) and builds vLLM-for-SAIL 0.28.0 from the source tree, so no further build step is needed.
+### Upgrade Inside the v0.27.0 Docker Image (Recommended)
 
-```bash
-git clone -b v0.28.0 https://github.com/flytiger-eco/vllm-for-sail
-cd vllm-for-sail
-
-# BuildKit is required; the build needs network access to pkg.flytiger-eco.com, PyPI and GitHub
-DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.ppu -t vllm-for-sail:v0.28.0-ppu .
-```
-
-Start a container from the image. The container needs access to the PPU devices of the host; `--privileged` is the simplest way to provide them.
-
-```bash
-docker run -it --rm --privileged --network host --shm-size=16g \
-  -v /path/to/your/workspace:/workspace \
-  vllm-for-sail:v0.28.0-ppu
-```
-
-Then continue with [Environment Verification](#environment-verification).
-
-### Option 2. Build from Source in the v0.27.0 Image
-
-Pull the officially released v0.27.0 image, which already contains the PPU SDK, CUDA, PyTorch and build toolchain, and start a container from it:
+Pull and start the v0.27.0 image:
 
 ```bash
 docker pull pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
@@ -76,13 +49,33 @@ docker run -it --rm --privileged --network host --shm-size=16g \
   pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
 ```
 
-> Note: this image ships vLLM-for-SAIL **0.27.0**. The following steps build and install **0.28.0** on top of it, replacing the pre-installed 0.27.0 wheel.
+> Note: this image ships vLLM-for-SAIL **0.27.0**. The steps below replace the pre-installed 0.27.0 wheel with **0.28.0**.
 
-Run all commands below **inside** the container. The build steps follow the [vLLM-for-SAIL User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=2977); the only difference is that you check out the `v0.28.0` branch.
+Run the command below **inside** the container:
+
+```bash
+pip install vllm==0.28.0 \
+  -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple \
+  --force-reinstall --no-deps
+```
+
+> Do not upgrade PyTorch. The image keeps `torch==2.13.0`, and any other version breaks the PPU kernel ABI.
+
+### Install the Wheel from the PPU PyPI Index
+
+```bash
+pip install vllm==0.28.0 -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+```
+
+Then refresh the PPU kernel packages (`flashinfer_python`, `deep_gemm`, `deep_ep`, `flash_mla`, `flash_attn_3`, `pla`, `mooncake`, ...) to the versions listed in the User Guide.
+
+### Build from Source in the v0.27.0 Docker Image
+
+The build needs the matching SAIL SDK v2.2.0, CUDA 13.0 and PyTorch 2.13.0, so build inside the v0.27.0 image. Start the image if you have not done so yet, then run all commands below **inside** the container:
 
 ```bash
 # 1. Download the vLLM-for-SAIL v0.28.0 source
-git clone -b v0.28.0 https://github.com/flytiger-eco/vllm-for-sail
+git clone -b 0.28.0+v0.1.0 https://github.com/flytiger-eco/vllm-for-sail
 
 # 2. Build vLLM (the machine needs network access to GitHub)
 
@@ -112,7 +105,7 @@ Run the following command inside the container where you just installed vLLM-for
 python -c "import vllm; print(vllm.__version__)"
 ```
 
-If no errors occur during execution and `0.28.0` is printed in the console, it indicates that the vLLM-for-SAIL v0.28.0 preview has been built and installed successfully.
+If no errors occur during execution and `0.28.0` is printed in the console, vLLM-for-SAIL v0.28.0 has been installed successfully.
 
 ## Quick Start
 
@@ -139,10 +132,6 @@ curl -X POST http://0.0.0.0:8999/v1/chat/completions \
   }'
 ```
 
-## More Information
-
-For the Docker / PyPI installation flow and general usage of the latest **released** version, please refer to the [vLLM-for-SAIL User Guide](https://www.flytiger-eco.com/docs_center/doc_detail/index.html?projectId=6&documentId=2977). A dedicated v0.28.0 User Guide, Docker image and PyPI wheel will be published once v0.28.0 is officially released.
-
 ## License
 
-See [NOTICE](https://github.com/flytiger-eco/vllm-for-sail/blob/v0.28.0/NOTICE) and [LICENSE](https://github.com/flytiger-eco/vllm-for-sail/blob/v0.28.0/LICENSE).
+See [NOTICE](https://github.com/flytiger-eco/vllm-for-sail/blob/0.28.0+v0.1.0/NOTICE) and [LICENSE](https://github.com/flytiger-eco/vllm-for-sail/blob/0.28.0+v0.1.0/LICENSE).
