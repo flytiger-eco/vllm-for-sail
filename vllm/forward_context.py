@@ -155,6 +155,12 @@ class ForwardContext:
     # the producer does not set it.
     is_padding: torch.Tensor | None = None
 
+    # Same mask as `is_padding`, but over the *dispatched* token axis: MoE naive
+    # dispatch (DP/EP AllGather) concatenates every rank's chunk before routing,
+    # so the local `is_padding` no longer matches the routed rows. Set by the
+    # MoE runner right after the gather, None otherwise.
+    dispatched_is_padding: torch.Tensor | None = None
+
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 

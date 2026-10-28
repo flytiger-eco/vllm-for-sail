@@ -2421,6 +2421,24 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
         return
 
 
+def _trim_is_padding(
+    gating_output: torch.Tensor, is_padding: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Align a padding mask with the rows the kernel will consume.
+
+    The top-k kernels index `is_padding` by output row and only ever read the
+    first `num_tokens` (== gating_output rows) entries. DP uniform padding can
+    hand over a mask that still covers the wider padded batch, so trim it here
+    instead of failing on the kernel's exact-length check.
+    """
+    if is_padding is None or is_padding.dim() != 1:
+        return is_padding
+    num_tokens = gating_output.numel() // gating_output.size(-1)
+    if is_padding.numel() > num_tokens:
+        return is_padding[:num_tokens]
+    return is_padding
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2430,6 +2448,7 @@ def topk_softmax(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    is_padding = _trim_is_padding(gating_output, is_padding)
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2451,6 +2470,7 @@ def topk_sigmoid(
     routed_scaling_factor: float = 1.0,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    is_padding = _trim_is_padding(gating_output, is_padding)
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
         topk_ids,
@@ -2475,6 +2495,7 @@ def topk_hash_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    is_padding = _trim_is_padding(gating_output, is_padding)
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,

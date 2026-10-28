@@ -15,6 +15,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm import envs
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
@@ -788,13 +789,49 @@ class MoERunner(MoERunnerInterface):
         # NOTE: this will be removed once all kernels are migrated into the
         # MoEKernel framework.
         if self.do_naive_dispatch_combine:
-            result = get_ep_group().dispatch_router_logits(
-                hidden_states,
-                router_logits,
-                self.moe_config.is_sequence_parallel,
+            # The dispatched batch concatenates the token chunk of every DP rank,
+            # so the padding mask must be gathered alongside it: routers would
+            # otherwise compare a local-chunk mask against the gathered rows.
+            ctx = (
+                get_forward_context() if is_forward_context_available() else None
             )
-            assert len(result) == 2
-            hidden_states, router_logits = result
+            dispatched_is_padding_u8 = None
+            if ctx is not None:
+                # Never let a previous layer's gathered mask leak into this one.
+                ctx.dispatched_is_padding = None
+                if envs.VLLM_MOE_SKIP_PADDING and ctx.is_padding is not None:
+                    dispatched_is_padding_u8 = ctx.is_padding.to(torch.uint8)
+
+            extra_tensors = (
+                [dispatched_is_padding_u8]
+                if dispatched_is_padding_u8 is not None
+                else None
+            )
+            try:
+                result = get_ep_group().dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    self.moe_config.is_sequence_parallel,
+                    extra_tensors=extra_tensors,
+                )
+            except NotImplementedError:
+                # Backend without extra-tensor support (raises before any
+                # collective): dispatch without the mask and let the router
+                # fall back to no padding elision.
+                dispatched_is_padding_u8 = None
+                result = get_ep_group().dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    self.moe_config.is_sequence_parallel,
+                )
+
+            if len(result) == 3:
+                hidden_states, router_logits, extra_out = result
+                if ctx is not None and extra_out and extra_tensors is not None:
+                    ctx.dispatched_is_padding = extra_out[0].to(torch.bool)
+            else:
+                assert len(result) == 2
+                hidden_states, router_logits = result
 
         if (
             self.moe_config.pcp_size > 1

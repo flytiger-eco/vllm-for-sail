@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -19,11 +20,33 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     dsv4_topk,
 )
 
+logger = init_logger(__name__)
+
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
-    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-        is_padding = get_forward_context().is_padding
-        return is_padding[:num_tokens] if is_padding is not None else None
+    # See FusedTopKRouter._get_padding_mask: under DP/EP naive dispatch the
+    # routed batch is the gathered superset of the local chunk, so only a mask
+    # gathered by the MoE runner can match it.
+    if not (envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available()):
+        return None
+    ctx = get_forward_context()
+    dispatched_is_padding = ctx.dispatched_is_padding
+    if (
+        dispatched_is_padding is not None
+        and dispatched_is_padding.shape[0] == num_tokens
+    ):
+        return dispatched_is_padding
+    is_padding = ctx.is_padding
+    if is_padding is None:
+        return None
+    if is_padding.shape[0] == num_tokens:
+        return is_padding
+    logger.warning_once(
+        "Disabling MoE padding elision for this step: is_padding has %d rows "
+        "but %d tokens are routed (DP dispatch without a matching mask).",
+        is_padding.shape[0],
+        num_tokens,
+    )
     return None
 
 
