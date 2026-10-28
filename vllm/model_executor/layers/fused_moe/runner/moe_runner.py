@@ -799,8 +799,16 @@ class MoERunner(MoERunnerInterface):
             if ctx is not None:
                 # Never let a previous layer's gathered mask leak into this one.
                 ctx.dispatched_is_padding = None
-                if envs.VLLM_MOE_SKIP_PADDING and ctx.is_padding is not None:
-                    dispatched_is_padding_u8 = ctx.is_padding.to(torch.uint8)
+                # Only a 1-D per-token mask can ride along with the token
+                # axis; any other layout falls back to no-mask elision.
+                local_is_padding = ctx.is_padding
+                if (
+                    envs.VLLM_MOE_SKIP_PADDING
+                    and local_is_padding is not None
+                    and local_is_padding.dim() == 1
+                    and local_is_padding.shape[0] == hidden_states.shape[0]
+                ):
+                    dispatched_is_padding_u8 = local_is_padding.to(torch.uint8)
 
             extra_tensors = (
                 [dispatched_is_padding_u8]

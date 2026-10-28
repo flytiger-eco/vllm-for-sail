@@ -33,13 +33,14 @@ def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
     dispatched_is_padding = ctx.dispatched_is_padding
     if (
         dispatched_is_padding is not None
+        and dispatched_is_padding.dim() == 1
         and dispatched_is_padding.shape[0] == num_tokens
     ):
         return dispatched_is_padding
     is_padding = ctx.is_padding
     if is_padding is None:
         return None
-    if is_padding.shape[0] == num_tokens:
+    if is_padding.dim() == 1 and is_padding.shape[0] == num_tokens:
         return is_padding
     logger.warning_once(
         "Disabling MoE padding elision for this step: is_padding has %d rows "
