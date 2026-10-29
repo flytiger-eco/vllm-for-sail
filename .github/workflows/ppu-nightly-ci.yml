@@ -1,0 +1,140 @@
+# Daily full PPU regression for the three maintained releases on OAM-810E.
+# Releases run in parallel; each release builds one wheel before running all areas.
+name: Nightly PPU test
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 02:00 Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      releases:
+        description: "Comma-separated releases; default: all supported releases"
+        type: string
+        default: "v0.26.0,v0.27.0,v0.28.0"
+      areas:
+        description: "Optional comma-separated area subset for diagnosis"
+        type: string
+        default: ""
+
+# A full regression can exceed one day. Queue a new trigger rather than
+# cancelling the previous one and losing its results.
+concurrency:
+  group: nightly-ppu-releases
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-releases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      v0_26_0: ${{ steps.resolve.outputs.v0_26_0 }}
+      v0_27_0: ${{ steps.resolve.outputs.v0_27_0 }}
+      v0_28_0: ${{ steps.resolve.outputs.v0_28_0 }}
+      selected: ${{ steps.resolve.outputs.selected }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve exact release commits
+        id: resolve
+        env:
+          REQUESTED: ${{ inputs.releases || 'v0.26.0,v0.27.0,v0.28.0' }}
+        run: |
+          # shellcheck disable=SC2153 # REQUESTED is supplied by the step env.
+          requested="${REQUESTED//,/ }"
+          for release in ${requested}; do
+            case "${release}" in
+              v0.26.0|v0.27.0|v0.28.0) ;;
+              *) echo "::error::Unsupported release: ${release}" >&2; exit 2 ;;
+            esac
+          done
+          selected=""
+          for release in v0.26.0 v0.27.0 v0.28.0; do
+            key="${release//./_}"
+            if [[ " ${requested} " != *" ${release} "* ]]; then
+              echo "${key}=" >> "$GITHUB_OUTPUT"
+              continue
+            fi
+            sha="$(git ls-remote --exit-code origin "refs/heads/${release}" | cut -f1)"
+            case "${sha}" in
+              *[!0-9a-f]*|'') echo "::error::Invalid SHA for ${release}" >&2; exit 1 ;;
+            esac
+            if [ "${#sha}" -ne 40 ]; then
+              echo "::error::Expected a full SHA for ${release}" >&2
+              exit 1
+            fi
+            selected="${selected:+${selected},}${release}"
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+          if [ -z "${selected}" ]; then
+            echo "::error::No supported release selected" >&2
+            exit 1
+          fi
+          echo "selected=${selected}" >> "$GITHUB_OUTPUT"
+
+  release-v0-26-0:
+    needs: resolve-releases
+    if: needs.resolve-releases.outputs.v0_26_0 != ''
+    uses: ./.github/workflows/ppu-build-nightly.yml
+    with:
+      release: v0.26.0
+      source_sha: ${{ needs.resolve-releases.outputs.v0_26_0 }}
+      ci_sha: ${{ github.sha }}
+      areas: ${{ inputs.areas }}
+    secrets: inherit
+
+  release-v0-27-0:
+    needs: resolve-releases
+    if: needs.resolve-releases.outputs.v0_27_0 != ''
+    uses: ./.github/workflows/ppu-build-nightly.yml
+    with:
+      release: v0.27.0
+      source_sha: ${{ needs.resolve-releases.outputs.v0_27_0 }}
+      ci_sha: ${{ github.sha }}
+      areas: ${{ inputs.areas }}
+    secrets: inherit
+
+  release-v0-28-0:
+    needs: resolve-releases
+    if: needs.resolve-releases.outputs.v0_28_0 != ''
+    uses: ./.github/workflows/ppu-build-nightly.yml
+    with:
+      release: v0.28.0
+      source_sha: ${{ needs.resolve-releases.outputs.v0_28_0 }}
+      ci_sha: ${{ github.sha }}
+      areas: ${{ inputs.areas }}
+    secrets: inherit
+
+  nightly-finish:
+    needs: [resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check selected release results
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+          SELECTED: ${{ needs.resolve-releases.outputs.selected }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          selected = os.environ["SELECTED"]
+          if not selected:
+              print("Release resolution did not succeed")
+              sys.exit(1)
+          failed = []
+          for release in selected.split(","):
+              job = "release-" + release.replace(".", "-")
+              result = needs.get(job, {}).get("result", "missing")
+              print(f"{release}: {result}")
+              if result != "success":
+                  failed.append(f"{release} ({result})")
+          if failed:
+              print("Failed releases: " + ", ".join(failed))
+              sys.exit(1)
+          '
