@@ -1,0 +1,381 @@
+# Build and test one exact release commit. Releases are called in parallel.
+name: Nightly PPU release
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      ci_sha:
+        required: true
+        type: string
+      areas:
+        required: false
+        type: string
+        default: ""
+      device:
+        required: false
+        type: string
+        default: OAM-810E
+
+permissions:
+  contents: read
+
+env:
+  PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
+  PPU_BUILD_IMAGE: pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06
+
+jobs:
+  build-wheel:
+    name: Build ${{ inputs.release }} wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+    outputs:
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+    steps:
+      - name: Check immutable inputs
+        env:
+          RELEASE: ${{ inputs.release }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          DEVICE: ${{ inputs.device }}
+        run: |
+          case "$RELEASE" in v0.26.0|v0.27.0|v0.28.0) ;; *) exit 2 ;; esac
+          case "$DEVICE" in OAM-810E|ZW-M890P) ;; *) exit 2 ;; esac
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout CI scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ci_sha }}
+          path: ci
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Install CI scripts and verify source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C ci rev-parse HEAD)" = "$CI_SHA"
+          mkdir -p source/scripts/ppu
+          cp -a ci/scripts/ppu/. source/scripts/ppu/
+          python3 -m pip install --quiet regex
+          python3 source/scripts/ppu/ppu_ci_nightly.py check \
+            --source-root "$GITHUB_WORKSPACE/source" --release "$RELEASE"
+      - name: Restore ccache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/ppu-ccache
+          # A GitHub cache key cannot be overwritten, so it has to carry a per-run component.
+          # Keyed on release plus source SHA alone it never rolled over: the release branch
+          # does not move, the first nightly run died before setup.py compiled anything, and
+          # every later run restored that 12 KB cache, recompiled all 90 objects and then hit
+          # "Unable to reserve cache with key ..." when saving.
+          # The release source SHA stays in the key so a release branch commit starts a fresh
+          # chain, and the PR build caches are the last fallback: they are saved on the default
+          # branch, so this workflow can read them whatever branch it runs from, and they cover
+          # the same compiler, SDK and flags.
+          key: ppu-nightly-ccache-${{ inputs.release }}-${{ inputs.source_sha }}-${{ github.run_id }}
+          restore-keys: |
+            ppu-nightly-ccache-${{ inputs.release }}-${{ inputs.source_sha }}-
+            ppu-ccache-${{ runner.os }}-cu13.0-sdk2.2.0-
+      - name: Compute Rust cache key
+        id: rust-key
+        env:
+          INPUT_HASH: ${{ hashFiles('source/rust/**', 'source/rust-toolchain.toml', 'source/tools/build_rust.py', 'source/build_rust.sh', 'source/setup.py', 'source/pyproject.toml', 'source/vllm/envs.py', 'source/requirements/build/*.txt', 'source/requirements/ppu.txt', 'source/requirements/common.txt', 'source/scripts/ppu/ppu_ci_nightly_build_wheel.sh') }}
+        run: |
+          test -n "$INPUT_HASH"
+          docker pull "$PPU_BUILD_IMAGE"
+          image_id="$(docker image inspect --format '{{.Id}}' "$PPU_BUILD_IMAGE")"
+          test -n "$image_id"
+          echo "PPU_BUILD_IMAGE=$image_id" >> "$GITHUB_ENV"
+          echo "RUST_CACHE_DIR=$RUNNER_TEMP/ppu-rust-artifacts" >> "$GITHUB_ENV"
+          echo "key=ppu-nightly-rust-${{ inputs.release }}-${image_id#sha256:}-$INPUT_HASH" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust artifacts
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/ppu-rust-artifacts
+          key: ${{ steps.rust-key.outputs.key }}
+      - name: Stage complete Rust cache
+        if: steps.rust-cache.outputs.cache-hit == 'true'
+        run: |
+          shopt -s nullglob
+          parsers=("$RUST_CACHE_DIR"/_rust_tool_parser*.so)
+          if [[ -s "$RUST_CACHE_DIR/vllm-rs" && ${#parsers[@]} -eq 1 && -s "${parsers[0]}" ]]; then
+            install -m 755 "$RUST_CACHE_DIR/vllm-rs" "${parsers[0]}" source/vllm/
+          else
+            echo "::warning::Incomplete Rust cache; rebuilding from source"
+          fi
+      - name: Build wheel and provenance
+        id: build
+        env:
+          RELEASE: ${{ inputs.release }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+        run: |
+          MAX_JOBS="$(nproc)"
+          NVCC_THREADS=1
+          HOST_CCACHE_DIR="$RUNNER_TEMP/ppu-ccache"
+          VLLM_VERSION_OVERRIDE="${RELEASE#v}.dev$(date -u +%Y%m%d)+g$(git -C source rev-parse --short HEAD)"
+          export MAX_JOBS NVCC_THREADS HOST_CCACHE_DIR VLLM_VERSION_OVERRIDE
+          mkdir -p "$HOST_CCACHE_DIR"
+          (cd source && bash scripts/ppu/ppu_ci_nightly_build_wheel.sh "${RELEASE#v}" 3.12 13.0 x86_64)
+          python3 - "$RELEASE" "$SOURCE_SHA" "$CI_SHA" "$VLLM_VERSION_OVERRIDE" <<'PY'
+          import hashlib, json, pathlib, sys, zipfile
+          release, source_sha, ci_sha, version = sys.argv[1:]
+          wheels = list(pathlib.Path("source/dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          wheel = wheels[0]
+          with zipfile.ZipFile(wheel) as archive:
+              metadata_name = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+              metadata = archive.read(metadata_name).decode()
+              assert f"Name: vllm\n" in metadata
+              assert f"Version: {version}\n" in metadata
+              assert "vllm/_version.py" in archive.namelist()
+          manifest = {
+              "release": release, "source_sha": source_sha, "ci_sha": ci_sha,
+              "wheel": wheel.name, "version": version,
+              "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+          }
+          pathlib.Path("source/dist/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print(json.dumps(manifest))
+          PY
+          echo "artifact_name=ppu-nightly-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}" >> "$GITHUB_OUTPUT"
+      - name: Fix ccache ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/ppu-ccache" || true
+      - name: Save ccache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/ppu-ccache
+          key: ppu-nightly-ccache-${{ inputs.release }}-${{ inputs.source_sha }}-${{ github.run_id }}
+      - name: Extract Rust artifacts
+        id: rust-artifacts
+        run: |
+          shopt -s nullglob
+          wheels=(source/dist/*.whl)
+          mkdir -p "$RUST_CACHE_DIR"
+          if unzip -jo "${wheels[0]}" 'vllm/vllm-rs' 'vllm/_rust_tool_parser*.so' -d "$RUST_CACHE_DIR"; then
+            parsers=("$RUST_CACHE_DIR"/_rust_tool_parser*.so)
+            if [[ -s "$RUST_CACHE_DIR/vllm-rs" && ${#parsers[@]} -eq 1 && -s "${parsers[0]}" ]]; then
+              chmod 755 "$RUST_CACHE_DIR/vllm-rs" "${parsers[0]}"
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Save Rust artifacts
+        if: steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-artifacts.outputs.ready == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/ppu-rust-artifacts
+          key: ${{ steps.rust-key.outputs.key }}
+      - name: Download test toolchain wheels
+        continue-on-error: true
+        run: |
+          mkdir -p source/dist/toolchain
+          python3 -m pip download --no-deps pytest pytest-asyncio tblib pytest-shard pyyaml \
+            -d source/dist/toolchain \
+            -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: |
+            source/dist/*.whl
+            source/dist/manifest.json
+            source/dist/toolchain/*.whl
+          if-no-files-found: error
+
+  select-areas:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      count: ${{ steps.pick.outputs.count }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout CI scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ci_sha }}
+          path: ci
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Pick full area set
+        id: pick
+        env:
+          AREAS: ${{ inputs.areas }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "${{ inputs.source_sha }}"
+          test "$(git -C ci rev-parse HEAD)" = "${{ inputs.ci_sha }}"
+          mkdir -p source/scripts/ppu
+          cp -a ci/scripts/ppu/. source/scripts/ppu/
+          python3 -m pip install --quiet regex
+          python3 source/scripts/ppu/ppu_ci_nightly.py check \
+            --source-root "$GITHUB_WORKSPACE/source" --release "$RELEASE"
+          (cd source && python3 scripts/ppu/ppu_ci_nightly.py select)
+
+  test:
+    name: ${{ inputs.release }} / ${{ inputs.device }} / ${{ matrix.area }}
+    needs: [build-wheel, select-areas]
+    if: needs.select-areas.outputs.count != '0'
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJson(needs.select-areas.outputs.matrix) }}
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout CI scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ci_sha }}
+          path: ci
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Install CI scripts and download release wheel
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C ci rev-parse HEAD)" = "$CI_SHA"
+          mkdir -p source/scripts/ppu
+          cp -a ci/scripts/ppu/. source/scripts/ppu/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact_name }}
+          path: source/ci-wheel
+      - name: Build in-pod runner payload
+        id: payload
+        env:
+          RELEASE: ${{ inputs.release }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          AREA: ${{ matrix.area }}
+          AREA_SCRIPT: ${{ matrix.script }}
+        run: |
+          python3 - "$RELEASE" "$SOURCE_SHA" "$CI_SHA" <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path("source")
+          manifest = json.loads((root / "ci-wheel/manifest.json").read_text())
+          assert manifest["release"] == os.environ["RELEASE"]
+          assert manifest["source_sha"] == os.environ["SOURCE_SHA"]
+          assert manifest["ci_sha"] == os.environ["CI_SHA"]
+          wheels = list((root / "ci-wheel").glob("*.whl"))
+          assert len(wheels) == 1 and wheels[0].name == manifest["wheel"]
+          assert hashlib.sha256(wheels[0].read_bytes()).hexdigest() == manifest["wheel_sha256"]
+          PY
+          cat > /tmp/ppu-run.sh <<'RUNEOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /workspace/source/source
+          echo "[k8s-nightly] release=${PPU_RELEASE} area=${AREA} source=${PPU_SOURCE_SHA}"
+          bash scripts/ppu/ppu_ci_nightly_install_dependency.sh
+          bash "scripts/ppu/${AREA_SCRIPT}"
+          RUNEOF
+          bash -n /tmp/ppu-run.sh
+          wheel="$(find source/ci-wheel -maxdepth 1 -name '*.whl' -print -quit)"
+          {
+            echo "b64=$(base64 < /tmp/ppu-run.sh | tr -d '\n')"
+            echo "wheel_path=/workspace/source/${wheel}"
+            echo "wheel_sha256=$(sha256sum "${wheel}" | cut -d' ' -f1)"
+            echo "wheel_version=$(python3 -c 'import json; print(json.load(open("source/ci-wheel/manifest.json"))["version"])')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Run PPU tests
+        id: ppu
+        uses: flytiger-eco/ppu-distributed-action@06c8ee7cadaae2086db4977e571b19f461653f16
+        with:
+          nnodes: 0
+          nproc_per_node: ${{ matrix.nproc }}
+          node_selector: board-type=${{ inputs.device }}
+          image: ${{ env.PPU_BASE_IMAGE }}
+          namespace: ppu-sched
+          job_suffix: nightly-${{ inputs.release }}-${{ inputs.device }}-${{ matrix.area }}
+          timeout_minutes: ${{ matrix.run_timeout }}
+          cleanup_policy: always
+          container_options: |
+            host_ipc: true
+            shm_size: "8Gi"
+          extra_env: >-
+            HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=${{ inputs.device }},PPU_RELEASE=${{ inputs.release }},PPU_SOURCE_SHA=${{ inputs.source_sha }},PPU_CI_SHA=${{ inputs.ci_sha }},PPU_WHEEL_PATH=${{ steps.payload.outputs.wheel_path }},PPU_WHEEL_SHA256=${{ steps.payload.outputs.wheel_sha256 }},PPU_EXPECTED_VLLM_VERSION=${{ steps.payload.outputs.wheel_version }},PPU_TOOLCHAIN_DIR=/workspace/source/source/ci-wheel/toolchain,AREA=${{ matrix.area }},AREA_SCRIPT=${{ matrix.script }},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
+      - name: Publish test summary
+        if: always()
+        env:
+          AREA: ${{ matrix.area }}
+          RELEASE: ${{ inputs.release }}
+          DEVICE: ${{ inputs.device }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          WHEEL_SHA256: ${{ steps.payload.outputs.wheel_sha256 }}
+          OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
+          OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
+          OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
+          OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
+          OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
+        run: |
+          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/${RELEASE}/${DEVICE}/${AREA}/summary.md"
+          {
+            echo "## ${RELEASE} / ${AREA} / ${DEVICE}"
+            echo "Source SHA: \`${SOURCE_SHA}\`"
+            echo "Wheel SHA256: \`${WHEEL_SHA256}\`"
+            if [ -f "${NAS_SUM}" ]; then
+              cat "${NAS_SUM}"
+            else
+              echo "summary.md was not returned; this area did not pass."
+              exit 1
+            fi
+            echo "K8s job: \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release-finish:
+    needs: [build-wheel, select-areas, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful build and all selected areas
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          print(json.dumps(needs, indent=2))
+          failed = [name for name, info in needs.items() if info.get("result") != "success"]
+          if failed:
+              print("Unsuccessful jobs: " + ", ".join(failed))
+              sys.exit(1)
+          '
