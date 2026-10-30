@@ -41,6 +41,17 @@ _QSA_PACKED_DG_MAX_REQS = int(
     os.environ.get("VLLM_QSA_PACKED_DG_MAX_REQS", "32")
 )
 
+# The fused Triton pre-indexer (_qsa_pre_indexer_kernel) is OFF by default on
+# this build. Its _norm_rope split/join/permute lower to a tsm shared-memory
+# swizzle (XOR 0x82/0x2) whose address goes out of bounds, raising an illegal
+# memory access the first time a real request runs it. Warmup never catches it:
+# QSA side-cache metadata is None during profiling, so QSAIndexer.forward
+# returns early and the kernel is not even compiled. The fault is independent of
+# the Q tile shape (it reproduces at TILE_H_Q=2 and 4). Set
+# VLLM_QSA_FUSED_PRE_INDEXER=1 to re-enable once the Triton/PPU codegen bug is
+# fixed; until then QSA takes the unfused reference path below.
+_QSA_FUSED_PRE_INDEXER = os.environ.get("VLLM_QSA_FUSED_PRE_INDEXER", "0") == "1"
+
 
 def apply_qsa_rope(
     rotary_emb: nn.Module,
@@ -134,7 +145,7 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
-        self.use_fused_pre_indexer = _supports_fused_pre_indexer(
+        self.use_fused_pre_indexer = _QSA_FUSED_PRE_INDEXER and _supports_fused_pre_indexer(
             rotary_emb,
             self.index_head_dim,
             self.index_kv_heads,
