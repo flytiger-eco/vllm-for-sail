@@ -62,9 +62,34 @@ _FA3_QSA_UNSUPPORTED_REASON: Optional[str] = None
 
 # Top-k list for the QSA build probe's numerical self-test: scattered (no two
 # entries adjacent when sorted) and unsorted, so a load path that fetches contiguous
-# runs cannot match the reference by accident. Every entry is a page id into the
-# probe's one-token-per-page caches, the layout the CUDA path always calls with.
+# runs cannot match the reference by accident. Every entry is an absolute token index
+# into the probe's 256-token pool; the qsa_allow_aiu layout reads them against
+# 16-token pages, the legacy view layout against one-token pages.
 _QSA_PROBE_TOPK = (3, 40, 77, 114, 151, 188, 225, 8, 45, 82, 119, 156, 193, 230, 31, 68)
+
+# Cached result of the qsa_allow_aiu schema check; None means "not checked yet".
+_FA3_QSA_FLAG_SUPPORTED: bool | None = None
+
+
+def fa3_qsa_uses_allow_aiu_flag() -> bool:
+    """Whether the installed ``flash_attn_3.fwd`` carries ``qsa_allow_aiu``.
+
+    Wheels rebuilt after that argument landed route QSA off the AIU paged-KV bulk
+    load through the kernel's own runtime check. On older wheels
+    :func:`flash_attn_qsa_varlen_func` reaches the same per-column load by handing
+    FA3 a one-token-per-page view of the pool instead -- a workaround that only
+    exists for one KV head per rank, which callers must gate on.
+    """
+    global _FA3_QSA_FLAG_SUPPORTED
+    if _FA3_QSA_FLAG_SUPPORTED is None:
+        try:
+            schema = torch.ops.flash_attn_3.fwd.default._schema
+            _FA3_QSA_FLAG_SUPPORTED = any(
+                arg.name == "qsa_allow_aiu" for arg in schema.arguments
+            )
+        except (AttributeError, RuntimeError):
+            _FA3_QSA_FLAG_SUPPORTED = False
+    return _FA3_QSA_FLAG_SUPPORTED
 
 def _is_fa2_supported(device = None) -> Tuple[bool, Optional[str]]:
     if not FA2_AVAILABLE:
@@ -98,14 +123,15 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
 
     QSA has no dedicated op: `fwd` picks the path from the rank of `page_table`, so a
     build without it rejects a 3-D table with a TORCH_CHECK. Passing that check is not
-    enough: the probe issues one call in the layout the CUDA path always uses -- one
-    token per page, so a top-k entry is a page id -- and compares the result against a
-    PyTorch reference on a scattered, unsorted list. That layout keeps page_size off
-    the multiples of 16 that route paged loads onto the AIU bulk path (one entry per
-    16-column group, 16 contiguous tokens), which silently attends to the wrong K/V
-    for scattered lists, so the self-test guards the per-column path the kernel is
-    actually reached through. The result is cached because it is a property of the
-    whl, not of the arguments.
+    enough: the probe issues one call in the exact convention the CUDA path uses and
+    compares the result against a PyTorch reference on a scattered, unsorted list. On
+    wheels that carry `qsa_allow_aiu` that means the real paged cache with
+    `qsa_allow_aiu=False` (the kernel routes QSA off the AIU bulk load itself); on
+    older wheels it means the one-token-per-page view `flash_attn_qsa_varlen_func`
+    applies for them. Either way a build whose routing still lands on the bulk load
+    -- one table entry read per 16-column group, 16 contiguous tokens fetched, the
+    other 15 entries ignored -- cannot match the reference. The result is cached
+    because it is a property of the whl, not of the arguments.
     """
     global _FA3_QSA_SUPPORTED, _FA3_QSA_UNSUPPORTED_REASON
     if _FA3_QSA_SUPPORTED is not None or _FA3_QSA_UNSUPPORTED_REASON is not None:
@@ -125,24 +151,30 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
         # Deterministic inputs, generated off-device so the probe never disturbs the
         # global RNG state. device="cpu" is explicit: this process may run with a
         # non-CPU default device, where randn would target that device and reject
-        # the CPU generator. The caches mirror the one-token-per-page layout the CUDA
-        # path calls with (256 single-token pages), so the scattered entries in
-        # _QSA_PROBE_TOPK are page ids; 2 query heads over 1 KV head is inside the
-        # kernel's GQA limit.
+        # the CPU generator. The pool holds 256 tokens; the qsa_allow_aiu layout
+        # groups them into 16 pages of 16 tokens, the legacy layout into 256
+        # single-token pages. Same storage, so the same absolute-index list and
+        # reference cover both. 2 query heads over 1 KV head is inside the kernel's
+        # GQA limit.
         gen = torch.Generator(device="cpu").manual_seed(0x5A1)
         q = torch.randn(1, 2, 256, generator=gen, device="cpu",
                         dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
-        k_cache = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
-                              dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
-        v_cache = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
-                              dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
+        pool_k = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
+                             dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
+        pool_v = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
+                             dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
         topk_table = torch.tensor(
             _QSA_PROBE_TOPK, dtype=torch.int32, device=dev).view(1, 1, -1)
         cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=dev)
+        if fa3_qsa_uses_allow_aiu_flag():
+            k_cache, v_cache = pool_k.view(16, 16, 1, 256), pool_v.view(16, 16, 1, 256)
+        else:
+            k_cache, v_cache = pool_k, pool_v
 
         out, _lse = flash_attn_qsa_varlen_func(
             q, k_cache, v_cache, topk_table, cu_seqlens_q, 1,
-            softmax_scale=softmax_scale, return_softmax_lse=True,
+            softmax_scale=softmax_scale, qsa_allow_aiu=False,
+            return_softmax_lse=True,
         )
         torch.cuda.synchronize()
     except Exception as e:  # noqa: BLE001 - any failure means "no QSA in this build"
@@ -154,8 +186,8 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
     # test_qsa_cases.py, plus a hard cap: a load path that fetches the wrong K/V
     # misses by O(1), far past both bounds).
     idx = topk_table.view(-1).long()
-    k_sel = k_cache.reshape(-1, 256)[idx]
-    v_sel = v_cache.reshape(-1, 256)[idx]
+    k_sel = pool_k.reshape(-1, 256)[idx]
+    v_sel = pool_v.reshape(-1, 256)[idx]
     scores = (q[0].float() @ k_sel.float().t()) * softmax_scale
     ref = torch.softmax(scores, dim=-1) @ v_sel.float()
     pt = torch.softmax((q[0] @ k_sel.t()) * softmax_scale, dim=-1) @ v_sel
@@ -163,10 +195,15 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
     diff = (out[0].float() - ref).abs().max().item()
     pt_diff = (pt.float() - ref).abs().max().item()
     if diff > 2 * pt_diff + 1e-4 or diff > 0.1:
+        convention = (
+            "qsa_allow_aiu=False on the paged cache"
+            if fa3_qsa_uses_allow_aiu_flag()
+            else "a one-token-per-page view of the pool"
+        )
         _FA3_QSA_UNSUPPORTED_REASON = (
             f"QSA self-test mismatch on a scattered top-k list (max diff {diff:.3g} "
             f"vs tolerance {2 * pt_diff + 1e-4:.3g}): the kernel returned wrong values "
-            "for a one-token-per-page call, the only layout the CUDA path uses"
+            f"for {convention}, the calling convention the CUDA path uses"
         )
         return False, _FA3_QSA_UNSUPPORTED_REASON
 
@@ -194,6 +231,7 @@ def flash_attn_qsa_varlen_func(
     num_splits=1,
     scheduler_metadata=None,
     return_softmax_lse=False,
+    qsa_allow_aiu: bool = False,
 ):
     """Query-sparse attention (QSA) forward over a paged BF16/FP16 KV cache.
 
@@ -220,6 +258,15 @@ def flash_attn_qsa_varlen_func(
         num_splits: 1 disables split-KV; 0 lets FA3 pick.
         scheduler_metadata: pass None so FA3 derives it with QSA semantics. The dense
             precomputation from `get_scheduler_metadata` assumes seqlen_k = pages * page_size.
+        qsa_allow_aiu: bool. Certify every 16-column-aligned group of `topk_table` as
+            16 pool-contiguous tokens, the layout the AIU paged-KV bulk load assumes
+            (one entry read per group, 16 contiguous tokens fetched, the other 15
+            ignored). False (the default) routes QSA through the per-column load that
+            honors each entry individually. On wheels predating the argument the
+            same routing is reached by handing FA3 a one-token-per-page view of the
+            pool -- a view that exists only when the K/V split keeps a block's tokens
+            stride-contiguous, i.e. one KV head per rank; callers with more must
+            gate on :func:`fa3_qsa_uses_allow_aiu_flag` first.
 
     Return:
         out: (total_q, nheads, headdim).
@@ -250,6 +297,34 @@ def flash_attn_qsa_varlen_func(
     # the leading strides may be non-canonical, which FA3 reads from the tensor itself.
     if k_cache.stride(-1) != 1 or v_cache.stride(-1) != 1:
         raise ValueError("QSA k_cache/v_cache must have a contiguous last dimension")
+
+    if fa3_qsa_uses_allow_aiu_flag():
+        # Rebuilt wheel: the caller's certification routes QSA off the AIU bulk load
+        # inside the kernel; the cache goes through exactly as given.
+        fwd_extra = {"qsa_allow_aiu": qsa_allow_aiu}
+    else:
+        if qsa_allow_aiu:
+            raise ValueError(
+                "qsa_allow_aiu=True requires an FA3 build with the qsa_allow_aiu "
+                "argument; this wheel predates it"
+            )
+        # Legacy wheel: reach the same per-column routing through the cache shape.
+        # The AIU bulk load is picked at runtime whenever page_size % 16 == 0, so hand
+        # FA3 a one-token-per-page view of the same pool: page_size becomes 1, every
+        # table entry is honored individually, and the absolute indices the table
+        # already holds are page ids under the view. Zero-copy, but the (block,
+        # token) merge needs one KV head per rank -- K and V interleave per token, so
+        # with more the split view has no valid strides.
+        try:
+            k_cache = k_cache.view(-1, 1, *k_cache.shape[2:])
+            v_cache = v_cache.view(-1, 1, *v_cache.shape[2:])
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"this FA3 build lacks qsa_allow_aiu, and the {k_cache.shape[2]} "
+                "KV-head-per-rank K/V split cannot take the one-token-per-page view "
+                "that steers QSA off the AIU bulk load"
+            ) from e
+        fwd_extra = {}
 
     if NVTX_PROFILE:
         th_nvtx_range_push(
@@ -287,6 +362,7 @@ def flash_attn_qsa_varlen_func(
         True,                 # pack_gqa: QSA carries qhead_per_khead rows in one kBlockM
         0,                    # sm_margin
         None,                 # s_aux
+        **fwd_extra,          # qsa_allow_aiu, only on wheels that carry it
     )
     if NVTX_PROFILE:
         th_nvtx_range_pop()

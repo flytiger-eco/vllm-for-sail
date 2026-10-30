@@ -15,13 +15,15 @@ Two things FA3's QSA path needs that the Triton path did not:
   a row, so every padded column is redirected to an anchor token and removed from the result in
   closed form. See :mod:`.ops.qsa_fa3` for the derivation.
 * **Build numerics.** FA3's AIU paged-KV load path fetches 16 contiguous tokens per
-  page-table entry, so it silently attends to the wrong K/V for the scattered lists
-  the indexer emits; it is picked whenever ``page_size % 16 == 0``, which vLLM's
-  block sizes always satisfy. The CUDA path therefore hands FA3 a one-token-per-page
-  view of the pool, under which the table's absolute indices are page ids and every
-  build routes onto the per-column load path.
-  :func:`vllm.vllm_flash_attn.is_fa3_qsa_supported` self-tests that layout before
-  the CUDA path is selected.
+  16-column group of the table, so it silently attends to the wrong K/V for the
+  scattered lists the indexer emits. The CUDA path therefore calls FA3 with
+  ``qsa_allow_aiu=False`` on wheels that carry the argument (the kernel routes QSA
+  onto the per-column load itself); older wheels get the same routing via a
+  one-token-per-page view of the pool, applied inside
+  :func:`~vllm.vllm_flash_attn.flash_attn_qsa_varlen_func`. That view needs one KV
+  head per rank, which :func:`qsa_cuda_unsupported_reason` enforces on such wheels.
+  :func:`vllm.vllm_flash_attn.is_fa3_qsa_supported` self-tests the calling convention
+  before the CUDA path is selected.
 
 The Triton path in :mod:`.qsa` stays as the fallback for builds and head shapes this kernel cannot
 take; :func:`select_qsa_backend` decides between them once per layer.
@@ -94,7 +96,22 @@ def qsa_cuda_unsupported_reason(
     # `vllm.vllm_flash_attn` with `vllm/vllm_flash_attn/ppu/`, so the QSA trio exists. It is
     # imported here rather than at module scope because :mod:`.qsa` imports this module
     # unconditionally, and a top-level import would make that an ImportError on every other build.
-    from vllm.vllm_flash_attn import fa3_qsa_unsupported_reason, is_fa3_qsa_supported
+    from vllm.vllm_flash_attn import (
+        fa3_qsa_unsupported_reason,
+        fa3_qsa_uses_allow_aiu_flag,
+        is_fa3_qsa_supported,
+    )
+
+    # Wheels predating qsa_allow_aiu are steered off the AIU bulk load through a
+    # one-token-per-page view of the K/V split. That view merges the (block, token)
+    # dims, which requires one KV head per rank: K and V interleave per token, so
+    # with more the split view has no valid strides for the merge.
+    if not fa3_qsa_uses_allow_aiu_flag() and num_kv_heads != 1:
+        return (
+            "the installed FA3 build lacks qsa_allow_aiu, and with "
+            f"{num_kv_heads} KV heads per rank the one-token-per-page view that "
+            "steers it off the AIU bulk load does not exist"
+        )
 
     if not is_fa3_qsa_supported(device):
         return f"the installed FA3 build cannot run QSA ({fa3_qsa_unsupported_reason(device)})"
@@ -275,15 +292,11 @@ class Qwen4ExpQSACudaFlashAttentionImpl(Qwen4ExpQSAFlashAttentionImpl):
             key_cache.shape[1],
             key_cache.shape[0],
         )
-        # Hand FA3 a one-token-per-page view of the same memory: page_size stops
-        # being a multiple of 16, the runtime condition that would route paged
-        # loads onto the AIU bulk path (one table entry per 16-column group, 16
-        # contiguous tokens) -- wrong for the scattered lists the indexer emits --
-        # and the absolute indices the table already holds are page ids under this
-        # view. The split views keep the block/token stride chain, so this is a
-        # zero-copy reshape.
-        key_cache = key_cache.view(-1, 1, *key_cache.shape[2:])
-        value_cache = value_cache.view(-1, 1, *value_cache.shape[2:])
+        # qsa_allow_aiu=False routes QSA off the AIU paged-KV bulk load inside the
+        # kernel -- it fetches 16 contiguous tokens per 16-column group of the table,
+        # wrong for the scattered lists the indexer emits. On wheels predating the
+        # argument the wrapper applies the one-token-per-page view instead; either
+        # way each table entry is honored individually.
         # FA3 writes every row of `out`, so the padded tail of the buffer stays zeroed above.
         out, softmax_lse = flash_attn_qsa_varlen_func(
             query[:num_tokens],
@@ -294,8 +307,12 @@ class Qwen4ExpQSACudaFlashAttentionImpl(Qwen4ExpQSAFlashAttentionImpl):
             attn_metadata.max_query_len,
             softmax_scale=self.scale,
             out=output[:num_tokens],
+            qsa_allow_aiu=False,
             return_softmax_lse=True,
         )
+        # The correction kernels decode the table's absolute indices against the
+        # PAGE_SIZE of the cache they are given, so the real (block, 16) pool works
+        # here regardless of the layout the wrapper handed FA3.
         qsa_fa3_remove_padding(
             out,
             softmax_lse,

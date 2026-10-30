@@ -5,6 +5,7 @@ from vllm.vllm_flash_attn.flash_attn_interface import (
     FA2_AVAILABLE,
     FA3_AVAILABLE,
     fa3_qsa_unsupported_reason,
+    fa3_qsa_uses_allow_aiu_flag,
     fa_version_unsupported_reason,
     flash_attn_qsa_varlen_func,
     flash_attn_varlen_func,
@@ -20,6 +21,7 @@ if not (FA2_AVAILABLE or FA3_AVAILABLE):
 
 __all__ = [
     "fa3_qsa_unsupported_reason",
+    "fa3_qsa_uses_allow_aiu_flag",
     "fa_version_unsupported_reason",
     "flash_attn_qsa_varlen_func",
     "flash_attn_varlen_func",
