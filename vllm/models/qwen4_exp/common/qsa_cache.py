@@ -985,6 +985,10 @@ class QSAKeyStateCache(_QSAStateCache):
         if self.cache_rope_positions:
             position_tail = kv_cache[..., self.rope_position_offset :]
             self.rope_position_cache = position_tail.view(torch.int64)
+            # The compress kernel reads this ring before the step's own write
+            # lands, and the pool arrives uninitialised, so an uncommitted slot
+            # is an arbitrary int64 fed into apply_qsa_rope's gather.
+            self.rope_position_cache.zero_()
         else:
             self.rope_position_cache = None
 

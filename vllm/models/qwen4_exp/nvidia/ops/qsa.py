@@ -479,6 +479,7 @@ def _compress_qsa_groups_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     LOAD_ROPE_POSITIONS: tl.constexpr,
+    ROPE_POSITION_BOUND: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     dims = tl.arange(0, BLOCK_D)
@@ -576,6 +577,21 @@ def _compress_qsa_groups_kernel(
             & (position_dims < 3),
             other=0,
         )
+        # A ring slot is committed only once a token at that logical position has
+        # been stored, and the store runs after this read in program order. An
+        # uncommitted slot therefore yields the KV pool's arrival bytes read as
+        # int64 -- in production 0x7fff7fff7fff7fff, four BF16 NaN lanes -- and
+        # apply_qsa_rope gathers cos_sin_cache with it, which is the device-side
+        # assert. Fall back to the position this kernel computes exactly, the
+        # value the LOAD_ROPE_POSITIONS=False branch below already uses. Rows the
+        # loads masked off carry other=0, which is in range, so they keep 0.
+        if ROPE_POSITION_BOUND > 0:
+            committed = (compressor_state_position_values >= 0) & (
+                compressor_state_position_values < ROPE_POSITION_BOUND
+            )
+            compressor_state_position_values = tl.where(
+                committed, compressor_state_position_values, first_position
+            )
         position_values = tl.where(
             first_from_raw,
             raw_position_values,
@@ -1454,6 +1470,7 @@ def qsa_compress_groups_with_ratio(
     compressed_slots: torch.Tensor,
     compress_ratio: int,
     rope_cache: torch.Tensor | None = None,
+    rope_position_bound: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
 
@@ -1515,8 +1532,14 @@ def qsa_compress_groups_with_ratio(
     if rope_cache is None:
         rope_cache = compressor_state_cache
         load_rope_positions = False
+        rope_bound = 0
     else:
         load_rope_positions = True
+        # 0 disables the check, which is what every caller that does not know the
+        # rotary cache length (the reference tests) keeps getting.
+        rope_bound = int(rope_position_bound) if rope_position_bound else 0
+        if rope_bound < 0:
+            raise ValueError("QSA RoPE position bound must not be negative")
     _compress_qsa_groups_kernel[(rows,)](
         raw_keys,
         raw_positions,
@@ -1551,6 +1574,7 @@ def qsa_compress_groups_with_ratio(
         COMPRESS_RATIO=compress_ratio,
         HEAD_DIM=raw_keys.shape[2],
         LOAD_ROPE_POSITIONS=load_rope_positions,
+        ROPE_POSITION_BOUND=rope_bound,
         BLOCK_D=triton.next_power_of_2(raw_keys.shape[2]),
         num_warps=4,
     )

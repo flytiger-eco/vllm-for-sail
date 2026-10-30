@@ -53,6 +53,17 @@ _QSA_PACKED_DG_MAX_REQS = int(
 _QSA_FUSED_PRE_INDEXER = os.environ.get("VLLM_QSA_FUSED_PRE_INDEXER", "0") == "1"
 
 
+def _qsa_rope_position_bound(rotary_emb: nn.Module) -> int | None:
+    """Row count of cos_sin_cache: the largest index apply_qsa_rope may gather.
+
+    None means "unknown", and leaves the compressor-state ring read unbounded.
+    """
+    cache = getattr(rotary_emb, "cos_sin_cache", None)
+    if cache is None:
+        return None
+    return int(cache.shape[0])
+
+
 def apply_qsa_rope(
     rotary_emb: nn.Module,
     positions: torch.Tensor,
@@ -356,6 +367,7 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.slot_mapping,
                 self.compress_ratio,
                 rope_position_cache,
+                rope_position_bound=_qsa_rope_position_bound(self.rotary_emb),
             )
             compressed_keys = gemma_rmsnorm(
                 pooled.reshape(-1, self.index_head_dim),
