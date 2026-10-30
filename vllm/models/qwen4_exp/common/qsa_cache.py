@@ -1016,9 +1016,26 @@ class QSACompressedKeyCache(_QSAStateCache):
             )
         self._fp8_shadow_enabled = True
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
+    @property
+    def _storage_head_size(self) -> int:
+        """Row width the KV allocator must budget for, in BF16 elements.
+
+        With the FP8 shadow enabled each stored row costs ``head_size`` BF16
+        elements plus ``head_size + 4`` shadow bytes (e4m3 value + fp32
+        scale), so the shadow adds 51.6% at head_size 128. Folding those bytes
+        into the spec width makes the KV allocator size blocks for the total;
+        without it the shadow was allocated at bind time on top of the
+        budgeted cache and could OOM near the memory limit.
+        """
         if not self._fp8_shadow_enabled:
+            return self.head_size
+        shadow_row_bytes = self.head_size + self._FP32_SCALE_BYTES
+        assert shadow_row_bytes % 2 == 0
+        return self.head_size + shadow_row_bytes // 2
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        if not self._fp8_shadow_enabled:
+            super().bind_kv_cache(kv_cache)
             return
         # The runtime block size may have been raised past the configured one
         # (hybrid models bump it so attention pages cover mamba pages), so
@@ -1026,33 +1043,57 @@ class QSACompressedKeyCache(_QSAStateCache):
         # paged kernel requires 64-row pages; wider BF16 pages are split
         # across that many consecutive FP8 pages.
         page_size = self._FP8_SHADOW_PAGE_SIZE
-        if kv_cache.shape[1] % page_size:
+        if (
+            kv_cache.ndim != 4
+            or kv_cache.shape[2] != 1
+            or kv_cache.dtype != torch.bfloat16
+            or kv_cache.shape[3] != self._storage_head_size
+        ):
+            raise ValueError(
+                "QSA compressed cache does not match its packed BF16+FP8 "
+                f"cache spec: {kv_cache.shape} {kv_cache.dtype}"
+            )
+        if not kv_cache.is_contiguous():
+            raise ValueError("QSA compressed cache must be contiguous")
+        num_blocks, block_rows = kv_cache.shape[0], kv_cache.shape[1]
+        if block_rows % page_size:
             raise ValueError(
                 "VLLM_QSA_INDEXER_BACKEND=deepgemm requires the compressed "
                 f"storage block to be a multiple of {page_size} rows, got "
-                f"{kv_cache.shape[1]} (block_size {self.cache_config.block_size}"
+                f"{block_rows} (block_size {self.cache_config.block_size}"
                 f" / compress_ratio {self.compress_ratio} after runtime "
                 "adjustment); set VLLM_QSA_INDEXER_BACKEND=triton"
             )
-        pages_per_block = kv_cache.shape[1] // page_size
-        # FP8 page b * pages_per_block + j holds BF16 block b's rows
-        # [j*64, (j+1)*64), so block tables and slot mappings translate with
-        # pure integer arithmetic.
-        self.fp8_kv_cache = torch.empty(
-            kv_cache.shape[0] * pages_per_block,
+        pages_per_block = block_rows // page_size
+        # The budgeted buffer packs both caches: all BF16 rows first, then the
+        # whole FP8 shadow. FP8 page b * pages_per_block + j holds BF16 block
+        # b's rows [j*64, (j+1)*64), so block tables and slot mappings
+        # translate with pure integer arithmetic. Both views keep the dense
+        # layouts the store/score kernels already require.
+        flat = kv_cache.view(torch.uint8).view(-1)
+        bf16_nbytes = num_blocks * block_rows * self.head_size * 2
+        shadow_nbytes = num_blocks * block_rows * (
+            self.head_size + self._FP32_SCALE_BYTES
+        )
+        bf16_cache = (
+            flat[:bf16_nbytes]
+            .view(torch.bfloat16)
+            .view(num_blocks, block_rows, 1, self.head_size)
+        )
+        self.fp8_kv_cache = flat[bf16_nbytes : bf16_nbytes + shadow_nbytes].view(
+            num_blocks * pages_per_block,
             page_size,
             1,
             self.head_size + self._FP32_SCALE_BYTES,
-            dtype=torch.uint8,
-            device=kv_cache.device,
         )
+        super().bind_kv_cache(bf16_cache)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
-            head_size=self.head_size,
+            head_size=self._storage_head_size,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,
         )
