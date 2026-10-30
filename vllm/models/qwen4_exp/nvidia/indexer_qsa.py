@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import cast
 
 import torch
@@ -27,6 +29,17 @@ from ..common.qsa_cache import (
     canonical_qsa_rope_positions,
 )
 from .ops.qsa_pre_indexer import qsa_pre_indexer
+
+# Gate for the packed DeepGEMM scorer (see the dispatcher near the bottom of
+# QSAIndexer.forward): below this many QSA rows or above this many requests,
+# the packed scorer's Python per-request loop costs more than its kernel
+# saves, so those steps take the flat single-launch Triton scorer instead.
+_QSA_PACKED_DG_MIN_ROWS = int(
+    os.environ.get("VLLM_QSA_PACKED_DG_MIN_ROWS", "2048")
+)
+_QSA_PACKED_DG_MAX_REQS = int(
+    os.environ.get("VLLM_QSA_PACKED_DG_MAX_REQS", "32")
+)
 
 
 def apply_qsa_rope(
@@ -402,9 +415,18 @@ class QSAIndexer(nn.Module):
         packed_key_capacity = getattr(
             compressed_metadata, "packed_key_capacity", 0
         )
+        # The packed scorer loops over requests in Python (several launches
+        # per request per layer), so it only pays off when per-step work
+        # amortizes that loop. Small bursts (decode-side prefill inserts)
+        # and many-request steps stay on the single-launch Triton scorer,
+        # keeping their launch count flat.
+        packed_rows = q.shape[0]
+        packed_reqs = compressed_metadata.seq_lens.shape[0]
         if (
             fp8_key_cache is not None
             and packed_key_capacity > 0
+            and packed_rows >= _QSA_PACKED_DG_MIN_ROWS
+            and packed_reqs <= _QSA_PACKED_DG_MAX_REQS
             and not torch.cuda.is_current_stream_capturing()
         ):
             return qsa_select_packed_tokens_deepgemm(
