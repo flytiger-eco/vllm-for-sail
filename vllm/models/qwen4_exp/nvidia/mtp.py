@@ -15,12 +15,16 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
 
 from collections.abc import Iterable
 
+import json
+import os
+
 import regex as re
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -52,6 +56,46 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
 )
+
+logger = init_logger(__name__)
+
+# Tensor suffixes that only exist in quantized checkpoints.
+_MTP_QUANT_SUFFIXES = (
+    ".weight_scale",
+    ".weight_scale_inv",
+    ".input_scale",
+    ".weight_packed",
+    ".weight_global_scale",
+    ".scale",
+)
+_CKPT_PREFIXES = ("model.language_model.", "language_model.", "model.")
+
+
+def _mtp_checkpoint_is_quantized(model_path: str) -> bool:
+    """Detect whether the on-disk MTP block carries quantized weights.
+
+    Some quantized checkpoints (e.g. compressed-tensors FP8 per-channel) ship
+    the MTP block verbatim in BF16 without any scale tensors while the main
+    model is quantized. Inheriting the target quant config then builds FP8
+    draft layers whose missing scales are silently ignored and whose BF16
+    values get cast into FP8 params, collapsing acceptance. Treat the draft as
+    quantized only when at least one mtp.* tensor has a quantization suffix;
+    when the layout cannot be determined, keep the inherited behavior.
+    """
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    try:
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+    except (OSError, KeyError, json.JSONDecodeError):
+        return True
+    for name in weight_map:
+        for prefix in _CKPT_PREFIXES:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        if name.startswith("mtp.") and name.endswith(_MTP_QUANT_SUFFIXES):
+            return True
+    return False
 
 
 def _remap_ignored_layers(
@@ -123,6 +167,16 @@ def _make_draft_vllm_config(
         raise ValueError("speculative_config.draft_model_config must be set")
 
     draft_quant_config = get_draft_quant_config(vllm_config)
+    if draft_quant_config is not None and not _mtp_checkpoint_is_quantized(
+        speculative_config.draft_model_config.model
+    ):
+        logger.info(
+            "MTP weights in %s have no quantization scales; building the MTP "
+            "draft unquantized instead of inheriting the target's %s config.",
+            speculative_config.draft_model_config.model,
+            draft_quant_config.get_name(),
+        )
+        draft_quant_config = None
 
     # inject packed and ignored modules to the quantization config of draft model
     if draft_quant_config is not None:
