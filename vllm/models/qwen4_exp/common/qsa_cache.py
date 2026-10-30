@@ -770,9 +770,9 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
     ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
         """Fill DeepGEMM decode inputs for uniform decode/spec-decode batches.
 
-        Every request must contribute the same ``next_n`` tokens and together
-        cover the whole batch; anything else stays on the Triton scorer. The
-        per-token visible count follows the Triton kernel's
+        Every real request must contribute the same ``next_n`` tokens and
+        together cover the whole real batch; anything else stays on the Triton
+        scorer. The per-token visible count follows the Triton kernel's
         ``(pos + 1) // compress_ratio`` rule exactly.
         """
         # getattr: tests fake the builder via __new__ without __init__.
@@ -783,11 +783,27 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         if not num_requests:
             return 0, None, None
         candidate = int(query_lens_cpu[0])
+        # A FULL cudagraph batch is padded up to a captured graph size, and the
+        # padding requests come out zero-length because query_start_loc is
+        # filled flat past the real ones. The captured graph still replays the
+        # DeepGEMM scorer over every row, so opting out here would leave that
+        # scorer reading the previous step's context lengths and work schedule.
+        # Zero-length rows need no special casing downstream:
+        # build_qsa_metadata stamps them with logical_position -1, which maps
+        # to a visible count of 0, and the schedule is built from
+        # clamp(min=1) below.
+        num_real = int((query_lens_cpu > 0).sum())
+        # Slicing rather than masking also forces the zero-length padding rows to
+        # be trailing: an interior zero would make the uniformity check fail and
+        # fall back to the Triton scorer instead of misaligning the
+        # [num_requests, candidate] view.
+        real_lens = query_lens_cpu[:num_real]
+        uniform = bool((real_lens == candidate).all())
         if (
             candidate < 1
             or candidate > self.fp8_next_n_max
             or candidate * num_requests != num_tokens
-            or not bool((query_lens_cpu == candidate).all())
+            or not uniform
         ):
             return 0, None, None
 

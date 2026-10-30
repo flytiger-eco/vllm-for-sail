@@ -12,9 +12,10 @@ Covers the FP8 shadow-cache contract and the decode scoring path:
    the BF16 cache (the fused pre-indexer path) with the same result.
 
 3. ``QSAMetadataBuilder._build_fp8_decode_metadata`` only engages for
-   uniform decode batches (every request contributes ``next_n`` tokens
-   covering the whole batch) and fills per-token visible counts with the
-   Triton kernel's ``(pos + 1) // compress_ratio`` rule.
+   uniform decode batches (every real request contributes ``next_n`` tokens
+   covering the whole real batch, trailing zero-length FULL-cudagraph padding
+   rows allowed) and fills per-token visible counts with the Triton kernel's
+   ``(pos + 1) // compress_ratio`` rule.
 
 4. ``qsa_select_paged_tokens_deepgemm`` matches the Triton BF16 production
    scorer's top-k selection on production-shaped inputs.
@@ -258,6 +259,71 @@ def test_build_fp8_decode_metadata_rejects_nonuniform():
         query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32)
     )
     assert builder._build_fp8_decode_metadata(common, positions, 6) == (0, None, None)
+
+
+def test_build_fp8_decode_metadata_tolerates_cudagraph_padding():
+    """FULL cudagraph replay pads the batch up to a captured graph size.
+
+    ``gpu_model_runner`` fills ``query_start_loc`` flat past the real requests,
+    so the padding requests come out zero-length. The captured graph still
+    replays the DeepGEMM scorer over every row, so the guard must accept these
+    batches: opting out leaves the scorer reading the previous step's context
+    lengths and work schedule.
+    """
+    _require_deepgemm_avg()
+    builder = _fake_builder(next_n_max=4)
+    next_n, real_reqs, num_reqs = 4, 3, 5
+    num_tokens = num_reqs * next_n
+    seq_lens = torch.tensor([4096, 37, 1027], dtype=torch.int32, device="cuda")
+    # Two trailing padding requests, written flat exactly as the runner does.
+    common = SimpleNamespace(
+        query_start_loc_cpu=torch.tensor([0, 4, 8, 12, 12, 12], dtype=torch.int32)
+    )
+    real_positions = (
+        seq_lens.to(torch.int64).repeat_interleave(next_n)
+        - next_n
+        + torch.arange(real_reqs * next_n, device="cuda") % next_n
+    )
+    logical_positions = torch.full(
+        (num_tokens,), -1, dtype=torch.int64, device="cuda"
+    )
+    logical_positions[: real_reqs * next_n] = real_positions
+
+    uniform_next_n, context_lens, schedule = builder._build_fp8_decode_metadata(
+        common, logical_positions, num_tokens
+    )
+    assert uniform_next_n == next_n
+    assert context_lens.shape == (num_reqs, next_n)
+    expected = (
+        torch.div(real_positions + 1, COMPRESS_RATIO, rounding_mode="floor")
+        .clamp(min=0)
+        .to(torch.int32)
+        .view(real_reqs, next_n)
+    )
+    assert torch.equal(context_lens[:real_reqs], expected)
+    # build_qsa_metadata stamps padding rows with logical_position -1, which
+    # maps to a visible count of 0, so those rows select nothing.
+    assert not context_lens[real_reqs:].any()
+    assert schedule is not None
+    assert schedule.dtype == torch.int32
+    assert schedule.shape[1] == 2
+    assert (schedule.shape[0] - 1) % builder.fp8_num_sms == 0
+
+
+def test_build_fp8_decode_metadata_rejects_interior_zero():
+    """A zero-length row that is not trailing must fall back to the Triton scorer.
+
+    The guard slices ``query_lens_cpu[:num_real]`` rather than masking nonzero
+    entries, so an interior zero lands inside the slice and fails the uniformity
+    check instead of silently misaligning the ``[num_requests, candidate]`` view.
+    """
+    _require_deepgemm_avg()
+    builder = _fake_builder(next_n_max=4)
+    common = SimpleNamespace(
+        query_start_loc_cpu=torch.tensor([0, 4, 4, 8, 12], dtype=torch.int32)
+    )
+    positions = torch.zeros(16, dtype=torch.int64, device="cuda")
+    assert builder._build_fp8_decode_metadata(common, positions, 16) == (0, None, None)
 
 
 def _make_paged_case(batch_size: int, next_n: int, seed: int):
@@ -709,6 +775,10 @@ if __name__ == "__main__":
     print("PASS test_build_fp8_decode_metadata_uniform")
     test_build_fp8_decode_metadata_rejects_nonuniform()
     print("PASS test_build_fp8_decode_metadata_rejects_nonuniform")
+    test_build_fp8_decode_metadata_tolerates_cudagraph_padding()
+    print("PASS test_build_fp8_decode_metadata_tolerates_cudagraph_padding")
+    test_build_fp8_decode_metadata_rejects_interior_zero()
+    print("PASS test_build_fp8_decode_metadata_rejects_interior_zero")
     for batch_size, next_n in [(8, 1), (6, 2)]:
         test_deepgemm_decode_matches_triton(batch_size, next_n)
         print(f"PASS test_deepgemm_decode_matches_triton B={batch_size} nn={next_n}")
