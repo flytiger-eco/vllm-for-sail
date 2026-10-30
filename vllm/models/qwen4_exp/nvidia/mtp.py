@@ -59,15 +59,9 @@ from .model import (
 
 logger = init_logger(__name__)
 
-# Tensor suffixes that only exist in quantized checkpoints.
-_MTP_QUANT_SUFFIXES = (
-    ".weight_scale",
-    ".weight_scale_inv",
-    ".input_scale",
-    ".weight_packed",
-    ".weight_global_scale",
-    ".scale",
-)
+# Tensor suffixes of a plain floating-point MTP block. Anything else under
+# mtp.* (scales, packed integers, zero points, ...) marks a quantized layout.
+_MTP_FLOAT_SUFFIXES = (".weight", ".bias")
 _CKPT_PREFIXES = ("model.language_model.", "language_model.", "model.")
 
 
@@ -78,9 +72,16 @@ def _mtp_checkpoint_is_quantized(model_path: str) -> bool:
     the MTP block verbatim in BF16 without any scale tensors while the main
     model is quantized. Inheriting the target quant config then builds FP8
     draft layers whose missing scales are silently ignored and whose BF16
-    values get cast into FP8 params, collapsing acceptance. Treat the draft as
-    quantized only when at least one mtp.* tensor has a quantization suffix;
-    when the layout cannot be determined, keep the inherited behavior.
+    values get cast into FP8 params, collapsing acceptance.
+
+    Judge by positive confirmation, not by a quantization-suffix whitelist:
+    packed formats name their tensors differently per method (AWQ/GPTQ use
+    .qweight/.qzeros/.scales, FP8 keeps .weight plus .weight_scale, ...), so a
+    suffix list silently misses formats it does not know and a missed match
+    builds unquantized draft layers that then fail to load the packed weights.
+    Only a checkpoint whose mtp.* tensors are all plain .weight/.bias floats is
+    treated as unquantized; anything unrecognized keeps the inherited config.
+    When the layout cannot be determined, keep the inherited behavior.
     """
     index_path = os.path.join(model_path, "model.safetensors.index.json")
     try:
@@ -93,7 +94,7 @@ def _mtp_checkpoint_is_quantized(model_path: str) -> bool:
             if name.startswith(prefix):
                 name = name[len(prefix):]
                 break
-        if name.startswith("mtp.") and name.endswith(_MTP_QUANT_SUFFIXES):
+        if name.startswith("mtp.") and not name.endswith(_MTP_FLOAT_SUFFIXES):
             return True
     return False
 
@@ -171,7 +172,7 @@ def _make_draft_vllm_config(
         speculative_config.draft_model_config.model
     ):
         logger.info(
-            "MTP weights in %s have no quantization scales; building the MTP "
+            "MTP weights in %s are plain floats; building the MTP "
             "draft unquantized instead of inheriting the target's %s config.",
             speculative_config.draft_model_config.model,
             draft_quant_config.get_name(),
