@@ -56,6 +56,16 @@ if not NVTX_PROFILE:
 
 DEFAULT_FA_VERSION = 2
 
+# Cached result of the QSA build probe; None means "not probed yet".
+_FA3_QSA_SUPPORTED: Optional[bool] = None
+_FA3_QSA_UNSUPPORTED_REASON: Optional[str] = None
+
+# Top-k list for the QSA build probe's numerical self-test: scattered (no two
+# entries adjacent when sorted) and unsorted, so a load path that fetches contiguous
+# runs cannot match the reference by accident. Every entry is a page id into the
+# probe's one-token-per-page caches, the layout the CUDA path always calls with.
+_QSA_PROBE_TOPK = (3, 40, 77, 114, 151, 188, 225, 8, 45, 82, 119, 156, 193, 230, 31, 68)
+
 def _is_fa2_supported(device = None) -> Tuple[bool, Optional[str]]:
     if not FA2_AVAILABLE:
         return False, f"FA2 is unavaible due to: {FA2_UNAVAILABLE_REASON}"
@@ -82,6 +92,207 @@ def is_fa_version_supported(fa_version: int, device = None) -> bool:
     elif fa_version == 3:
         return _is_fa3_supported(device)[0]
 
+
+def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
+    """Detect whether the installed FA3 whl computes QSA correctly.
+
+    QSA has no dedicated op: `fwd` picks the path from the rank of `page_table`, so a
+    build without it rejects a 3-D table with a TORCH_CHECK. Passing that check is not
+    enough: the probe issues one call in the layout the CUDA path always uses -- one
+    token per page, so a top-k entry is a page id -- and compares the result against a
+    PyTorch reference on a scattered, unsorted list. That layout keeps page_size off
+    the multiples of 16 that route paged loads onto the AIU bulk path (one entry per
+    16-column group, 16 contiguous tokens), which silently attends to the wrong K/V
+    for scattered lists, so the self-test guards the per-column path the kernel is
+    actually reached through. The result is cached because it is a property of the
+    whl, not of the arguments.
+    """
+    global _FA3_QSA_SUPPORTED, _FA3_QSA_UNSUPPORTED_REASON
+    if _FA3_QSA_SUPPORTED is not None or _FA3_QSA_UNSUPPORTED_REASON is not None:
+        return _FA3_QSA_SUPPORTED, _FA3_QSA_UNSUPPORTED_REASON
+
+    ok, reason = _is_fa3_supported(device)
+    if not ok:
+        _FA3_QSA_UNSUPPORTED_REASON = reason
+        return False, reason
+    if not hasattr(torch.ops, "flash_attn_3") or not hasattr(torch.ops.flash_attn_3, "fwd"):
+        _FA3_QSA_UNSUPPORTED_REASON = "torch.ops.flash_attn_3.fwd is not registered"
+        return False, _FA3_QSA_UNSUPPORTED_REASON
+
+    softmax_scale = 256 ** -0.5
+    try:
+        dev = device if device is not None else torch.cuda.current_device()
+        # Deterministic inputs, generated off-device so the probe never disturbs the
+        # global RNG state. device="cpu" is explicit: this process may run with a
+        # non-CPU default device, where randn would target that device and reject
+        # the CPU generator. The caches mirror the one-token-per-page layout the CUDA
+        # path calls with (256 single-token pages), so the scattered entries in
+        # _QSA_PROBE_TOPK are page ids; 2 query heads over 1 KV head is inside the
+        # kernel's GQA limit.
+        gen = torch.Generator(device="cpu").manual_seed(0x5A1)
+        q = torch.randn(1, 2, 256, generator=gen, device="cpu",
+                        dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
+        k_cache = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
+                              dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
+        v_cache = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
+                              dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
+        topk_table = torch.tensor(
+            _QSA_PROBE_TOPK, dtype=torch.int32, device=dev).view(1, 1, -1)
+        cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=dev)
+
+        out, _lse = flash_attn_qsa_varlen_func(
+            q, k_cache, v_cache, topk_table, cu_seqlens_q, 1,
+            softmax_scale=softmax_scale, return_softmax_lse=True,
+        )
+        torch.cuda.synchronize()
+    except Exception as e:  # noqa: BLE001 - any failure means "no QSA in this build"
+        _FA3_QSA_UNSUPPORTED_REASON = f"{type(e).__name__}: {e}"
+        return False, _FA3_QSA_UNSUPPORTED_REASON
+
+    # Reference: per-query-token gather attention in fp32, plus an all-bf16 PyTorch
+    # pass whose rounding error sizes the tolerance (the criterion of
+    # test_qsa_cases.py, plus a hard cap: a load path that fetches the wrong K/V
+    # misses by O(1), far past both bounds).
+    idx = topk_table.view(-1).long()
+    k_sel = k_cache.reshape(-1, 256)[idx]
+    v_sel = v_cache.reshape(-1, 256)[idx]
+    scores = (q[0].float() @ k_sel.float().t()) * softmax_scale
+    ref = torch.softmax(scores, dim=-1) @ v_sel.float()
+    pt = torch.softmax((q[0] @ k_sel.t()) * softmax_scale, dim=-1) @ v_sel
+
+    diff = (out[0].float() - ref).abs().max().item()
+    pt_diff = (pt.float() - ref).abs().max().item()
+    if diff > 2 * pt_diff + 1e-4 or diff > 0.1:
+        _FA3_QSA_UNSUPPORTED_REASON = (
+            f"QSA self-test mismatch on a scattered top-k list (max diff {diff:.3g} "
+            f"vs tolerance {2 * pt_diff + 1e-4:.3g}): the kernel returned wrong values "
+            "for a one-token-per-page call, the only layout the CUDA path uses"
+        )
+        return False, _FA3_QSA_UNSUPPORTED_REASON
+
+    _FA3_QSA_SUPPORTED = True
+    return True, None
+
+
+def is_fa3_qsa_supported(device=None) -> bool:
+    return _probe_fa3_qsa(device)[0]
+
+
+def fa3_qsa_unsupported_reason(device=None) -> Optional[str]:
+    return _probe_fa3_qsa(device)[1]
+
+
+def flash_attn_qsa_varlen_func(
+    q,
+    k_cache,
+    v_cache,
+    topk_table,
+    cu_seqlens_q,
+    max_seqlen_q,
+    softmax_scale=None,
+    out=None,
+    num_splits=1,
+    scheduler_metadata=None,
+    return_softmax_lse=False,
+):
+    """Query-sparse attention (QSA) forward over a paged BF16/FP16 KV cache.
+
+    This is FA3's QSA path, selected purely by the rank of `topk_table`. Unlike a normal page
+    table, which maps (batch, page_rank) -> page id, a QSA table holds one row per *unpadded
+    query token* and lists the absolute KV-pool token indices that token attends to:
+
+        absolute_index = page_id * page_size + offset_in_page
+
+    Because `seqlen_k` is then redefined to `topk` (the table width), the table is batch-wide
+    and every row must already be causal, so `is_causal` degenerates inside the kernel.
+
+    Arguments:
+        q: (total_q, nheads, headdim). headdim must be 256.
+        k_cache: (num_pages, page_size, nheads_k, headdim), stride(-1) == 1.
+        v_cache: same shape/strides as k_cache.
+        topk_table: (total_q, 1, topk), int32, stride(-1) == 1. Absolute token indices; a
+            negative entry makes the kernel skip the load, but note it does NOT mask the score
+            (see the caller-side padding contract).
+        cu_seqlens_q: (batch_size + 1,), int32. Required by QSA.
+        max_seqlen_q: int. Required together with cu_seqlens_q.
+        softmax_scale: float. Defaults to 1 / sqrt(headdim).
+        out: (total_q, nheads, headdim). Written in place when given.
+        num_splits: 1 disables split-KV; 0 lets FA3 pick.
+        scheduler_metadata: pass None so FA3 derives it with QSA semantics. The dense
+            precomputation from `get_scheduler_metadata` assumes seqlen_k = pages * page_size.
+
+    Return:
+        out: (total_q, nheads, headdim).
+        softmax_lse [if return_softmax_lse]: (nheads, total_q), float32.
+    """
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    if q.shape[-1] != 256:
+        raise ValueError(f"QSA only supports head dim 256, got {q.shape[-1]}")
+    if topk_table.dim() != 3 or topk_table.size(1) != 1:
+        raise ValueError(
+            "QSA topk_table must have shape (total_q, 1, topk); a 2-D table would be read as "
+            "an ordinary page table and silently produce dense attention"
+        )
+    if topk_table.size(0) != q.size(0):
+        raise ValueError("QSA topk_table must have exactly one row per query token")
+    if topk_table.dtype != torch.int32:
+        raise ValueError("QSA topk_table must be int32")
+    if q.size(1) % k_cache.size(2):
+        raise ValueError("QSA requires nheads to be a multiple of nheads_k")
+    if q.size(1) // k_cache.size(2) > 32:
+        raise ValueError("QSA supports at most 32 query heads per KV head")
+
+    q = maybe_contiguous(q)
+    topk_table = maybe_contiguous(topk_table)
+    cu_seqlens_q = maybe_contiguous(cu_seqlens_q)
+    # k_cache/v_cache are transposed views of vLLM's packed cache: stride(-1) == 1 is required,
+    # the leading strides may be non-canonical, which FA3 reads from the tensor itself.
+    if k_cache.stride(-1) != 1 or v_cache.stride(-1) != 1:
+        raise ValueError("QSA k_cache/v_cache must have a contiguous last dimension")
+
+    if NVTX_PROFILE:
+        th_nvtx_range_push(
+            f"[FW_FMHA] --format=flash_attn_3_qsa,Forward,type:QSA,"
+            f"seqlen_q:{max_seqlen_q},head_dim:{q.shape[-1]},"
+            f"num_heads:{q.shape[-2]},num_heads_k:{k_cache.shape[-2]},"
+            f"batch_size:{len(cu_seqlens_q) - 1},topk:{topk_table.shape[-1]},"
+            f"page_size:{k_cache.shape[1]},data_type:{q.dtype}"
+        )
+
+    out, softmax_lse, _, _ = torch.ops.flash_attn_3.fwd(
+        q, k_cache, v_cache,
+        None, None,           # k_new, v_new: QSA rejects both
+        None,                 # q_v
+        out,
+        cu_seqlens_q,
+        None,                 # cu_seqlens_k: passing it would make seqlen_k = max_seqlen_k
+        None,                 # cu_seqlens_k_new
+        None, None,           # seqused_q, seqused_k (FA3 force-nulls seqused_k for QSA)
+        max_seqlen_q,
+        None,                 # max_seqlen_k: seqlen_k is already topk
+        topk_table,           # 3-D -> selects the QSA path
+        None,                 # kv_batch_idx: rejected
+        None,                 # leftpad_k: rejected, indices are already absolute
+        None, None, None,     # rotary_cos, rotary_sin, seqlens_rotary
+        None, None, None,     # q_descale, k_descale, v_descale
+        softmax_scale,
+        True,                 # is_causal: degenerates for QSA, the topk list is pre-filtered
+        -1, -1,               # window_size
+        0,                    # attention_chunk
+        0.0,                  # softcap
+        True,                 # is_rotary_interleaved
+        scheduler_metadata,
+        num_splits,
+        True,                 # pack_gqa: QSA carries qhead_per_khead rows in one kBlockM
+        0,                    # sm_margin
+        None,                 # s_aux
+    )
+    if NVTX_PROFILE:
+        th_nvtx_range_pop()
+    return (out, softmax_lse) if return_softmax_lse else out
+
+
 def fa_version_unsupported_reason(fa_version: int, device = None) \
     -> Optional[str]:
     assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
@@ -89,6 +300,7 @@ def fa_version_unsupported_reason(fa_version: int, device = None) \
         return _is_fa2_supported(device)[1]
     elif fa_version == 3:
         return _is_fa3_supported(device)[1]
+
 
 #
 #  For vLLM we only care about `flash_attn_varlen_func` and 

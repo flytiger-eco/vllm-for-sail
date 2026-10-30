@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_USE_CUDA_QSA: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -389,6 +390,20 @@ def use_mega_aot_artifact():
     )
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
+
+
+def use_cuda_qsa() -> bool:
+    """Parse ``VLLM_USE_CUDA_QSA``, rejecting spellings that would quietly pin Triton.
+
+    A typo would otherwise read as "off" and cost the CUDA path silently, which is how
+    a performance regression goes unnoticed.
+    """
+    value = os.getenv("VLLM_USE_CUDA_QSA", "true").strip().lower()
+    if value in ("1", "true"):
+        return True
+    if value in ("0", "false"):
+        return False
+    raise ValueError(f"VLLM_USE_CUDA_QSA must be true or false, got {value!r}")
 
 
 def env_with_choices(
@@ -890,6 +905,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
     ),
+    # Whether Qwen4Exp (qwen3.8-flash-next) query-sparse attention runs on PPU's FA3
+    # CUDA QSA kernel. On by default: each layer probes the kernel at construction --
+    # a numerical self-test on a scattered top-k list, called through the same
+    # one-token-per-page layout that keeps the kernel off the AIU paged-KV bulk path
+    # -- logs which path it took, and falls back to the Triton reference path when
+    # the probe fails. Set to false to pin Triton.
+    "VLLM_USE_CUDA_QSA": use_cuda_qsa,
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.

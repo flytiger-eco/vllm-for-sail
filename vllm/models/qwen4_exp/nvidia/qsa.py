@@ -279,8 +279,39 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
 
-        self.attn_backend = Qwen4ExpQSAFlashAttentionBackend
-        self.impl = Qwen4ExpQSAFlashAttentionImpl(
+        self.indexer = QSAIndexer(
+            vllm_config=vllm_config,
+            config=config,
+            layer_id=layer_id,
+            rotary_emb=self.rotary_emb,
+            quant_config=quant_config,
+            prefix=f"{prefix}.indexer",
+        )
+        # PPU's FA3 ships a CUDA QSA kernel. Take it when it can reproduce this Triton path's
+        # semantics for the config at hand and stay on Triton when it cannot. Imported late because
+        # qsa_cuda subclasses the backend and impl defined above.
+        from .qsa_cuda import (
+            Qwen4ExpQSACudaFlashAttentionBackend,
+            Qwen4ExpQSACudaFlashAttentionImpl,
+            register_qsa_cuda_buffers,
+            select_qsa_backend,
+        )
+
+        self.use_cuda_qsa, self.qsa_kernel_reason = select_qsa_backend(
+            head_dim=self.head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+        )
+        # `impl` is not an nn.Module, so settling it after the indexer reorders no submodule.
+        if self.use_cuda_qsa:
+            self.attn_backend = Qwen4ExpQSACudaFlashAttentionBackend
+            impl_cls: type[Qwen4ExpQSAFlashAttentionImpl] = (
+                Qwen4ExpQSACudaFlashAttentionImpl
+            )
+        else:
+            self.attn_backend = Qwen4ExpQSAFlashAttentionBackend
+            impl_cls = Qwen4ExpQSAFlashAttentionImpl
+        self.impl = impl_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -292,14 +323,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             AttentionType.DECODER,
             None,
         )
-        self.indexer = QSAIndexer(
-            vllm_config=vllm_config,
-            config=config,
-            layer_id=layer_id,
-            rotary_emb=self.rotary_emb,
-            quant_config=quant_config,
-            prefix=f"{prefix}.indexer",
-        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.register_buffer(
             "topk_indices_buffer",
@@ -310,6 +333,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             ),
             persistent=False,
         )
+        if self.use_cuda_qsa:
+            register_qsa_cuda_buffers(
+                self, max_tokens, self.indexer.output_width, self.num_heads
+            )
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
