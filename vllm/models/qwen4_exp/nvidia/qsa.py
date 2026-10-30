@@ -9,6 +9,7 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -35,6 +36,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionType,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.flash_attn import (
@@ -49,7 +51,10 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa_cache import (
+    QSAForwardMetadata,
+    qsa_deepgemm_block_multiple,
+)
 from . import model
 from .indexer_qsa import QSAIndexer
 
@@ -69,6 +74,19 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "QWEN4_EXP_QSA_TRITON"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # The Triton indexer scores BF16 rows through a flexible per-row slot
+        # mapping, so it keeps FlashAttention's block-size contract unchanged.
+        if envs.VLLM_QSA_INDEXER_BACKEND != "deepgemm":
+            return FlashAttentionBackend.get_supported_kernel_block_sizes()
+        # DeepGEMM instead scores an FP8 shadow cache laid out in fixed-size
+        # pages. Declare that multiple so the framework's block-size
+        # negotiation (get_preferred_block_size and _align_hybrid_block_size)
+        # derives a compatible size on its own when the user did not pass
+        # --block-size, instead of failing later in bind_kv_cache.
+        return [MultipleOf(qsa_deepgemm_block_multiple())]
 
     @staticmethod
     def get_impl_cls() -> type[Qwen4ExpQSAFlashAttentionImpl]:
@@ -335,7 +353,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if self.use_cuda_qsa:
             register_qsa_cuda_buffers(
-                self, max_tokens, self.indexer.output_width, self.num_heads
+                self, max_tokens, self.indexer.output_width
             )
 
         static_context = vllm_config.compilation_config.static_forward_context

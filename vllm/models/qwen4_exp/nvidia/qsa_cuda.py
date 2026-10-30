@@ -11,9 +11,12 @@ Two things FA3's QSA path needs that the Triton path did not:
 * **Absolute indices.** FA3 is handed a ``(total_q, 1, topk)`` table of KV-pool token indices,
   while the indexer emits request-relative logical positions. The translation runs once per step
   in :func:`~.ops.qsa_fa3.qsa_fa3_prepare_page_table`.
-* **Padding semantics.** FA3 masks only the columns past the *table width*, never a ``-1`` inside
-  a row, so every padded column is redirected to an anchor token and removed from the result in
-  closed form. See :mod:`.ops.qsa_fa3` for the derivation.
+* **Padding semantics.** FA3 bounds the columns it walks by ``seqused_k`` and masks the rest,
+  so every query row is handed over as its own one-token batch
+  (``cu_seqlens_q = arange(total_q + 1)``, ``max_seqlen_q = 1``) and the prepare pass counts
+  the row's usable prefix into ``seqused_k``. The ``-1`` tail never enters the softmax.
+* **Split-KV.** The call passes ``num_splits=0`` so FA3 picks the split count itself instead of
+  running the whole top-k walk of every row on a single tile.
 * **Build numerics.** FA3's AIU paged-KV load path fetches 16 contiguous tokens per
   16-column group of the table, so it silently attends to the wrong K/V for the
   scattered lists the indexer emits. The CUDA path therefore calls FA3 with
@@ -157,18 +160,19 @@ def select_qsa_backend(
 # sized for max_num_batched_tokens so a forward pass allocates nothing and stays capturable in a
 # CUDA graph.
 QSA_FA3_PAGE_TABLE = "qsa_fa3_page_table"
-QSA_FA3_ANCHOR = "qsa_fa3_anchor"
-QSA_FA3_PADDING = "qsa_fa3_padding"
-QSA_FA3_RECOMPUTE_FLAGS = "qsa_fa3_recompute_flags"
+QSA_FA3_SEQUSED_K = "qsa_fa3_seqused_k"
+QSA_FA3_ROW_CU_SEQLENS_Q = "qsa_fa3_row_cu_seqlens_q"
 
 
 def register_qsa_cuda_buffers(
-    layer: torch.nn.Module, max_tokens: int, selection_width: int, num_heads: int
+    layer: torch.nn.Module, max_tokens: int, selection_width: int
 ) -> None:
     """Attach the CUDA path's scratch buffers to a QSA owner layer.
 
-    ``qsa_fa3_page_table`` keeps the singleton dimension FA3 needs to recognise a QSA table; the
-    correction kernels take a squeezed view of the same storage.
+    ``qsa_fa3_page_table`` keeps the singleton dimension FA3 needs to recognise a QSA table;
+    the prepare kernel takes a squeezed view of the same storage. ``qsa_fa3_row_cu_seqlens_q``
+    is the arange that turns every query row into its own one-token batch, so FA3 reads each
+    row's used length from ``qsa_fa3_seqused_k``.
     """
     layer.register_buffer(
         QSA_FA3_PAGE_TABLE,
@@ -176,18 +180,13 @@ def register_qsa_cuda_buffers(
         persistent=False,
     )
     layer.register_buffer(
-        QSA_FA3_ANCHOR,
+        QSA_FA3_SEQUSED_K,
         torch.empty(max_tokens, dtype=torch.int32),
         persistent=False,
     )
     layer.register_buffer(
-        QSA_FA3_PADDING,
-        torch.empty(max_tokens, dtype=torch.int32),
-        persistent=False,
-    )
-    layer.register_buffer(
-        QSA_FA3_RECOMPUTE_FLAGS,
-        torch.empty(max_tokens, num_heads, dtype=torch.uint8),
+        QSA_FA3_ROW_CU_SEQLENS_Q,
+        torch.arange(max_tokens + 1, dtype=torch.int32),
         persistent=False,
     )
 
@@ -263,9 +262,8 @@ class Qwen4ExpQSACudaFlashAttentionImpl(Qwen4ExpQSAFlashAttentionImpl):
                 "QSA owner did not register the CUDA scratch buffers; "
                 "register_qsa_cuda_buffers must run when the CUDA path is selected"
             )
-        anchor = getattr(layer, QSA_FA3_ANCHOR)[:num_tokens]
-        padding = getattr(layer, QSA_FA3_PADDING)[:num_tokens]
-        recompute_flags = getattr(layer, QSA_FA3_RECOMPUTE_FLAGS)[:num_tokens]
+        seqused_k = getattr(layer, QSA_FA3_SEQUSED_K)[:num_tokens]
+        row_cu_seqlens_q = getattr(layer, QSA_FA3_ROW_CU_SEQLENS_Q)[: num_tokens + 1]
         page_table = page_table[:num_tokens]
 
         logical_indices = topk_buffer[:num_tokens]
@@ -280,15 +278,14 @@ class Qwen4ExpQSACudaFlashAttentionImpl(Qwen4ExpQSAFlashAttentionImpl):
         # point exists; see the note in :func:`qsa_cuda_unsupported_reason`.
         from vllm.vllm_flash_attn import flash_attn_qsa_varlen_func
 
-        from .ops.qsa_fa3 import qsa_fa3_prepare_page_table, qsa_fa3_remove_padding
+        from .ops.qsa_fa3 import qsa_fa3_prepare_page_table
 
         qsa_fa3_prepare_page_table(
             logical_indices,
             attn_metadata.block_table,
             token_to_req,
             page_table.squeeze(1),
-            anchor,
-            padding,
+            seqused_k,
             key_cache.shape[1],
             key_cache.shape[0],
         )
@@ -297,42 +294,30 @@ class Qwen4ExpQSACudaFlashAttentionImpl(Qwen4ExpQSAFlashAttentionImpl):
         # wrong for the scattered lists the indexer emits. On wheels predating the
         # argument the wrapper applies the one-token-per-page view instead; either
         # way each table entry is honored individually.
+        # Every query row is its own one-token batch (row_cu_seqlens_q), so seqused_k
+        # bounds FA3's walk to the row's usable prefix and the padded tail stays out
+        # of the softmax. num_splits=0 lets FA3 pick split-KV itself.
         # FA3 writes every row of `out`, so the padded tail of the buffer stays zeroed above.
-        out, softmax_lse = flash_attn_qsa_varlen_func(
+        flash_attn_qsa_varlen_func(
             query[:num_tokens],
             key_cache,
             value_cache,
             page_table,
-            attn_metadata.query_start_loc,
-            attn_metadata.max_query_len,
+            row_cu_seqlens_q,
+            1,  # max_seqlen_q: one token per row-batch
             softmax_scale=self.scale,
             out=output[:num_tokens],
+            num_splits=0,
+            seqused_k=seqused_k,
             qsa_allow_aiu=False,
-            return_softmax_lse=True,
-        )
-        # The correction kernels decode the table's absolute indices against the
-        # PAGE_SIZE of the cache they are given, so the real (block, 16) pool works
-        # here regardless of the layout the wrapper handed FA3.
-        qsa_fa3_remove_padding(
-            out,
-            softmax_lse,
-            query[:num_tokens],
-            key_cache,
-            value_cache,
-            page_table.squeeze(1),
-            anchor,
-            padding,
-            recompute_flags,
-            self.scale,
         )
         return output
 
 
 __all__ = [
-    "QSA_FA3_ANCHOR",
-    "QSA_FA3_PADDING",
     "QSA_FA3_PAGE_TABLE",
-    "QSA_FA3_RECOMPUTE_FLAGS",
+    "QSA_FA3_ROW_CU_SEQLENS_Q",
+    "QSA_FA3_SEQUSED_K",
     "Qwen4ExpQSACudaFlashAttentionBackend",
     "Qwen4ExpQSACudaFlashAttentionImpl",
     "Qwen4ExpQSACudaMetadataBuilder",
