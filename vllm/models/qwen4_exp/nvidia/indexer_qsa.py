@@ -9,6 +9,7 @@ from typing import cast
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -167,6 +168,19 @@ class QSAIndexer(nn.Module):
             vllm_config=vllm_config,
         )
 
+        self.indexer_backend = envs.VLLM_QSA_INDEXER_BACKEND
+        if self.indexer_backend == "deepgemm":
+            from vllm.utils.ppu_deep_gemm import has_fp8_mqa_avg_logits
+
+            if not has_fp8_mqa_avg_logits():
+                raise RuntimeError(
+                    "VLLM_QSA_INDEXER_BACKEND=deepgemm but the installed "
+                    "deep_gemm lacks fp8_mqa_avg_logits / "
+                    "fp8_paged_mqa_avg_logits; set "
+                    "VLLM_QSA_INDEXER_BACKEND=triton"
+                )
+            self.compressed_key_cache.enable_fp8_shadow()
+
     @property
     def output_width(self) -> int:
         return self.token_topk + self.compress_ratio - 1
@@ -217,8 +231,12 @@ class QSAIndexer(nn.Module):
 
         from .ops.qsa import (
             qsa_compress_groups_with_ratio,
+            qsa_select_packed_tokens_deepgemm,
             qsa_select_paged_tokens,
+            qsa_select_paged_tokens_deepgemm,
             qsa_store_cache_rows,
+            qsa_store_cache_rows_fp8,
+            qsa_store_cache_rows_fp8_readback,
         )
 
         raw_metadata, compressed_metadata = metadata
@@ -235,6 +253,12 @@ class QSAIndexer(nn.Module):
         )
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
+        # getattr: tests fake the cache with a namespace lacking the shadow.
+        fp8_key_cache = getattr(self.compressed_key_cache, "fp8_kv_cache", None)
+        if fp8_key_cache is not None:
+            fp8_pages_per_block = (
+                fp8_key_cache.shape[0] // compressed_key_cache.shape[0]
+            )
 
         if self.use_fused_pre_indexer:
             q = projected_q.new_empty(
@@ -267,6 +291,14 @@ class QSAIndexer(nn.Module):
                     else None
                 ),
             )
+            if fp8_key_cache is not None:
+                # The fused kernel only writes BF16; mirror the compressed
+                # rows it just committed into the FP8 shadow.
+                qsa_store_cache_rows_fp8_readback(
+                    fp8_key_cache,
+                    compressed_metadata.slot_mapping,
+                    compressed_key_cache,
+                )
         else:
             # Unfused reference path
             from flashinfer.norm import gemma_rmsnorm
@@ -320,6 +352,13 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.slot_mapping,
                 compressed_keys,
             )
+            if fp8_key_cache is not None:
+                qsa_store_cache_rows_fp8(
+                    fp8_key_cache,
+                    compressed_metadata.slot_mapping,
+                    compressed_keys,
+                    compressed_key_cache.shape[1],
+                )
             qsa_store_cache_rows(
                 raw_key_cache,
                 raw_metadata.slot_mapping,
@@ -338,6 +377,57 @@ class QSAIndexer(nn.Module):
             return out
 
         # Score compressed keys, select blocks, then expand them to token indices.
+        uniform_next_n = compressed_metadata.uniform_next_n
+        if (
+            fp8_key_cache is not None
+            and uniform_next_n
+            and compressed_metadata.decode_schedule_metadata is not None
+        ):
+            return qsa_select_paged_tokens_deepgemm(
+                q,
+                fp8_key_cache,
+                compressed_metadata.block_table,
+                compressed_metadata.decode_context_lens,
+                compressed_metadata.decode_schedule_metadata,
+                uniform_next_n,
+                compressed_metadata.token_to_req,
+                compressed_metadata.logical_positions,
+                compressed_metadata.seq_lens,
+                self.token_topk,
+                self.compress_ratio,
+                fp8_pages_per_block,
+                out,
+            )
+        # getattr: tests fake the metadata with a namespace lacking the field.
+        packed_key_capacity = getattr(
+            compressed_metadata, "packed_key_capacity", 0
+        )
+        if (
+            fp8_key_cache is not None
+            and packed_key_capacity > 0
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            return qsa_select_packed_tokens_deepgemm(
+                q,
+                fp8_key_cache,
+                compressed_metadata.block_table,
+                compressed_metadata.seq_lens,
+                compressed_metadata.token_to_req,
+                compressed_metadata.logical_positions,
+                self.token_topk,
+                self.compress_ratio,
+                packed_key_capacity,
+                fp8_pages_per_block,
+                out,
+                # getattr: tests fake the metadata with a namespace lacking
+                # the fields; the op then derives them with a blocking copy.
+                request_row_counts=getattr(
+                    compressed_metadata, "request_row_counts", None
+                ),
+                request_seq_lens=getattr(
+                    compressed_metadata, "request_seq_lens", None
+                ),
+            )
         return qsa_select_paged_tokens(
             q,
             compressed_key_cache,

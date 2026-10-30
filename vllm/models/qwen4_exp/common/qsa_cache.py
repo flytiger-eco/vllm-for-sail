@@ -21,6 +21,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -561,6 +562,20 @@ class QSAForwardMetadata(AttentionMetadata):
     num_actual_tokens: int
     storage_block_size: int
     compress_ratio: int
+    # DeepGEMM FP8 decode path: nonzero when the whole batch is a uniform
+    # decode batch (every request contributes uniform_next_n tokens).
+    uniform_next_n: int = 0
+    # [num_reqs, uniform_next_n] int32 visible compressed rows per token,
+    # matching the Triton kernel's (pos + 1) // compress_ratio rule.
+    decode_context_lens: torch.Tensor | None = None
+    decode_schedule_metadata: torch.Tensor | None = None
+    # Host-side upper bound on packed compressed rows for the DeepGEMM
+    # prefill/mixed scoring path (0 when the FP8 path is disabled).
+    packed_key_capacity: int = 0
+    # Host per-request token counts / sequence lengths for the packed
+    # DeepGEMM path's per-request scoring split (None when FP8 disabled).
+    request_row_counts: list[int] | None = None
+    request_seq_lens: list[int] | None = None
 
 
 class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
@@ -606,6 +621,64 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 0, 2, dtype=torch.int32, device=device
             )
 
+        # DeepGEMM FP8 decode scoring. context lengths and the work schedule
+        # live in persistent buffers so captured CUDA graphs see stable
+        # addresses; build() refills them eagerly on every step/replay.
+        self.fp8_decode = (
+            not self.is_circular_buffer
+            and self.compress_ratio != 1
+            and envs.VLLM_QSA_INDEXER_BACKEND == "deepgemm"
+        )
+        self.fp8_next_n_max = 0
+        if self.fp8_decode:
+            from vllm.utils.ppu_deep_gemm import (
+                get_num_sms,
+                get_paged_mqa_logits_metadata,
+            )
+
+            text_config = vllm_config.model_config.hf_text_config
+            missing = [
+                name
+                for name in ("indexer_n_heads", "indexer_head_dim")
+                if getattr(text_config, name, None) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "VLLM_QSA_INDEXER_BACKEND=deepgemm requires "
+                    f"{missing} on the model text config; set "
+                    "VLLM_QSA_INDEXER_BACKEND=triton"
+                )
+            self.fp8_index_heads = int(text_config.indexer_n_heads)
+            self.fp8_index_head_dim = int(text_config.indexer_head_dim)
+            self.fp8_next_n_max = 1 + vllm_config.num_speculative_tokens
+            self.fp8_num_sms = get_num_sms()
+            self.decode_context_lens_buffer = torch.zeros(
+                max_requests * self.fp8_next_n_max,
+                dtype=torch.int32,
+                device=device,
+            )
+            # DeepGEMM sizes the schedule by a tile search over
+            # (next_n, heads, head_dim); probe each next_n once so the
+            # persistent buffer covers every decode shape exactly. This also
+            # JIT-compiles the metadata kernel ahead of CUDA graph capture.
+            schedule_rows = 1
+            for next_n in range(1, self.fp8_next_n_max + 1):
+                probe = get_paged_mqa_logits_metadata(
+                    torch.ones(1, next_n, dtype=torch.int32, device=device),
+                    QSACompressedKeyCache._FP8_SHADOW_PAGE_SIZE,
+                    self.fp8_num_sms,
+                    metadata_extra=(
+                        next_n,
+                        self.fp8_index_heads,
+                        self.fp8_index_head_dim,
+                        1,
+                    ),
+                )
+                schedule_rows = max(schedule_rows, probe.shape[0])
+            self.decode_schedule_buffer = torch.zeros(
+                (schedule_rows, 2), dtype=torch.int32, device=device
+            )
+
     def build(
         self,
         common_prefix_len: int,
@@ -637,6 +710,25 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             k_work_metadata_buffer=k_work_metadata if build_k_work else None,
             request_capacity=request_capacity,
         )
+        uniform_next_n, decode_context_lens, decode_schedule_metadata = (
+            self._build_fp8_decode_metadata(
+                common_attn_metadata, logical_positions, num_tokens
+            )
+        )
+        request_row_counts = None
+        request_seq_lens = None
+        # getattr: tests fake the builder via __new__ without __init__.
+        # Async spec decode drops the CPU mirrors; the op then derives the
+        # host metadata itself with a blocking copy.
+        if (
+            getattr(self, "fp8_decode", False)
+            and common_attn_metadata.query_start_loc_cpu is not None
+            and common_attn_metadata.seq_lens_cpu is not None
+        ):
+            request_row_counts = (
+                torch.diff(common_attn_metadata.query_start_loc_cpu).tolist()
+            )
+            request_seq_lens = common_attn_metadata.seq_lens_cpu.tolist()
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
@@ -648,7 +740,83 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             num_actual_tokens=num_tokens,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
+            uniform_next_n=uniform_next_n,
+            decode_context_lens=decode_context_lens,
+            decode_schedule_metadata=decode_schedule_metadata,
+            packed_key_capacity=self._build_fp8_packed_capacity(
+                common_attn_metadata
+            ),
+            request_row_counts=request_row_counts,
+            request_seq_lens=request_seq_lens,
         )
+
+    def _build_fp8_packed_capacity(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> int:
+        """Upper-bound packed compressed rows from host-side batch sizes."""
+        # getattr: tests fake the builder via __new__ without __init__.
+        if not getattr(self, "fp8_decode", False):
+            return 0
+        return common_attn_metadata.num_reqs * (
+            common_attn_metadata.max_seq_len // self.compress_ratio
+        )
+
+    def _build_fp8_decode_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        logical_positions: torch.Tensor,
+        num_tokens: int,
+    ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
+        """Fill DeepGEMM decode inputs for uniform decode/spec-decode batches.
+
+        Every request must contribute the same ``next_n`` tokens and together
+        cover the whole batch; anything else stays on the Triton scorer. The
+        per-token visible count follows the Triton kernel's
+        ``(pos + 1) // compress_ratio`` rule exactly.
+        """
+        # getattr: tests fake the builder via __new__ without __init__.
+        if not getattr(self, "fp8_decode", False):
+            return 0, None, None
+        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+        num_requests = query_lens_cpu.shape[0]
+        if not num_requests:
+            return 0, None, None
+        candidate = int(query_lens_cpu[0])
+        if (
+            candidate < 1
+            or candidate > self.fp8_next_n_max
+            or candidate * num_requests != num_tokens
+            or not bool((query_lens_cpu == candidate).all())
+        ):
+            return 0, None, None
+
+        from vllm.utils.ppu_deep_gemm import get_paged_mqa_logits_metadata
+
+        visible = torch.div(
+            logical_positions + 1,
+            self.compress_ratio,
+            rounding_mode="floor",
+        ).clamp_(min=0)
+        self.decode_context_lens_buffer[:num_tokens].copy_(visible)
+        context_lens = self.decode_context_lens_buffer[:num_tokens].view(
+            num_requests, candidate
+        )
+        # The kernel and its schedule never see zero-length rows; top-k still
+        # uses the raw counts so empty rows select nothing.
+        schedule_metadata = get_paged_mqa_logits_metadata(
+            context_lens.clamp(min=1),
+            QSACompressedKeyCache._FP8_SHADOW_PAGE_SIZE,
+            self.fp8_num_sms,
+            metadata_extra=(
+                candidate,
+                self.fp8_index_heads,
+                self.fp8_index_head_dim,
+                1,
+            ),
+        )
+        n = schedule_metadata.shape[0]
+        self.decode_schedule_buffer[:n].copy_(schedule_metadata)
+        return candidate, context_lens, self.decode_schedule_buffer[:n]
 
 
 class QSAStateBackend(AttentionBackend):
@@ -793,6 +961,57 @@ class QSAKeyStateCache(_QSAStateCache):
 
 class QSACompressedKeyCache(_QSAStateCache):
     """Normalized, group-first-RoPE BF16 key at one row per complete group."""
+
+    # DeepGEMM fp8_paged_mqa_avg_logits fused-cache contract.
+    _FP8_SHADOW_PAGE_SIZE = 64
+    _FP8_SHADOW_HEAD_SIZES = (32, 64, 128)
+    _FP32_SCALE_BYTES = 4
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._fp8_shadow_enabled = False
+        self.fp8_kv_cache: torch.Tensor | None = None
+
+    def enable_fp8_shadow(self) -> None:
+        """Mirror every stored row into a DeepGEMM-layout FP8 shadow cache."""
+        if self.head_size not in self._FP8_SHADOW_HEAD_SIZES:
+            raise ValueError(
+                "VLLM_QSA_INDEXER_BACKEND=deepgemm supports indexer head dim "
+                f"{self._FP8_SHADOW_HEAD_SIZES}, got {self.head_size}; set "
+                "VLLM_QSA_INDEXER_BACKEND=triton"
+            )
+        self._fp8_shadow_enabled = True
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        if not self._fp8_shadow_enabled:
+            return
+        # The runtime block size may have been raised past the configured one
+        # (hybrid models bump it so attention pages cover mamba pages), so
+        # validate the bound tensor instead of cache_config. The DeepGEMM
+        # paged kernel requires 64-row pages; wider BF16 pages are split
+        # across that many consecutive FP8 pages.
+        page_size = self._FP8_SHADOW_PAGE_SIZE
+        if kv_cache.shape[1] % page_size:
+            raise ValueError(
+                "VLLM_QSA_INDEXER_BACKEND=deepgemm requires the compressed "
+                f"storage block to be a multiple of {page_size} rows, got "
+                f"{kv_cache.shape[1]} (block_size {self.cache_config.block_size}"
+                f" / compress_ratio {self.compress_ratio} after runtime "
+                "adjustment); set VLLM_QSA_INDEXER_BACKEND=triton"
+            )
+        pages_per_block = kv_cache.shape[1] // page_size
+        # FP8 page b * pages_per_block + j holds BF16 block b's rows
+        # [j*64, (j+1)*64), so block tables and slot mappings translate with
+        # pure integer arithmetic.
+        self.fp8_kv_cache = torch.empty(
+            kv_cache.shape[0] * pages_per_block,
+            page_size,
+            1,
+            self.head_size + self._FP32_SCALE_BYTES,
+            dtype=torch.uint8,
+            device=kv_cache.device,
+        )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config

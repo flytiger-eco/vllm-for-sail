@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_USE_CUDA_QSA: bool = True
+    VLLM_QSA_INDEXER_BACKEND: str = "triton"
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -913,6 +914,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # paged-KV bulk path) -- logs which path it took, and falls back to the Triton
     # reference path when the probe fails. Set to false to pin Triton.
     "VLLM_USE_CUDA_QSA": use_cuda_qsa,
+    # Qwen4Exp QSA indexer scoring backend. "triton" (default) scores the BF16
+    # compressed-key cache with the Triton reference kernel; "deepgemm" keeps a
+    # mirrored FP8 compressed cache and scores decode-shaped batches with
+    # DeepGEMM's fp8_paged_mqa_avg_logits. Anything else is rejected so a typo
+    # cannot silently pin the slow path.
+    "VLLM_QSA_INDEXER_BACKEND": env_with_choices(
+        "VLLM_QSA_INDEXER_BACKEND", "triton", ["triton", "deepgemm"]
+    ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.

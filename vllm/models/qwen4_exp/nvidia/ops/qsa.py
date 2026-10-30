@@ -10,6 +10,10 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.ppu_deep_gemm import (
+    fp8_mqa_avg_logits,
+    fp8_paged_mqa_avg_logits,
+)
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -809,6 +813,295 @@ def qsa_select_paged_tokens(
     return out
 
 
+def qsa_select_paged_tokens_deepgemm(
+    q: torch.Tensor,
+    fp8_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    uniform_next_n: int,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_topk: int,
+    compress_ratio: int,
+    fp8_pages_per_block: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """DeepGEMM FP8 scoring for uniform decode batches.
+
+    ``context_lens`` holds each token's visible compressed-row count (the
+    Triton kernel's ``(pos + 1) // compress_ratio`` rule). The paged kernel
+    carries no q_scale, so per-row quantization only rescales that row's
+    logits by a positive factor, which cannot change its top-k selection.
+    ``fp8_pages_per_block`` maps the BF16-geometry block table onto the
+    shadow cache's 64-row pages.
+    """
+
+    rows = q.shape[0]
+    output_width = token_topk + compress_ratio - 1
+    if out is None:
+        out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
+    if out.shape != (rows, output_width):
+        raise ValueError("QSA selection output has an invalid shape")
+    if not rows:
+        return out
+    if (
+        uniform_next_n < 1
+        or rows % uniform_next_n
+        or context_lens.shape != (rows // uniform_next_n, uniform_next_n)
+    ):
+        raise ValueError("QSA DeepGEMM decode requires a uniform token layout")
+    batch_size = rows // uniform_next_n
+
+    q_scale = q.abs().float().amax(dim=(1, 2)).clamp_(min=1e-4) / _FP8_E4M3_MAX
+    q_fp8 = (q / q_scale[:, None, None]).to(torch.float8_e4m3fn)
+    fp8_block_table = _expand_qsa_fp8_block_table(block_table, fp8_pages_per_block)
+    columns = fp8_block_table.shape[1] * fp8_cache.shape[1]
+    logits = fp8_paged_mqa_avg_logits(
+        q_fp8.view(batch_size, uniform_next_n, q.shape[1], q.shape[2]),
+        fp8_cache,
+        context_lens.clamp(min=1),
+        fp8_block_table,
+        schedule_metadata,
+        columns,
+    )
+    block_topk = token_topk // compress_ratio
+    blocks = torch.empty((rows, block_topk), dtype=torch.int32, device=q.device)
+    topk_workspace = torch.empty(
+        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+    )
+    torch.ops._C.persistent_topk(
+        logits, context_lens.view(-1), blocks, topk_workspace, block_topk, columns
+    )
+    expand_qsa_block_indices_cuda(
+        blocks,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out,
+    )
+    return out
+
+
+def gather_packed_qsa_fp8_keys(
+    fp8_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+    packed_key_capacity: int,
+    fp8_pages_per_block: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather committed compressed rows from the FP8 shadow into packed order.
+
+    Request i's rows occupy ``[cu[i], cu[i] + seq_lens[i] // compress_ratio)``
+    of the packed space. Returns ``(keys, scales, cu_seqlens)``: e4m3
+    ``[packed_key_capacity, head_dim]``, fp32 ``[packed_key_capacity]``, and
+    int64 ``[num_reqs + 1]``. Rows past the true total hold garbage and must
+    not be referenced; all sizing derives from the host-side capacity bound,
+    so nothing here synchronizes. ``block_table`` uses BF16-geometry blocks;
+    ``fp8_pages_per_block`` translates it onto the shadow's 64-row pages.
+    """
+
+    num_reqs = sequence_lengths.shape[0]
+    page_size = fp8_cache.shape[1]
+    head_dim = fp8_cache.shape[3] - 4
+    block_table = _expand_qsa_fp8_block_table(block_table, fp8_pages_per_block)
+    compressed_lengths = torch.div(
+        sequence_lengths, compress_ratio, rounding_mode="floor"
+    )
+    cu_seqlens = torch.zeros(num_reqs + 1, dtype=torch.int64, device=fp8_cache.device)
+    torch.cumsum(compressed_lengths, 0, dtype=torch.int64, out=cu_seqlens[1:])
+    packed_positions = torch.arange(
+        packed_key_capacity, dtype=torch.int64, device=fp8_cache.device
+    )
+    packed_req = torch.searchsorted(cu_seqlens[1:], packed_positions, right=True)
+    # Rows at/past the true total alias earlier requests; their gathered
+    # bytes are never read, and the clamps keep the gather indices in bounds.
+    packed_req.clamp_(max=num_reqs - 1)
+    packed_row = packed_positions - cu_seqlens.index_select(0, packed_req)
+    packed_row.clamp_(0, block_table.shape[1] * page_size - 1)
+    block_ids = block_table[packed_req, packed_row // page_size].long()
+    slot = packed_row % page_size
+    # The cache's 4-D shape pretends per-row [value|scale] interleave, but
+    # each block is planar: all values, then all scales (the layout the
+    # store kernel writes and the paged kernel reads).
+    value_rows = fp8_cache.view(fp8_cache.shape[0], -1)[:, : page_size * head_dim]
+    packed_keys = value_rows.view(-1, page_size, head_dim)[block_ids, slot].view(
+        torch.float8_e4m3fn
+    )
+    scale_plane = fp8_cache.view(fp8_cache.shape[0], -1)[:, page_size * head_dim :]
+    packed_scales = scale_plane.view(torch.float32)[block_ids, slot]
+    return packed_keys, packed_scales, cu_seqlens
+
+
+def qsa_select_packed_tokens_deepgemm(
+    q: torch.Tensor,
+    fp8_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    token_topk: int,
+    compress_ratio: int,
+    packed_key_capacity: int,
+    fp8_pages_per_block: int,
+    out: torch.Tensor | None = None,
+    *,
+    request_row_counts: list[int] | None = None,
+    request_seq_lens: list[int] | None = None,
+) -> torch.Tensor:
+    """DeepGEMM FP8 scoring for prefill and mixed batches.
+
+    Every request's committed compressed rows are gathered from the paged FP8
+    shadow into one packed key space, but scoring runs per request with the
+    K ranges rebased to that request's own slice: the non-paged avg operator
+    emits logits of width N = the request's compressed length, so both the
+    kernel's clean-up masking and persistent_topk then cost O(own length)
+    per row instead of O(packed offset) — later requests in a large packed
+    space would otherwise pay for the full prefix.
+
+    ``packed_key_capacity`` is a host-side upper bound
+    (``num_reqs * (max_seq_len // compress_ratio)``) so no GPU sync is needed;
+    packed rows past the true total hold garbage but are never referenced.
+    ``request_row_counts``/``request_seq_lens`` are the host-side per-request
+    token counts and sequence lengths; when omitted they are derived with a
+    blocking download (test fakes only — production callers pass them from
+    the metadata builder's CPU tensors).
+    """
+
+    rows = q.shape[0]
+    output_width = token_topk + compress_ratio - 1
+    if out is None:
+        out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
+    if out.shape != (rows, output_width):
+        raise ValueError("QSA selection output has an invalid shape")
+    if token_topk % compress_ratio:
+        raise ValueError("QSA token top-k must be divisible by compression ratio")
+    if not rows:
+        return out
+    if packed_key_capacity <= 0:
+        raise ValueError("QSA packed scoring needs a positive key capacity")
+    if (
+        fp8_cache.ndim != 4
+        or fp8_cache.shape[2] != 1
+        or fp8_cache.dtype != torch.uint8
+    ):
+        raise ValueError("QSA FP8 cache must be uint8 [pages, page_size, 1, dim + 4]")
+    page_size = fp8_cache.shape[1]
+    head_dim = fp8_cache.shape[3] - 4
+    if q.shape[2] != head_dim:
+        raise ValueError("QSA packed scoring query/cache head-dim mismatch")
+    num_reqs = sequence_lengths.shape[0]
+    device = q.device
+
+    if request_row_counts is None or request_seq_lens is None:
+        request_row_counts = (
+            torch.bincount(token_to_req.long(), minlength=num_reqs).tolist()
+        )
+        request_seq_lens = sequence_lengths.tolist()
+    if len(request_row_counts) != num_reqs or len(request_seq_lens) != num_reqs:
+        raise ValueError("QSA packed scoring host metadata size mismatch")
+
+    packed_keys, packed_scales, _ = gather_packed_qsa_fp8_keys(
+        fp8_cache,
+        block_table,
+        sequence_lengths,
+        compress_ratio,
+        packed_key_capacity,
+        fp8_pages_per_block,
+    )
+
+    # Per-row visible count relative to the owning request, matching the
+    # Triton kernel's min((pos + 1) // ratio, seq_len // ratio) rule.
+    req_per_row = token_to_req.long()
+    visible = torch.div(
+        query_positions + 1, compress_ratio, rounding_mode="floor"
+    ).clamp_(min=0)
+    committed = torch.div(
+        sequence_lengths, compress_ratio, rounding_mode="floor"
+    ).index_select(0, req_per_row)
+    visible = torch.minimum(visible, committed).to(torch.int32)
+
+    q_scale = q.abs().float().amax(dim=(1, 2)).clamp_(min=1e-4) / _FP8_E4M3_MAX
+    q_fp8 = (q / q_scale[:, None, None]).to(torch.float8_e4m3fn)
+
+    block_topk = token_topk // compress_ratio
+    # Mirror the operator's tile pick so the budget matches its internal
+    # logits stride; clean_logits masks via masked_fill, which roughly
+    # triples the transient footprint, so budget three copies.
+    block_kv = 128 if q.shape[1] == 4 else (32 if q.shape[1] == 32 else 64) * 4
+    zero_starts = torch.zeros(rows, dtype=torch.int32, device=device)
+    topk_workspace = torch.empty(
+        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=device
+    )
+    blocks_buffer = torch.empty((rows, block_topk), dtype=torch.int32, device=device)
+
+    row_offset = 0
+    packed_offset = 0
+    for n_rows, seq_len in zip(request_row_counts, request_seq_lens):
+        req_rows = slice(row_offset, row_offset + n_rows)
+        n_keys = seq_len // compress_ratio
+        if n_keys <= 0:
+            # No committed compressed group: no block picks, but expand
+            # still appends the in-progress partial group from positions.
+            blocks = blocks_buffer[:n_rows].fill_(-1)
+            expand_qsa_block_indices_cuda(
+                blocks,
+                query_positions[req_rows],
+                sequence_lengths,
+                token_to_req[req_rows],
+                compress_ratio,
+                token_topk,
+                out[req_rows],
+            )
+            row_offset += n_rows
+            continue
+        kv_req = (
+            packed_keys[packed_offset : packed_offset + n_keys],
+            packed_scales[packed_offset : packed_offset + n_keys],
+        )
+        packed_offset += n_keys
+        aligned_kv = -(-(n_keys + block_kv) // 256) * 256
+        rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(aligned_kv * 12, 1))
+        for chunk_start in range(0, n_rows, rows_per_chunk):
+            chunk_end = min(chunk_start + rows_per_chunk, n_rows)
+            row_slice = slice(row_offset + chunk_start, row_offset + chunk_end)
+            n_chunk = chunk_end - chunk_start
+            logits = fp8_mqa_avg_logits(
+                q_fp8[row_slice],
+                kv_req,
+                zero_starts[:n_chunk],
+                visible[row_slice],
+                True,
+                q_scale=q_scale[row_slice],
+            )
+            blocks = blocks_buffer[:n_chunk]
+            torch.ops._C.persistent_topk(
+                logits, visible[row_slice], blocks, topk_workspace,
+                block_topk, n_keys,
+            )
+            # persistent_topk returns picks in ascending order, so the -1
+            # padding precedes the real picks; expand stops at the first -1,
+            # so compact the real picks to the front (stable: ascending
+            # order is kept). Picks are already request-relative.
+            order = torch.argsort((blocks < 0).to(torch.int8), dim=1, stable=True)
+            blocks = blocks.gather(1, order)
+            expand_qsa_block_indices_cuda(
+                blocks,
+                query_positions[row_slice],
+                sequence_lengths,
+                token_to_req[row_slice],
+                compress_ratio,
+                token_topk,
+                out[row_slice],
+            )
+        row_offset += n_rows
+    return out
+
+
 def qsa_sparse_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -988,6 +1281,165 @@ def qsa_store_cache_rows(
         WIDTH=cache.shape[3],
         BLOCK_D=triton.next_power_of_2(cache.shape[3]),
         num_warps=4,
+    )
+
+
+_FP8_E4M3_MAX = 448.0
+_FP8_SHADOW_PAGE_SIZE = 64
+
+
+def _expand_qsa_fp8_block_table(
+    block_table: torch.Tensor, pages_per_block: int
+) -> torch.Tensor:
+    """Map a BF16-geometry block table onto 64-row FP8 shadow pages.
+
+    FP8 page ``b * pages_per_block + j`` mirrors BF16 block ``b`` rows
+    ``[j * 64, (j + 1) * 64)``; one page per block makes this the identity.
+    """
+    if pages_per_block == 1:
+        return block_table
+    cols = block_table.shape[1]
+    expanded = block_table.repeat_interleave(pages_per_block, dim=1)
+    pattern = (
+        torch.arange(pages_per_block, device=block_table.device)
+        .repeat(cols)
+        .to(expanded.dtype)
+    )
+    return expanded * pages_per_block + pattern
+
+
+def _translate_qsa_fp8_slots(
+    slot_mapping: torch.Tensor, bf16_page_size: int
+) -> torch.Tensor:
+    """Translate BF16-geometry flat slots to FP8 shadow slots.
+
+    ``floor`` division keeps negative (padding) slots unchanged, and a
+    64-row BF16 page makes this the identity.
+    """
+    fp8_page = _FP8_SHADOW_PAGE_SIZE
+    if bf16_page_size == fp8_page:
+        return slot_mapping
+    blocks = torch.div(slot_mapping, bf16_page_size, rounding_mode="floor")
+    rows = slot_mapping - blocks * bf16_page_size
+    return blocks * bf16_page_size + (rows // fp8_page) * fp8_page + rows % fp8_page
+
+
+@triton.jit
+def _store_qsa_rows_fp8_kernel(
+    cache_ptr,
+    slots_ptr,
+    values_ptr,
+    scales_ptr,
+    stride_cache_block,
+    stride_values_row,
+    num_rows,
+    num_blocks,
+    PAGE_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    # DeepGEMM fused layout per block: PAGE_SIZE*HEAD_DIM value bytes, then
+    # PAGE_SIZE float scales — not per-row [value|scale] interleave.
+    row = tl.program_id(0)
+    dims = tl.arange(0, BLOCK_D)
+    slot = tl.load(slots_ptr + row)
+    valid = (row < num_rows) & (slot >= 0) & (slot < num_blocks * PAGE_SIZE)
+    block = tl.maximum(slot, 0) // PAGE_SIZE
+    token = tl.maximum(slot, 0) % PAGE_SIZE
+    base = block.to(tl.int64) * stride_cache_block
+    values = tl.load(
+        values_ptr + row * stride_values_row + dims,
+        mask=valid & (dims < HEAD_DIM),
+        other=0,
+    )
+    tl.store(
+        cache_ptr + base + token * HEAD_DIM + dims,
+        values,
+        mask=valid & (dims < HEAD_DIM),
+    )
+    scale = tl.load(scales_ptr + row, mask=valid, other=0.0)
+    bits = scale.to(tl.uint32, bitcast=True)
+    scale_bytes = tl.arange(0, 4)
+    tl.store(
+        cache_ptr + base + PAGE_SIZE * HEAD_DIM + token * 4 + scale_bytes,
+        ((bits >> (scale_bytes * 8)) & 0xFF).to(tl.uint8),
+        mask=valid,
+    )
+
+
+def _quantize_store_cache_rows_fp8(
+    cache_fp8: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rows: torch.Tensor,
+    bf16_page_size: int,
+) -> None:
+    if cache_fp8.ndim != 4 or cache_fp8.shape[2] != 1:
+        raise ValueError("QSA FP8 cache must be [pages, page_size, 1, dim + 4]")
+    if cache_fp8.dtype != torch.uint8:
+        raise ValueError("QSA FP8 cache must be uint8")
+    if bf16_page_size % cache_fp8.shape[1]:
+        raise ValueError("QSA BF16 page must be a multiple of the FP8 page")
+    head_dim = cache_fp8.shape[3] - 4
+    if rows.ndim == 3:
+        if rows.shape[1] != 1:
+            raise ValueError("QSA FP8 cache rows must have one head")
+        rows = rows[:, 0]
+    if rows.shape != (slot_mapping.numel(), head_dim):
+        raise ValueError("QSA FP8 cache rows and slots have incompatible shapes")
+    if not rows.shape[0]:
+        return
+    slot_mapping = _translate_qsa_fp8_slots(slot_mapping, bf16_page_size)
+    amax = rows.abs().float().amax(dim=1).clamp_(min=1e-4)
+    scales = amax / _FP8_E4M3_MAX
+    values = (rows * (_FP8_E4M3_MAX / amax)[:, None]).to(torch.float8_e4m3fn)
+    _store_qsa_rows_fp8_kernel[(rows.shape[0],)](
+        cache_fp8,
+        slot_mapping,
+        values.view(torch.uint8),
+        scales,
+        cache_fp8.stride(0),
+        values.stride(0),
+        rows.shape[0],
+        cache_fp8.shape[0],
+        PAGE_SIZE=cache_fp8.shape[1],
+        HEAD_DIM=head_dim,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        num_warps=4,
+    )
+
+
+def qsa_store_cache_rows_fp8(
+    cache_fp8: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    rows: torch.Tensor,
+    bf16_page_size: int,
+) -> None:
+    """Quantize in-hand BF16 rows to e4m3 and scatter into the FP8 shadow."""
+
+    if not cache_fp8.is_cuda or not HAS_TRITON:
+        raise RuntimeError("QSA CUDA FP8 cache stores require Triton")
+    _quantize_store_cache_rows_fp8(cache_fp8, slot_mapping, rows, bf16_page_size)
+
+
+def qsa_store_cache_rows_fp8_readback(
+    cache_fp8: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    cache_bf16: torch.Tensor,
+) -> None:
+    """Mirror just-stored BF16 cache rows into the FP8 shadow cache.
+
+    Used on the fused pre-indexer path, where the compressed rows exist only
+    in the BF16 cache. Invalid slots read row zero and are masked on store.
+    """
+
+    if not cache_fp8.is_cuda or not HAS_TRITON:
+        raise RuntimeError("QSA CUDA FP8 cache stores require Triton")
+    if not slot_mapping.numel():
+        return
+    flat = cache_bf16.view(-1, cache_bf16.shape[-1])
+    rows = flat.index_select(0, slot_mapping.clamp(min=0))
+    _quantize_store_cache_rows_fp8(
+        cache_fp8, slot_mapping, rows, cache_bf16.shape[1]
     )
 
 

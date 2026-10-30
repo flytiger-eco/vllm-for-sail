@@ -212,6 +212,8 @@ _w4a16_grouped_masked_impl: Callable[..., Any] | None = None
 # mqa logtiss
 _fp8_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
+_fp8_mqa_avg_logits_impl: Callable[..., Any] | None = None
+_fp8_paged_mqa_avg_logits_impl: Callable[..., Any] | None = None
 _int8_mqa_logits_impl: Callable[..., Any] | None = None
 _int8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
@@ -241,6 +243,7 @@ def _lazy_init() -> None:
     global _w4a16_grouped_nopad_impl, _w4a16_grouped_fused_impl, _w4a16_grouped_masked_impl
     global _set_compile_mode_impl, _get_compile_mode_impl
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
+    global _fp8_mqa_avg_logits_impl, _fp8_paged_mqa_avg_logits_impl
     global _int8_mqa_logits_impl, _int8_paged_mqa_logits_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
@@ -300,6 +303,8 @@ def _lazy_init() -> None:
     _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
     _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
     _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
+    _fp8_mqa_avg_logits_impl = getattr(_dg, "fp8_mqa_avg_logits", None)
+    _fp8_paged_mqa_avg_logits_impl = getattr(_dg, "fp8_paged_mqa_avg_logits", None)
     _int8_mqa_logits_impl = getattr(_dg, "int8_mqa_logits", None)
     _int8_paged_mqa_logits_impl = getattr(_dg, "int8_paged_mqa_logits", None)
     _fp8_fp4_mqa_logits_impl = getattr(_dg, "fp8_fp4_mqa_logits", None)
@@ -693,6 +698,116 @@ def fp8_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+    )
+
+
+def has_fp8_mqa_avg_logits() -> bool:
+    """Return True if the installed deep_gemm provides the QSA avg-logits
+    interfaces (fp8_mqa_avg_logits / fp8_paged_mqa_avg_logits)."""
+    _lazy_init()
+    return (
+        _fp8_mqa_avg_logits_impl is not None
+        and _fp8_paged_mqa_avg_logits_impl is not None
+    )
+
+
+def fp8_mqa_avg_logits(
+    q: torch.Tensor,
+    kv: tuple[torch.Tensor, torch.Tensor],
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    clean_logits: bool,
+    max_seqlen_k: int = 0,
+    q_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute FP8 MQA avg logits for QSA index scoring (no KV paging).
+
+    Semantics: ``logits = sum_h(relu(q @ k)) * q_scale * k_scale /
+    sqrt(head_dim)`` — the per-head sum is unweighted, unlike
+    `fp8_mqa_logits` which takes per-head weights.
+
+    Args:
+        q: Query tensor of shape [M, H, D]. Casted to
+            `torch.float8_e4m3fn` by caller.
+        kv: Tuple `(k_fp8, k_scales)` where `k_fp8` has shape [N, D] with
+            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N]
+            with dtype `torch.float32`.
+        cu_seqlen_ks: Start indices (inclusive) for valid K per query position,
+            shape [M], dtype int32.
+        cu_seqlen_ke: End indices (exclusive) for valid K per query position,
+            shape [M], dtype int32.
+        clean_logits: Whether to clean the unfilled logits into `-inf`.
+        max_seqlen_k: 0 for uncompressed output [M, N]; >0 for compressed
+            output [M, max_seqlen_k] (requires clean_logits=False).
+        q_scale: Optional positive per-row (or scalar) scale applied to the
+            logits, shape [M] (or numel 1), dtype `torch.float32`. Positive
+            per-row scaling never changes a row's top-k selection.
+
+    Returns:
+        Logits tensor of shape [M, N] (or [M, max_seqlen_k]), dtype
+        `torch.float32`.
+    """
+    _lazy_init()
+    if _fp8_mqa_avg_logits_impl is None:
+        return _missing()
+    return _fp8_mqa_avg_logits_impl(
+        q,
+        kv,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=clean_logits,
+        max_seqlen_k=max_seqlen_k,
+        q_scale=q_scale,
+    )
+
+
+def fp8_paged_mqa_avg_logits(
+    q_fp8: torch.Tensor,
+    kv_cache_fp8: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_context_len: int,
+) -> torch.Tensor:
+    """Compute FP8 MQA avg logits for QSA index scoring on a paged KV-cache.
+
+    Semantics: ``logits = sum_h(relu(q @ k)) * k_scale / sqrt(head_dim)`` —
+    unweighted per-head sum, no per-head weights and no q_scale. Logits
+    outside each row's context length are NOT cleaned by the kernel
+    (`clean_logits` is unsupported for the 2D `context_lens` used here);
+    the caller must mask them to `-inf` before top-k.
+
+    Args:
+        q_fp8: Query tensor of shape [B, next_n, H, D]. Casted to
+            `torch.float8_e4m3fn` by caller.
+        kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
+            [num_blocks, 64, 1, D+4], dtype `torch.uint8`. Per block, the
+            first 64*D bytes hold the FP8 values, followed by 64 float
+            dequant scales. Block size must be 64.
+        context_lens: Tensor of shape [B, next_n], dtype int32; effective
+            context length per (batch element, speculative token).
+        block_tables: Tensor of shape [B, max_blocks], dtype int32; maps
+            logical block indices to physical blocks in the paged cache.
+        schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
+            used to distribute work across SMs.
+        max_context_len: Maximum context length used to size the logits
+            output.
+
+    Returns:
+        Logits tensor of shape [B * next_n, max_context_len], dtype
+        `torch.float32`.
+    """
+    _lazy_init()
+    if _fp8_paged_mqa_avg_logits_impl is None:
+        return _missing()
+    return _fp8_paged_mqa_avg_logits_impl(
+        q_fp8,
+        kv_cache_fp8,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_context_len,
+        clean_logits=False,
     )
 
 
@@ -1126,8 +1241,11 @@ __all__ = [
     "w4a16_m_grouped_gemm_nt_masked",
     "fp8_mqa_logits",
     "fp8_mqa_logits_torch",
+    "fp8_mqa_avg_logits",
     "fp8_paged_mqa_logits",
     "fp8_paged_mqa_logits_torch",
+    "fp8_paged_mqa_avg_logits",
+    "has_fp8_mqa_avg_logits",
     "int8_mqa_logits",
     "int8_paged_mqa_logits",
     "fp8_fp4_mqa_logits",
