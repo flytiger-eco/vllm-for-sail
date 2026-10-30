@@ -1,9 +1,8 @@
 # Copyright (c) 2023, Tri Dao.
 
-from typing import Optional, Union, Tuple, List
+from typing import Optional, Tuple
 
 import torch
-import torch.nn as nn
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -97,7 +96,7 @@ def fa3_qsa_uses_allow_aiu_flag() -> bool:
 
 def _is_fa2_supported(device = None) -> Tuple[bool, Optional[str]]:
     if not FA2_AVAILABLE:
-        return False, f"FA2 is unavaible due to: {FA2_UNAVAILABLE_REASON}"
+        return False, f"FA2 is unavailable due to: {FA2_UNAVAILABLE_REASON}"
     if torch.cuda.get_device_capability(device)[0] < 8:
         return False, \
             "FA2 is only supported on devices with compute capability >= 8"
@@ -105,21 +104,21 @@ def _is_fa2_supported(device = None) -> Tuple[bool, Optional[str]]:
 
 def _is_fa3_supported(device = None) -> Tuple[bool, Optional[str]]:
     if not FA3_AVAILABLE:
-        return False, f"FA3 is unavaible due to: {FA3_UNAVAILABLE_REASON}"
-    if torch.cuda.get_device_capability(device)[0] < 8 \
-        or torch.cuda.get_device_capability(device)[0] >= 10 \
-        or torch.cuda.get_device_capability(device) == (8, 6):
+        return False, f"FA3 is unavailable due to: {FA3_UNAVAILABLE_REASON}"
+    cap = torch.cuda.get_device_capability(device)
+    if cap[0] < 8 or cap[0] >= 10 or cap == (8, 6):
         return False, \
             "FA3 is only supported on devices with compute capability >= 8" \
             " excluding 8.6 and Blackwell archs (>=10)"
     return True, None
 
 def is_fa_version_supported(fa_version: int, device = None) -> bool:
-    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[0]
     elif fa_version == 3:
         return _is_fa3_supported(device)[0]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
 def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
@@ -145,9 +144,11 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
 
     ok, reason = _is_fa3_supported(device)
     if not ok:
+        _FA3_QSA_SUPPORTED = False
         _FA3_QSA_UNSUPPORTED_REASON = reason
         return False, reason
     if not hasattr(torch.ops, "flash_attn_3") or not hasattr(torch.ops.flash_attn_3, "fwd"):
+        _FA3_QSA_SUPPORTED = False
         _FA3_QSA_UNSUPPORTED_REASON = "torch.ops.flash_attn_3.fwd is not registered"
         return False, _FA3_QSA_UNSUPPORTED_REASON
 
@@ -186,6 +187,7 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
         )
         torch.cuda.synchronize()
     except Exception as e:  # noqa: BLE001 - any failure means "no QSA in this build"
+        _FA3_QSA_SUPPORTED = False
         _FA3_QSA_UNSUPPORTED_REASON = f"{type(e).__name__}: {e}"
         return False, _FA3_QSA_UNSUPPORTED_REASON
 
@@ -209,6 +211,7 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
             if fa3_qsa_uses_allow_aiu_flag()
             else "a one-token-per-page view of the pool"
         )
+        _FA3_QSA_SUPPORTED = False
         _FA3_QSA_UNSUPPORTED_REASON = (
             f"QSA self-test mismatch on a scattered top-k list (max diff {diff:.3g} "
             f"vs tolerance {2 * pt_diff + 1e-4:.3g}): the kernel returned wrong values "
@@ -389,11 +392,12 @@ def flash_attn_qsa_varlen_func(
 
 def fa_version_unsupported_reason(fa_version: int, device = None) \
     -> Optional[str]:
-    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[1]
     elif fa_version == 3:
         return _is_fa3_supported(device)[1]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
 #
@@ -548,6 +552,11 @@ def flash_attn_varlen_func(
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     assert block_table is None or seqused_k is not None, \
         "seqused_k must be provided if block_table is provided"
+    if cp_world_size != 1 or cp_rank != 0 or cp_tot_seqused_k is not None:
+        raise NotImplementedError(
+            "context parallelism (cp_world_size/cp_rank/cp_tot_seqused_k) is "
+            "not supported by the PPU FA wrappers"
+        )
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
@@ -705,28 +714,6 @@ def sparse_attn_func(
             normalization factor).
     """
     raise RuntimeError("PPU FA do not support sparse_attn now")
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** (-0.5)
-
-    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse = torch.ops.flash_attn.fwd_sparse(
-        q,
-        k,
-        v,
-        block_count,
-        block_offset,
-        column_count,
-        column_index,
-        out,
-        alibi_slopes,
-        dropout_p,
-        softmax_scale,
-        causal,
-        softcap,
-        return_attn_probs and dropout_p > 0,
-        None,
-    )
-    return (out, softmax_lse) if return_softmax_lse else out
 
 
 def sparse_attn_varlen_func(
@@ -792,31 +779,3 @@ def sparse_attn_varlen_func(
             normalization factor).
     """
     raise RuntimeError("PPU FA do not support sparse_attn now")
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** (-0.5)
-        
-    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse = torch.ops.flash_attn.varlen_fwd_sparse(
-        q,
-        k,
-        v,
-        block_count,
-        block_offset,
-        column_count,
-        column_index,
-        out,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        None,
-        alibi_slopes,
-        max_seqlen_q,
-        max_seqlen_k,
-        dropout_p,
-        softmax_scale,
-        False,
-        causal,
-        softcap,
-        return_attn_probs and dropout_p > 0,
-        None,
-    )
-    return (out, softmax_lse) if return_softmax_lse else out

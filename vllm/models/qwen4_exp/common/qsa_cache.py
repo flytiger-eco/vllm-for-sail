@@ -719,16 +719,17 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         request_seq_lens = None
         # getattr: tests fake the builder via __new__ without __init__.
         # Async spec decode drops the CPU mirrors; the op then derives the
-        # host metadata itself with a blocking copy.
+        # host metadata itself with a blocking copy. Check the private field:
+        # the seq_lens_cpu property never returns None (it lazily computes a
+        # blocking D2H copy), which would defeat this fast path.
         if (
             getattr(self, "fp8_decode", False)
-            and common_attn_metadata.query_start_loc_cpu is not None
-            and common_attn_metadata.seq_lens_cpu is not None
+            and common_attn_metadata._seq_lens_cpu is not None
         ):
             request_row_counts = (
                 torch.diff(common_attn_metadata.query_start_loc_cpu).tolist()
             )
-            request_seq_lens = common_attn_metadata.seq_lens_cpu.tolist()
+            request_seq_lens = common_attn_metadata._seq_lens_cpu.tolist()
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
