@@ -594,7 +594,13 @@ class Platform:
     def _find_non_ssm_backend(
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM attention backend from model layers."""
+        """Find the first real (non-SSM, non-dummy) attention backend.
+
+        Dummy backends that only describe out-of-band side caches (their
+        ``get_impl_cls`` raises ``NotImplementedError``) are skipped: they carry
+        no attention kernel, so letting one drive block-size alignment would
+        pick a size the real attention backend's kernel cannot tile.
+        """
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -606,8 +612,13 @@ class Platform:
         )
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
+            if b.is_ssm():
+                continue
+            try:
+                b.get_impl_cls()
+            except NotImplementedError:
+                continue
+            return b
         return None
 
     @classmethod

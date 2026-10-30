@@ -64,8 +64,12 @@ _FA3_QSA_UNSUPPORTED_REASON: Optional[str] = None
 # entries adjacent when sorted) and unsorted, so a load path that fetches contiguous
 # runs cannot match the reference by accident. Every entry is an absolute token index
 # into the probe's 256-token pool; the qsa_allow_aiu layout reads them against
-# 16-token pages, the legacy view layout against one-token pages.
+# 16-token pages, the legacy view layout against one-token pages. The probe appends
+# _QSA_PROBE_PAD padding slots to the table and masks them through seqused_k, so a
+# build that still force-nulls seqused_k for QSA walks the tail, picks up stale
+# scores, and fails the comparison.
 _QSA_PROBE_TOPK = (3, 40, 77, 114, 151, 188, 225, 8, 45, 82, 119, 156, 193, 230, 31, 68)
+_QSA_PROBE_PAD = (-1, -1, -1, -1)
 
 # Cached result of the qsa_allow_aiu schema check; None means "not checked yet".
 _FA3_QSA_FLAG_SUPPORTED: bool | None = None
@@ -130,8 +134,10 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
     older wheels it means the one-token-per-page view `flash_attn_qsa_varlen_func`
     applies for them. Either way a build whose routing still lands on the bulk load
     -- one table entry read per 16-column group, 16 contiguous tokens fetched, the
-    other 15 entries ignored -- cannot match the reference. The result is cached
-    because it is a property of the whl, not of the arguments.
+    other 15 entries ignored -- cannot match the reference. The table also carries a
+    padded tail masked through seqused_k, so a build whose QSA path force-nulls
+    seqused_k walks the padding, picks up stale scores, and fails the same way. The
+    result is cached because it is a property of the whl, not of the arguments.
     """
     global _FA3_QSA_SUPPORTED, _FA3_QSA_UNSUPPORTED_REASON
     if _FA3_QSA_SUPPORTED is not None or _FA3_QSA_UNSUPPORTED_REASON is not None:
@@ -164,8 +170,9 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
         pool_v = torch.randn(256, 1, 1, 256, generator=gen, device="cpu",
                              dtype=torch.float32).to(device=dev, dtype=torch.bfloat16)
         topk_table = torch.tensor(
-            _QSA_PROBE_TOPK, dtype=torch.int32, device=dev).view(1, 1, -1)
+            _QSA_PROBE_TOPK + _QSA_PROBE_PAD, dtype=torch.int32, device=dev).view(1, 1, -1)
         cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=dev)
+        seqused_k = torch.tensor([len(_QSA_PROBE_TOPK)], dtype=torch.int32, device=dev)
         if fa3_qsa_uses_allow_aiu_flag():
             k_cache, v_cache = pool_k.view(16, 16, 1, 256), pool_v.view(16, 16, 1, 256)
         else:
@@ -174,6 +181,7 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
         out, _lse = flash_attn_qsa_varlen_func(
             q, k_cache, v_cache, topk_table, cu_seqlens_q, 1,
             softmax_scale=softmax_scale, qsa_allow_aiu=False,
+            seqused_k=seqused_k,
             return_softmax_lse=True,
         )
         torch.cuda.synchronize()
@@ -181,11 +189,12 @@ def _probe_fa3_qsa(device=None) -> Tuple[bool, Optional[str]]:
         _FA3_QSA_UNSUPPORTED_REASON = f"{type(e).__name__}: {e}"
         return False, _FA3_QSA_UNSUPPORTED_REASON
 
-    # Reference: per-query-token gather attention in fp32, plus an all-bf16 PyTorch
-    # pass whose rounding error sizes the tolerance (the criterion of
-    # test_qsa_cases.py, plus a hard cap: a load path that fetches the wrong K/V
-    # misses by O(1), far past both bounds).
-    idx = topk_table.view(-1).long()
+    # Reference: per-query-token gather attention in fp32 over the usable prefix (the
+    # padded tail is masked through seqused_k), plus an all-bf16 PyTorch pass whose
+    # rounding error sizes the tolerance (the criterion of test_qsa_cases.py, plus a
+    # hard cap: a load path that fetches the wrong K/V misses by O(1), far past both
+    # bounds).
+    idx = topk_table.view(-1)[: len(_QSA_PROBE_TOPK)].long()
     k_sel = pool_k.reshape(-1, 256)[idx]
     v_sel = pool_v.reshape(-1, 256)[idx]
     scores = (q[0].float() @ k_sel.float().t()) * softmax_scale
@@ -232,6 +241,7 @@ def flash_attn_qsa_varlen_func(
     scheduler_metadata=None,
     return_softmax_lse=False,
     qsa_allow_aiu: bool = False,
+    seqused_k=None,
 ):
     """Query-sparse attention (QSA) forward over a paged BF16/FP16 KV cache.
 
@@ -249,8 +259,8 @@ def flash_attn_qsa_varlen_func(
         k_cache: (num_pages, page_size, nheads_k, headdim), stride(-1) == 1.
         v_cache: same shape/strides as k_cache.
         topk_table: (total_q, 1, topk), int32, stride(-1) == 1. Absolute token indices; a
-            negative entry makes the kernel skip the load, but note it does NOT mask the score
-            (see the caller-side padding contract).
+            negative entry makes the kernel skip the load. Columns past `seqused_k` are never
+            walked, so padded rows need their usable entries as a contiguous prefix.
         cu_seqlens_q: (batch_size + 1,), int32. Required by QSA.
         max_seqlen_q: int. Required together with cu_seqlens_q.
         softmax_scale: float. Defaults to 1 / sqrt(headdim).
@@ -267,6 +277,13 @@ def flash_attn_qsa_varlen_func(
             pool -- a view that exists only when the K/V split keeps a block's tokens
             stride-contiguous, i.e. one KV head per rank; callers with more must
             gate on :func:`fa3_qsa_uses_allow_aiu_flag` first.
+        seqused_k: (batch_size,) int32, optional. Per-batch count of usable top-k columns;
+            FA3 walks only that prefix of each row, keeping padded -1 slots out of the
+            softmax. To express a per-row count, give every query row its own batch
+            (cu_seqlens_q = arange(total_q + 1), max_seqlen_q = 1). Honored for QSA only
+            under causal, which this wrapper always passes; builds whose QSA path still
+            force-nulls it fail the `_probe_fa3_qsa` self-test, so callers gated on
+            `is_fa3_qsa_supported` never reach this with an incompatible wheel.
 
     Return:
         out: (total_q, nheads, headdim).
@@ -293,6 +310,7 @@ def flash_attn_qsa_varlen_func(
     q = maybe_contiguous(q)
     topk_table = maybe_contiguous(topk_table)
     cu_seqlens_q = maybe_contiguous(cu_seqlens_q)
+    seqused_k = maybe_contiguous(seqused_k)
     # k_cache/v_cache are transposed views of vLLM's packed cache: stride(-1) == 1 is required,
     # the leading strides may be non-canonical, which FA3 reads from the tensor itself.
     if k_cache.stride(-1) != 1 or v_cache.stride(-1) != 1:
@@ -343,7 +361,7 @@ def flash_attn_qsa_varlen_func(
         cu_seqlens_q,
         None,                 # cu_seqlens_k: passing it would make seqlen_k = max_seqlen_k
         None,                 # cu_seqlens_k_new
-        None, None,           # seqused_q, seqused_k (FA3 force-nulls seqused_k for QSA)
+        None, seqused_k,      # seqused_q, seqused_k (per-row usable topk columns)
         max_seqlen_q,
         None,                 # max_seqlen_k: seqlen_k is already topk
         topk_table,           # 3-D -> selects the QSA path

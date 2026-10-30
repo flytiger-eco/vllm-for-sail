@@ -22,7 +22,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -817,6 +817,39 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         n = schedule_metadata.shape[0]
         self.decode_schedule_buffer[:n].copy_(schedule_metadata)
         return candidate, context_lens, self.decode_schedule_buffer[:n]
+
+
+# Fallback compress ratio for the DeepGEMM block-size multiple, used only when
+# the model text config is unreachable (a bare supports_block_size() probe
+# outside a VllmConfig context). Deployed Qwen4Exp QSA checkpoints pin
+# indexer_compress_ratio, so the live config value is used whenever present.
+_QSA_DEFAULT_COMPRESS_RATIO = 4
+
+
+def qsa_deepgemm_block_multiple() -> int:
+    """Framework block-size multiple the DeepGEMM FP8 indexer requires.
+
+    The compressed key cache stores ``block_size // compress_ratio`` rows per
+    block, and DeepGEMM's paged kernel reads its FP8 shadow in fixed
+    ``QSACompressedKeyCache._FP8_SHADOW_PAGE_SIZE``-row pages, so every block
+    must tile into whole pages: ``block_size % (page_rows * compress_ratio)
+    == 0``. The QSA attention backend reports this multiple. For hybrid models
+    the framework's block-size alignment (``_align_hybrid_block_size``) resolves
+    it through ``_find_non_ssm_backend``, which skips the impl-less
+    ``QSAStateBackend`` dummies so this constraint drives the global block size.
+    The dummies themselves stay permissive (``MultipleOf(1)``) because they also
+    back the small ``CircularBufferSpec`` key-ring groups, whose capacity need
+    not be a multiple of this page size.
+    """
+    page_rows = QSACompressedKeyCache._FP8_SHADOW_PAGE_SIZE
+    compress_ratio = _QSA_DEFAULT_COMPRESS_RATIO
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None:
+        text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        configured = getattr(text_config, "indexer_compress_ratio", None)
+        if configured:
+            compress_ratio = int(configured)
+    return page_rows * compress_ratio
 
 
 class QSAStateBackend(AttentionBackend):
