@@ -34,10 +34,13 @@ KERNELS_FAILED_BLOCK_INT8_ARGS=(
   # All 32 parameter combinations of test_w8a8_block_int8_matmul failed in run
   # 41978966338, so rerun the whole function (M in {1,33,64,222} x N in {128,1024}
   # x K in {256,4096} x block_size [128,128] x dtype in {half,bfloat16} x seed 0).
-  # The nightly deselect list spelled out per-combination node IDs, but those were
-  # synthetic indices (block_size0..block_size31); the real pytest ids for this
-  # parametrization reuse block_size0 and only alternate out_dtype0/out_dtype1.
-  # Selecting the function covers every combination without depending on id spelling.
+  # The nightly deselect list spelled out per-combination node IDs with
+  # block_size0..block_size31 incrementing in lockstep with out_dtype0..out_dtype31;
+  # those ids are real -- pytest disambiguates repeated non-scalar param values
+  # (the [128, 128] list and the torch dtype objects) with a global counter, so
+  # every param set gets fresh indices. Selecting the function covers every
+  # combination without depending on that id spelling (verified in PR #57 run
+  # 42183043090: 32 failed, matching the nightly deselect exactly).
   "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul"
 )
 
