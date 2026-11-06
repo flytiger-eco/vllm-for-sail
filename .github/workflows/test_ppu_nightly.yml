@@ -178,23 +178,30 @@ jobs:
       matrix:
         include:
           # exactly the areas that failed in nightly run 41978966338 on v0.26.0
+          # job_timeout = run_timeout (in-pod action timeout) + 25 min orchestration
+          # overhead; GitHub expressions do not support arithmetic, hence the
+          # explicit field.
           - area: attention
             script: test-failed-ppu-attention.sh
             nproc: 1
             run_timeout: 15
+            job_timeout: 40
           - area: kernels
             script: test-failed-ppu-kernels.sh
             nproc: 1
             run_timeout: 30
+            job_timeout: 55
           - area: misc
             script: test-failed-ppu-misc.sh
             nproc: 1
             run_timeout: 10
+            job_timeout: 35
           - area: models-multimodal
             script: test-failed-ppu-models_multimodal.sh
             nproc: 1
             run_timeout: 60
-    timeout-minutes: ${{ matrix.run_timeout + 25 }}
+            job_timeout: 85
+    timeout-minutes: ${{ matrix.job_timeout }}
     steps:
       - name: Checkout PR head
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
