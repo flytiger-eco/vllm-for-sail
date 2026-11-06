@@ -97,6 +97,39 @@ _pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 # "numpy.core.multiarray failed to import" raised inside the image scipy. Move those two
 # forward together with numpy rather than holding numpy back.
 _pip_retry --upgrade scipy scikit-learn
+
+# numba must come from the aliyun mirror, not the artifactory: the artifactory's
+# numba==0.65.0 is a PPU source wrapper (0.65.0+v0.1.0.ppu2.2.1) whose local
+# version out-ranks the community 0.65.0 wheel, so it wins any shared
+# resolution, and its setup.py exits with "No installation package compatible
+# with the current environment" for cp312/linux_x86_64/ubuntu2404/runtime130,
+# taking the whole -r requirements install down with it (PR #57 run 42194854556:
+# every area died installing deps, 0 tests run). ngram_proposer only uses the
+# CPU jit paths, so the community wheel suffices; 0.65.0 needs numpy<2.5 and
+# this env ships 2.3.5. requirements/ppu.txt keeps numba commented for this
+# reason. Failure is a warning, not fatal: without numba only the misc area's
+# test_ngram collection breaks, while a hard failure would kill every area
+# before a single test runs.
+# Uninstall first: the image's broken numba carries the same release with a local
+# version tag (0.65.0+v0.1.0.ppu2.2.1), which satisfies ==0.65.0 per PEP 440, so
+# a plain --upgrade would consider it already installed and keep the broken ABI.
+python3 -m pip uninstall -y numba >/dev/null 2>&1 || true
+n=1
+while ! ${PIP_INSTALL} --upgrade "numba == 0.65.0" -i "https://mirrors.aliyun.com/pypi/simple/"; do
+    if [[ ${n} -ge 8 ]]; then
+        echo "[deps] WARNING: numba install from the aliyun mirror failed after 8 attempts; the image's numpy-1.x-ABI numba stays and misc test_ngram collection will fail" >&2
+        break
+    fi
+    wait_s=$(( n * 30 > 90 ? 90 : n * 30 ))
+    wait_s=$(( wait_s + RANDOM % 30 ))
+    echo "[deps] retry ${n}/8 in ${wait_s}s: numba == 0.65.0 (aliyun)" >&2
+    sleep "${wait_s}"
+    n=$(( n + 1 ))
+done
+# Diagnostic only: numba importability decides whether misc test_ngram can be collected.
+python3 -c "import numba; print(f'[verify] numba {numba.__version__}')" 2>/dev/null \
+  || echo "[verify] numba NOT importable - misc test_ngram collection will fail" >&2
+
 # Diagnostic only: the remaining image packages are not pinned against this numpy either, so
 # print the mismatches instead of letting the next one surface as an unrelated import error.
 python3 -m pip check || echo "[deps] WARNING: pip check reports unsatisfied requirements" >&2

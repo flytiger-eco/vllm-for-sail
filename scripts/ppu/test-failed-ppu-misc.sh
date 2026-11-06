@@ -15,15 +15,17 @@
 # "ImportError: numpy.core.multiarray failed to import" / "_ARRAY_API not found"
 # once the v0.26 env ships numpy 2.x. Verified in PR #57 run 42183043090:
 # [diag] numba NOT importable, collection error, 0 items run.
-# Fix direction (BLOCKED): un-commenting numba in requirements/ppu.txt does NOT
-# work - the artifactory numba==0.65.0 is a PPU source wrapper with no prebuilt
-# binary for python cp312 / linux_x86_64 / ubuntu2404 / runtime 130, its setup.py
-# dies with "No installation package compatible with the current environment"
-# and takes the whole requirements install down with it (PR #57 run 42194854556:
-# all four areas died installing deps, 0 tests run). ngram_proposer.py has a
-# top-level `from numba import ...` with no importorskip fallback, so removing
-# the broken image numba only turns the ImportError into ModuleNotFoundError.
-# Unblocked when the artifactory releases a cp312/ubuntu2404/runtime130 build.
+# Fix direction (ACTIVE): numba==0.65.0 is installed by
+# ppu_ci_nightly_install_dependency.sh from the aliyun mirror
+# (mirrors.aliyun.com/pypi/simple), bypassing the artifactory whose
+# numba==0.65.0 is a PPU source wrapper with no prebuilt binary for
+# python cp312 / linux_x86_64 / ubuntu2404 / runtime 130 (PR #57 run
+# 42194854556: un-commenting it in requirements/ppu.txt killed every area's
+# dependency install, 0 tests run). The script uninstalls the image's
+# numpy-1.x-ABI numba first, because its local version tag satisfies
+# ==0.65.0 and a plain --upgrade would keep the broken build. If the aliyun
+# install fails, only this misc area stays red (test_ngram collection),
+# not the whole dependency install.
 #
 # Modeled on scripts/ppu/test-area-ppu-misc.sh of the ci/ppu-nightly-all-areas
 # branch (env blocks, junit/summary emission); only the failing file runs here.
