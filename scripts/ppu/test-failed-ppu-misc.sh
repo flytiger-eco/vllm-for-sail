@@ -8,9 +8,15 @@
 # Failure mode: tests/v1/spec_decode/test_ngram.py fails at COLLECTION time,
 # before any test in the misc v1_spec_decode pytest step runs, so the whole step
 # reports errors. test_ngram.py imports vllm.v1.spec_decode.ngram_proposer which
-# does `from numba import ...`; requirements/ppu.txt ships numba COMMENTED OUT
-# ("# numba == 0.65.0 # Required for N-gram speculative decoding"), so the
-# nightly pod has no numba and collection raises ModuleNotFoundError.
+# does `from numba import ...`. requirements/ppu.txt ships numba COMMENTED OUT
+# ("# numba == 0.65.0 # Required for N-gram speculative decoding"), so the v0.26
+# dependency set does not install a usable numba; the leftover numba in the base
+# image is built against the numpy 1.x ABI and import dies with
+# "ImportError: numpy.core.multiarray failed to import" / "_ARRAY_API not found"
+# once the v0.26 env ships numpy 2.x. Verified in PR #57 run 42183043090:
+# [diag] numba NOT importable, collection error, 0 items run.
+# Fix direction: un-comment numba in requirements/ppu.txt so a numpy-2-compatible
+# build gets installed by ppu_ci_nightly_install_dependency.sh.
 #
 # Modeled on scripts/ppu/test-area-ppu-misc.sh of the ci/ppu-nightly-all-areas
 # branch (env blocks, junit/summary emission); only the failing file runs here.
