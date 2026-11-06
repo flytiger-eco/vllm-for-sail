@@ -50,8 +50,8 @@ fi
 # With no internet the red zone raises ConnectionError and every GSM8K case fails.
 # HF_HUB_OFFLINE only hooks huggingface_hub and does not affect requests, so the download
 # cannot be avoided. Data source: GitHub openai/grade-school-math (MIT, 7473 train /
-# 1319 test questions); the repo vendors a copy under aone_ci/data/gsm8k/ (used by the
-# Aone bootstrap-cp), but this script has zero runtime dependency on aone_ci/, so it probes
+# 1319 test questions); the repo vendors a copy under legacy_ci/data/gsm8k/ (used by the
+# Legacy bootstrap-cp), but this script has zero runtime dependency on legacy_ci/, so it probes
 # the /nas_aisw pre-staged volume. When missing it warns and skips (the GSM8K cases then
 # fail with the reason in the log) - the red-zone side must stage the jsonl.
 echo "========== [setup] pre-cache gsm8k jsonl =========="
@@ -76,14 +76,14 @@ echo "[gsm8k] WARN: ${f} not found on /nas_aisw candidates - GSM8K tests will fa
 done
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/lm_eval.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/lm_eval.yaml)
 # ------------------------------------------------------------------------------
 # Upstream .buildkite/test_areas/lm_eval.yaml has 10 steps; the PPU scope keeps only the
 # GSM8K accuracy evals that have an alias and are verified PASS (original yaml note: most
 # small/blackwell quantized models have no alias, and Large/H100-H200/MoE Refactor/GPQA
 # need 4-8 cards or the gpt-oss package, all excluded). Each step picks a config list.
 #
-# single = the two steps of the Aone lm-eval single job (ppu:1):
+# single = the two steps of the Legacy lm-eval single job (ppu:1):
 #   1) lm_eval_ppu_offload   — DeepSeek-V2-Lite + MoE expert offload/prefetch
 #      (configs/models-ppu-e2e-single.txt -> DeepSeek-V2-Lite-Prefetch-Offload.yaml,
 #       single GPU, 200 questions, accuracy_threshold 0.25)
@@ -104,7 +104,7 @@ LM_EVAL_SINGLE_QUANTIZED_ARGS=(
   --deselect "tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-0.6B-FP8]"
 )
 
-# multi = the single step of the Aone lm-eval multi job (ppu:4):
+# multi = the single step of the Legacy lm-eval multi job (ppu:4):
 #   lm_eval_ppu_ep_eplb - DeepSeek-V2-Lite + expert parallelism + EPLB,
 #   TP=2 DP=2 (4 GPU), 200 questions, accuracy_threshold 0.25
 #   (configs/models-ppu-e2e-multi.txt -> DeepSeek-V2-Lite-EP-EPLB.yaml)
@@ -152,7 +152,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -163,7 +163,7 @@ MODEL_MAP = {
     # DeepSeek-V2-Lite-Prefetch-Offload.yaml / DeepSeek-V2-Lite-EP-EPLB.yaml
 # both use model_name=deepseek-ai/DeepSeek-V2-Lite. The main list
 # checkpoints_cleaned.json only holds the -Chat/-Chat-FP8 variants; this bare id hits
-# aone_ci/scripts/ppu_model_aliases.json (/ppusw/.../LLM/DeepSeek/V2/DeepSeek-V2-Lite
+# legacy_ci/scripts/ppu_model_aliases.json (/ppusw/.../LLM/DeepSeek/V2/DeepSeek-V2-Lite
 # -> /nas_aisw, isomorphic)
     "deepseek-ai/DeepSeek-V2-Lite":
         "/nas_aisw/datasets/checkpoints/LLM/DeepSeek/V2/DeepSeek-V2-Lite",
@@ -370,8 +370,8 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: the two steps run in order, both TP=1 single-card
-# workloads, so limiting the visible cards to 1 matches the Aone ppu:1 semantics
+# The Legacy single job is a 1-PPU pod: the two steps run in order, both TP=1 single-card
+# workloads, so limiting the visible cards to 1 matches the Legacy ppu:1 semantics
   CUDA_VISIBLE_DEVICES=0 _run_step "lm_eval_ppu_offload" 1 "${LM_EVAL_SINGLE_OFFLOAD_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "lm_eval_ppu_quantized" 1 "${LM_EVAL_SINGLE_QUANTIZED_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then

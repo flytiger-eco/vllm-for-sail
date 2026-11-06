@@ -41,11 +41,11 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the multi section in aone_ci/ppu_extras/distributed.yaml)
+# [tests] case selection (snapshot of the multi section in legacy_ci/ppu_extras/distributed.yaml)
 # ------------------------------------------------------------------------------
 # The distributed area has no single step (single: [] in the extras).
 #
-# multi = the Aone "distributed_comm_ops" job (2-PPU pod, multi_ppu_count: 2):
+# multi = the Legacy "distributed_comm_ops" job (2-PPU pod, multi_ppu_count: 2):
 #   the 4 files of upstream "Distributed Comm Ops" (num_devices: 2) plus
 #   test_utils.py from "Distributed (2 GPUs)":
 #     - test_comm_ops.py      — NCCL all-reduce / all-gather / broadcast
@@ -315,7 +315,7 @@ if [ "${MODE}" = "single" ]; then
 # The distributed area has no single step: every case is a multi_gpu_test that
 # needs 2 PPU cards, so skipif skips them all under single (1 card). Nothing runs
 # here, only a notice, mirroring the single section of
-# aone_ci/scripts/test_area_ppu_distributed.sh (no step, exit 0).
+# legacy_ci/scripts/test_area_ppu_distributed.sh (no step, exit 0).
   echo "[run] no single steps for distributed area (all cases are multi_gpu_test needing 2 PPU); nothing to run in single mode"
 elif [ "${MODE}" = "multi" ]; then
 # multi: one process runs the 5 files with both cards visible (no

@@ -124,7 +124,7 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # speculative_config1 and nothing is installed here; restore = pre-install arctic-inference in the image.
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/spec_decode.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/spec_decode.yaml)
 # ------------------------------------------------------------------------------
 # Mirrors the 4 steps of upstream .buildkite/test_areas/spec_decode.yaml; v0.27 split them into
 # the eagle/speculators+mtp/ngram_suffix/draft_model subdirectories. PPU merges them into 4
@@ -238,7 +238,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -247,69 +247,69 @@ import os
 MODEL_MAP = {
 # === aliased / red-zone list hits (the symlink works; whether the path really exists on NAS is reported as MISS) ===
 # Path source labels: (ckpt)=red-zone checkpoints_cleaned snapshot (main list)
-#             (aone)=aone_ci/scripts/ppu_model_aliases.json (/ppusw/->/nas_aisw/)
+#             (legacy)=legacy_ci/scripts/ppu_model_aliases.json (/ppusw/->/nas_aisw/)
 # meta-llama/Llama-3.1-8B-Instruct: the extras explicitly reuse the Meta-Llama-3.1-8B-Instruct
-# mirror (aliased on 2026-05-28, smoke MR #87 follow-up). (ckpt/aone agree)
+# mirror (aliased on 2026-05-28, smoke MR #87 follow-up). (ckpt/legacy agree)
     "meta-llama/Llama-3.1-8B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Meta/v1.0/Meta-Llama-3.1-8B-Instruct",
 # used by eagle_correctness / draft_model; the base plus the eagle draft family
     "meta-llama/Llama-3.2-1B-Instruct":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
-    "yuhuili/EAGLE-LLaMA3.1-Instruct-8B":  # (aone)
+    "yuhuili/EAGLE-LLaMA3.1-Instruct-8B":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/EAGLE-LLaMA3.1-Instruct-8B",
-    "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B":  # (aone)
+    "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/EAGLE3/v3/EAGLE3-LLaMA3.1-Instruct-8B",
-    "nm-testing/Llama3_2_1B_speculator.eagle3":  # (aone)
+    "nm-testing/Llama3_2_1B_speculator.eagle3":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/optimization/v1.0/"
         "Llama3_2_1B_speculator.eagle3",
 # used by speculators / mtp / ngram; Qwen3 plus the eagle3 speculator family
     "Qwen/Qwen3-0.6B":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
-    "Qwen/Qwen3-0.6B-FP8":  # (aone)
+    "Qwen/Qwen3-0.6B-FP8":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B-FP8",
-    "Qwen/Qwen3-1.7B":  # (aone)
+    "Qwen/Qwen3-1.7B":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-1.7B",
     "Qwen/Qwen3-1.7B-FP8":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-1.7B-FP8",
     "Qwen/Qwen3-8B":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-8B",
-    "AngelSlim/Qwen3-1.7B_eagle3":  # (aone)
+    "AngelSlim/Qwen3-1.7B_eagle3":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-1.7B_eagle3",
     "AngelSlim/Qwen3-8B_eagle3":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-8B_eagle3",
 # Note: the qwen3/llama3 eagle3 speculator assertion cases are already deselected in -k
 # (alias-rewrite AssertionError); the symlink stays for other cases that reference it.
-    "RedHatAI/Qwen3-8B-speculator.eagle3":  # (aone)
+    "RedHatAI/Qwen3-8B-speculator.eagle3":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen3-8B-speculator.eagle3",
-    "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3":  # (aone)
+    "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v1.0/"
         "Llama-3.1-8B-Instruct-speculator.eagle3",
-    "amd/PARD-Qwen3-0.6B":  # (aone) ngram/pard
+    "amd/PARD-Qwen3-0.6B":  # (legacy) ngram/pard
         "/nas_aisw/datasets/checkpoints/LLM/PARD/v1.0/PARD-Qwen3-0.6B",
-    "XiaomiMiMo/MiMo-7B-Base":  # (aone) mtp
+    "XiaomiMiMo/MiMo-7B-Base":  # (legacy) mtp
         "/nas_aisw/datasets/checkpoints/LLM/MiMo/v1.0/MiMo-7B-Base",
 # deepseek MTP / no_sync (small random variants, not the full DeepSeek)
-    "ZixiQi/DeepSeek-V3-4layers-MTP-FP8":  # (aone)
+    "ZixiQi/DeepSeek-V3-4layers-MTP-FP8":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/DeepSeek/V3/DeepSeek-V3-4layers-MTP-FP8",
-    "eagle618/deepseek-v3-random":  # (aone)
+    "eagle618/deepseek-v3-random":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/deepseek/v3/deepseek-v3-random",
-    "eagle618/eagle-deepseek-v3-random":  # (aone)
+    "eagle618/eagle-deepseek-v3-random":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/eagle/v3/eagle-deepseek-v3-random",
 # VL eagle3 (multimodal draft)
     "Qwen/Qwen2.5-VL-7B-Instruct":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/Qwen2.5-VL-7B-Instruct",
     "Qwen/Qwen3-VL-8B-Instruct":  # (ckpt)
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-VL-8B-Instruct",
-    "Rayzl/qwen2.5-vl-7b-eagle3-sgl":  # (aone)
+    "Rayzl/qwen2.5-vl-7b-eagle3-sgl":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/qwen2.5/v1.0/qwen2.5-vl-7b-eagle3-sgl",
-    "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct":  # (aone)
+    "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct":  # (legacy)
         "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/"
         "EAGLE-Llama-4-Scout-17B-16E-Instruct",
 
 # === pending staging (MISS in both red-zone sources, no path guessing; these cases failing on the first run is the expected RED) ===
 # not staged per the extras (gated / huge):
 #   meta-llama/Llama-4-Scout-17B-16E-Instruct  gated + ~30 GB
-#     (aone has a /llama/v4/ alias but staging is unconfirmed, the _heavy cases are already dropped by -k)
+#     (legacy has a /llama/v4/ alias but staging is unconfirmed, the _heavy cases are already dropped by -k)
 #   deepseek-ai/DeepSeek-R1                     huge, MISS in both sources
 #   deepseek-ai/DeepSeek-V3                     huge (full no_sync, already dropped by -k)
 # referenced by tests but MISS in both sources:
@@ -515,7 +515,7 @@ _run_step() {
 }
 
 # The spec_decode area is single only (4 steps, one single-card process each; mirrors the 4
-# _run_pytest calls of the single section in aone test_area_ppu_spec_decode.sh).
+# _run_pytest calls of the single section in legacy test_area_ppu_spec_decode.sh).
 # Limiting to 1 card (CUDA_VISIBLE_DEVICES=0) makes tp>1 cases skip automatically, matching a 1-PPU pod.
 if [ "${MODE}" = "multi" ]; then
   echo "[run] spec_decode area has no multi-mode steps configured — nothing to run" >&2

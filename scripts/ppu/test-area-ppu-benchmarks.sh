@@ -62,9 +62,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/benchmarks.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/benchmarks.yaml)
 # ------------------------------------------------------------------------------
-# single = the Aone "benchmarks single" job (1-PPU pod): the tests/benchmarks/
+# single = the Legacy "benchmarks single" job (1-PPU pod): the tests/benchmarks/
 #   CLI and argument-parsing tests.
 
 # Two files are ignored: they need the gpt2 tokenizer, unavailable offline in
@@ -117,7 +117,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -129,7 +129,7 @@ MODEL_MAP = {
 # --load-format dummy`: dummy weights are not downloaded, but the config and
 # tokenizer still are, so the checkpoint must exist locally.
 # List hit: checkpoints_cleaned.json path=checkpoints/LLM/Llama/v3.2/
-# Llama-3.2-1B-Instruct (its ms_name is unsloth/..., matched by name; the Aone
+# Llama-3.2-1B-Instruct (its ms_name is unsloth/..., matched by name; the Legacy
 # /ppusw side has a v3.1 directory and the red-zone list's v3.2 wins, matching
 # basic-correctness).
     "meta-llama/Llama-3.2-1B-Instruct":
@@ -326,7 +326,7 @@ _run_step() {
   fi
 }
 
-# benchmarks is single-only (the Aone extras have no multi section): single and
+# benchmarks is single-only (the Legacy extras have no multi section): single and
 # all both run the benchmarks_cli step; multi is rejected by the case above.
 _run_step "benchmarks_cli" 1 "${BENCH_SINGLE_ARGS[@]}"
 

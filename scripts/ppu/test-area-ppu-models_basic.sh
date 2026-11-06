@@ -86,7 +86,7 @@ for pkg in einops timm regex; do
 done
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/models_basic.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/models_basic.yaml)
 # ------------------------------------------------------------------------------
 # scope decision: matches the "Basic Models Tests (Other)" partial of upstream models_basic -
 # test_transformers.py + test_registry.py. The "Initialization"/"Extra Initialization"
@@ -148,14 +148,14 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list use the
-# isomorphic Aone ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and
+# isomorphic Legacy ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and
 # is skipped - this area is a first-deploy red mode, so MISS is an expected RED source.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
-# test_transformers.py::test_hybrid_attention; list MISS, Aone isomorphic path
+# test_transformers.py::test_hybrid_attention; list MISS, Legacy isomorphic path
     "hmellor/tiny-random-Gemma2ForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-Gemma2ForCausalLM",
 # test_models / test_embed_loading / test_quantization; the list has the
@@ -166,19 +166,19 @@ MODEL_MAP = {
     "allenai/OLMoE-1B-7B-0924":
         "/nas_aisw/datasets/checkpoints/LLM/OLMoE/v1.0/OLMoE-1B-7B-0924",
 # test_models[Ilama] (note "Ilama", not "Llama" - an upstream typo); list MISS,
-# Aone isomorphic path
+# Legacy isomorphic path
     "hmellor/Ilama-3.2-1B":
         "/nas_aisw/datasets/checkpoints/LLM/Ilama/v3.2/Ilama-3.2-1B",
-# test_embed_loading[Qwen3-Embedding]; list MISS, Aone isomorphic path
+# test_embed_loading[Qwen3-Embedding]; list MISS, Legacy isomorphic path
     "Qwen/Qwen3-Embedding-0.6B":
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-Embedding-0.6B",
-# test_quantization AWQ/GPTQ; list MISS, Aone isomorphic path
+# test_quantization AWQ/GPTQ; list MISS, Legacy isomorphic path
     "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v0.3/TinyLlama-1.1B-Chat-v0.3-AWQ",
     "TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v0.3/TinyLlama-1.1B-Chat-v0.3-GPTQ",
 # test_quantization bnb-4bit (also needs bitsandbytes, possibly missing from the PPU image);
-# list MISS, Aone isomorphic path
+# list MISS, Legacy isomorphic path
     "unsloth/tinyllama-bnb-4bit":
         "/nas_aisw/datasets/checkpoints/LLM/tinyllama/v1.0/tinyllama-bnb-4bit",
 }

@@ -59,7 +59,7 @@ TMP_JUNIT="/tmp/ppu-compile-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the multi section in aone_ci/ppu_extras/compile.yaml)
+# [tests] case selection (snapshot of the multi section in legacy_ci/ppu_extras/compile.yaml)
 # ------------------------------------------------------------------------------
 # The compile area mirrors upstream .buildkite/test_areas/compile.yaml (13 steps) and only
 # keeps the steps that exist and pass on PPU. They all need 2 cards (TP=2), so this area
@@ -88,8 +88,8 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 #   Restore: enable the upstream steps one by one once PPU supports FlashInfer / the
 #   cutlass_scaled_mm int8 kernel / MLA compute capability.
 #
-# Every upstream step exports `VLLM_TEST_CLEAN_GPU_MEMORY=1`; the Aone sh does not
-# reproduce that env and this script follows Aone (parity with the all-green reference).
+# Every upstream step exports `VLLM_TEST_CLEAN_GPU_MEMORY=1`; the Legacy sh does not
+# reproduce that env and this script follows Legacy (parity with the all-green reference).
 COMPILE_MULTI_E2E_ARGS=(
   tests/compile/correctness_e2e/test_sequence_parallel.py
   tests/compile/correctness_e2e/test_async_tp.py
@@ -182,7 +182,7 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list are
-# looked up in aone_ci/scripts/ppu_model_aliases.json (/ppusw/ replaced by /nas_aisw/).
+# looked up in legacy_ci/scripts/ppu_model_aliases.json (/ppusw/ replaced by /nas_aisw/).
 # A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -190,7 +190,7 @@ import os
 
 MODEL_MAP = {
 # test_sequence_parallel.py (SPTestSettings.fast) + the tiny base of test_async_tp.py
-# list MISS; the aone ppu_model_aliases.json (tiny/v1.0) hits and the bc blueprint already
+# list MISS; the legacy ppu_model_aliases.json (tiny/v1.0) hits and the bc blueprint already
 # confirmed it with ls on the runner (tiny/v1.0/ holds 4 tiny models absent from cleaned.json)
     "hmellor/tiny-random-LlamaForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
@@ -201,13 +201,13 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.1/Meta-Llama-3.1-8B-Instruct-FP8",
 # the non-quantized base of test_async_tp.py
 # list hit: checkpoints_cleaned.json name=Llama-3.2-1B-Instruct
-# path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct (the Aone /ppusw side has a v3.1
+# path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct (the Legacy /ppusw side has a v3.1
 # directory and the red-zone list's v3.2 wins, same as the bc blueprint)
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
 # the FP8 model shared by the three files in tests/compile/passes/distributed/ (test_async_tp /
 # test_fusion_all_reduce / test_sequence_parallelism)
-# list MISS; hits aone ppu_model_aliases.json line 201
+# list MISS; hits legacy ppu_model_aliases.json line 201
     # /ppusw/datasets/checkpoints/LLM/Llama/v1.0/Llama-3.2-1B-Instruct-FP8
     "RedHatAI/Llama-3.2-1B-Instruct-FP8":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v1.0/Llama-3.2-1B-Instruct-FP8",
@@ -403,7 +403,7 @@ _run_step() {
   fi
 }
 
-# The compile area has no single cases (matching aone_ci/scripts/test_area_ppu_compile.sh:
+# The compile area has no single cases (matching legacy_ci/scripts/test_area_ppu_compile.sh:
 # single mode -> "no single steps configured" -> exit 0); the two multi steps each run as
 # one process and the cases take 2 cards through TP=2 (no CUDA_VISIBLE_DEVICES limit, so
 # every card stays visible).

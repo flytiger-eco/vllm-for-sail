@@ -82,7 +82,7 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # after an import probe.
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/quantization.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/quantization.yaml)
 # ------------------------------------------------------------------------------
 # Mapping of the 3 upstream steps:
 #   Step 1 "Quantization"              -> tests/quantization/ (17 files, per-file audit below)
@@ -223,7 +223,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -241,7 +241,7 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/"
         "Qwen2.5-0.5B-Instruct-int4-sym-inc",
 # test_configs.py (GPTQ/AWQ config parsing)
-# main list MISS, Aone alias hit (/ppusw->/nas_aisw)
+# main list MISS, Legacy alias hit (/ppusw->/nas_aisw)
     "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v1.0/"
         "TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
@@ -251,14 +251,14 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/OpenHermes/v1.0/"
         "OpenHermes-2.5-Mistral-7B-AWQ",
 # test_experts_int8.py (INT8 experts startup)
-# main list MISS, Aone alias hit
+# main list MISS, Legacy alias hit
     "ai21labs/Jamba-tiny-random":
         "/nas_aisw/datasets/checkpoints/LLM/Jamba/v1.0/Jamba-tiny-random",
     "pfnet/plamo-2-1b":
         "/nas_aisw/datasets/checkpoints/LLM/plamo/v1.0/plamo-2-1b",
 # test_register_quantization_config.py (custom quantization config + a small LLM)
 # main list hit path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct
-# (the list ms_name=unsloth/..., matched by name; the Aone /ppusw side has v3.1, so the
+# (the list ms_name=unsloth/..., matched by name; the Legacy /ppusw side has v3.1, so the
 # main list v3.2 wins)
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",

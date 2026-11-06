@@ -28,7 +28,7 @@ TMP_JUNIT="/tmp/ppu-weight-loading-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the multi section in aone_ci/ppu_extras/weight_loading.yaml)
+# [tests] case selection (snapshot of the multi section in legacy_ci/ppu_extras/weight_loading.yaml)
 # ------------------------------------------------------------------------------
 # Upstream weight_loading iterates models.txt (27 model configs) with
 # run_model_weight_loading_test.sh; each config drives the same
@@ -119,16 +119,16 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
-    # Paths come from aone_ci/scripts/ppu_model_aliases.json (/ppusw/ -> /nas_aisw/).
+    # Paths come from legacy_ci/scripts/ppu_model_aliases.json (/ppusw/ -> /nas_aisw/).
     # These weight_loading-only quantized models are missing from the main list, so
-    # the NAS path is assembled from the Aone alias table.
+    # the NAS path is assembled from the Legacy alias table.
     # wl_gptq_marlin_zephyr
     "robertgshaw2/zephyr-7b-beta-channelwise-gptq":
         "/nas_aisw/datasets/checkpoints/LLM/zephyr/v1.0/"

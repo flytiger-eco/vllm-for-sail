@@ -36,7 +36,7 @@ esac
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 # Device label (the workflow injects PPU_DEVICE_LABEL=OAM-810E through extra_env); mirrors
-# the aone sh's second argument and drives device_conditional_ignores (OAM-810E skips FP8).
+# the legacy sh's second argument and drives device_conditional_ignores (OAM-810E skips FP8).
 DEVICE_LABEL="${PPU_DEVICE_LABEL:-OAM-810E}"
 echo "[device] label: ${DEVICE_LABEL}"
 
@@ -85,24 +85,24 @@ echo "[gsm8k] WARN: ${f} not found on /nas_aisw candidates - GSM8K tests will fa
 done
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/e2e_integration.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/e2e_integration.yaml)
 # ------------------------------------------------------------------------------
 # Fixed in run 34594819557: models-ppu-e2e-{single,multi,fp8}.txt and the 3 yamls they
 # reference (DeepSeek-V2-Lite-Prefetch-Offload / DeepSeek-V2-Lite-EP-EPLB /
 # Qwen3-30B-A3B-FP8-EP-EPLB) are now in tests/evals/gsm8k/configs/ (copied from the
-# verified Aone version). Before that 7 files were missing, so conftest had nothing to
+# verified Legacy version). Before that 7 files were missing, so conftest had nothing to
 # parametrize and collected a bare test_gsm8k_correctness that reported
 # fixture 'config_filename' not found (both steps failed).
-# single = the Aone "e2e-integration single" job (1-PPU pod):
+# single = the Legacy "e2e-integration single" job (1-PPU pod):
 #   - e2e_prefetch_offload: DeepSeek-V2-Lite prefetch offload accuracy (1 GPU);
 #     GSM8K eval framework, threshold=0.25, 200 questions (the single section pins
-#     CUDA_VISIBLE_DEVICES=0, matching the Aone 1-PPU pod)
+#     CUDA_VISIBLE_DEVICES=0, matching the Legacy 1-PPU pod)
 E2E_SINGLE_ARGS=(
   tests/evals/gsm8k/test_gsm8k_correctness.py
   --config-list-file=configs/models-ppu-e2e-single.txt
 )
 
-# multi = the Aone "e2e-integration multi" job (4-PPU pod), two steps in order:
+# multi = the Legacy "e2e-integration multi" job (4-PPU pod), two steps in order:
 #   - e2e_ep_eplb: DeepSeek-V2-Lite EP+EPLB accuracy (4 GPU, TP=2 DP=2);
 #     GSM8K eval framework, threshold=0.25, 200 questions
 E2E_MULTI_ARGS=(
@@ -156,7 +156,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -164,7 +164,7 @@ import os
 
 MODEL_MAP = {
 # e2e_prefetch_offload (single) + e2e_ep_eplb (multi): DeepSeek-V2-Lite.
-# Not in the list; the Aone ppu_model_aliases.json
+# Not in the list; the Legacy ppu_model_aliases.json
 # hits /ppusw/datasets/checkpoints/LLM/DeepSeek/V2/DeepSeek-V2-Lite
 # (/ppusw -> /nas_aisw).
     "deepseek-ai/DeepSeek-V2-Lite":
@@ -367,8 +367,8 @@ _run_step() {
 }
 
 # ------------------------------------------------------------------------------
-# [run/skip] e2e_fp8_ep_eplb: reproduces the aone sh device_conditional_ignores.
-# OAM-810E has no FP8, so the aone sh skips the whole file with --ignore (0 cases
+# [run/skip] e2e_fp8_ep_eplb: reproduces the legacy sh device_conditional_ignores.
+# OAM-810E has no FP8, so the legacy sh skips the whole file with --ignore (0 cases
 # collected). Here it is recorded as skipped (a skipped junit entry + label registration),
 # which keeps the skip intent, avoids pytest "no tests collected" (exit 5) failing the
 # whole round, and still lets other devices run the step through _run_step.
@@ -402,8 +402,8 @@ PYEOF
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: DeepSeek-V2-Lite prefetch offload runs on 1 card, so
-# CUDA_VISIBLE_DEVICES=0 matches the Aone 1-PPU pod
+# The Legacy single job is a 1-PPU pod: DeepSeek-V2-Lite prefetch offload runs on 1 card, so
+# CUDA_VISIBLE_DEVICES=0 matches the Legacy 1-PPU pod
   CUDA_VISIBLE_DEVICES=0 _run_step "e2e_prefetch_offload" 1 "${E2E_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
 # e2e_ep_eplb: DeepSeek-V2-Lite TP=2 DP=2 uses all 4 cards (no CUDA_VISIBLE_DEVICES limit)

@@ -222,7 +222,7 @@ echo "[deps] WARN: opencv install failed - the test_common import chain crashes 
 fi
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/models_multimodal.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/models_multimodal.yaml)
 # ------------------------------------------------------------------------------
 # Step mm_generation_dedicated - mirrors the non-test_common part of upstream Multi-Modal
 # Models (Standard) 1-4: tests/models/multimodal -m core_model, excluding test_common and a
@@ -268,7 +268,7 @@ MM_GENERATION_ARGS=(
 # get_model_ids_to_test, get_text_token_prompts`, so the import executes the test_common module
 # body (including the module-level video download); this step therefore relies on opencv from
 # [deps] and the offline fallback for sample_demo_1.mp4 from [assets]; missing either one
-# crashes at collection (observed on the first run, see the aone yaml note about possibly
+# crashes at collection (observed on the first run, see the legacy yaml note about possibly
 # triggering Landmine #19 (VllmConfig NoneType)).
 MM_PROCESSING_ARGS=(
   tests/models/multimodal/processing/test_tensor_schema.py
@@ -313,7 +313,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -321,7 +321,7 @@ import os
 
 MODEL_MAP = {
 # test_nemotron_parse.py::test_models (the only core_model, trust_remote_code=True)
-# hit: aone_ci/scripts/ppu_model_aliases.json key nv-community/... ->
+# hit: legacy_ci/scripts/ppu_model_aliases.json key nv-community/... ->
 # ... (/ppusw -> /nas_aisw). The test uses the HF id nvidia/... (a different org pointing at
 # the same weights), so the symlink is created under the id the test actually uses.
 # trust_remote_code needs the dynamic modules (modeling_*.py etc.) inside the NAS directory;
@@ -376,8 +376,8 @@ PYEOF
 # collection:
 #   - test_nemotron_parse.py starts with IMAGE = ImageAsset("paper-11")... -> needs the image
 #   - test_common.py (imported by test_tensor_schema.py) downloads the video at module level -> needs the video
-# Fallback mechanism (mirrors the aone_ci bootstrap, but with zero runtime dependency on
-# aone_ci/, probing the /nas_aisw pre-staged volume instead):
+# Fallback mechanism (mirrors the legacy_ci bootstrap, but with zero runtime dependency on
+# legacy_ci/, probing the /nas_aisw pre-staged volume instead):
 #   - the image lands flat as $VLLM_ASSETS_CACHE/vllm_public_assets/<file>
 #     (see vllm/assets/base.py:get_vllm_public_assets, a hit skips the download)
 #   - the video lands flat as $VLLM_ASSETS_CACHE/video-example-data/sample_demo_1.mp4

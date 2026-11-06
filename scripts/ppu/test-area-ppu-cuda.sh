@@ -36,7 +36,7 @@ TMP_JUNIT="/tmp/ppu-cuda-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/cuda.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/cuda.yaml)
 # ------------------------------------------------------------------------------
 # ppu_extras audit:
 #   - module-level snapshot_download landmine: CLEAN (nothing downloads at import time)
@@ -114,7 +114,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -123,8 +123,8 @@ import os
 MODEL_MAP = {
     # test_cudagraph_mode.py::test_cudagraph_compilation_combo /
 # The only base of test_cudagraph_correctness_with_combos (a function-level LLM(...) load).
-# The non-GGUF variant is not in the list; the Aone alias matches
-# aone_ci/scripts/ppu_model_aliases.json (/ppusw -> /nas_aisw, isomorphic).
+# The non-GGUF variant is not in the list; the Legacy alias matches
+# legacy_ci/scripts/ppu_model_aliases.json (/ppusw -> /nas_aisw, isomorphic).
     "Qwen/Qwen2-1.5B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen2-1.5B-Instruct",
 }

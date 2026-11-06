@@ -33,7 +33,7 @@ TMP_JUNIT="/tmp/ppu-expert-parallelism-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/expert_parallelism.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/expert_parallelism.yaml)
 # ------------------------------------------------------------------------------
 # Upstream counterpart: .buildkite/test_areas/expert_parallelism.yaml (3 steps). PPU scope:
 #   OK   test_eplb_algo.py    - pure EPLB rebalance algorithm, single card
@@ -45,12 +45,12 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 #   SKIP test_elastic_ep.py   - upstream marks device: b200, optional: true; needs Ray,
 # internet access and DeepSeek-V2-Lite-Chat
 #   SKIP test_eplb_fused_moe_layer.py - not in the upstream yaml
-# single = the Aone "expert-parallelism single" job (1-PPU pod)
+# single = the Legacy "expert-parallelism single" job (1-PPU pod)
 EP_SINGLE_ARGS=(
   tests/distributed/test_eplb_algo.py
 )
 
-# multi = the Aone "expert-parallelism multi" job (2-PPU pod); test_eplb_execute.py
+# multi = the Legacy "expert-parallelism multi" job (2-PPU pod); test_eplb_execute.py
 # Spawns a world_size=2 subprocess through distributed_run (2 cards); world_size=4 cases
 # call pytest.skip automatically on fewer than 4 cards
 EP_MULTI_ARGS=(
@@ -297,7 +297,7 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: limit to 1 card to match
+# The Legacy single job is a 1-PPU pod: limit to 1 card to match
   CUDA_VISIBLE_DEVICES=0 _run_step "eplb_algorithm" 1 "${EP_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
 # multi: no card limit, test_eplb_execute.py spawns world_size=2 via distributed_run (2 cards)

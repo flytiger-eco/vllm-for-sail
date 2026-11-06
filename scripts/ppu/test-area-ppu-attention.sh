@@ -36,7 +36,7 @@ TMP_JUNIT="/tmp/ppu-attention-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/attention.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/attention.yaml)
 # ------------------------------------------------------------------------------
 # attention_default merges the upstream "V1 attention (H100)" and "(B200)" steps:
 #   -k "not _correctness" drops every correctness case that needs a real model;

@@ -10,7 +10,7 @@
 #
 # Known follow-ups:
 #   - Flashinfer variant: upstream runs it twice (the second with VLLM_USE_FLASHINFER_SAMPLER=1);
-#     the Aone sh_renderer has no per-step env field so it was not split. GHA can add a
+#     the Legacy sh_renderer has no per-step env field so it was not split. GHA can add a
 #     second step by exporting the env where _run_step is called.
 # ==============================================================================
 
@@ -34,7 +34,7 @@ TMP_JUNIT="/tmp/ppu-samplers-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/samplers.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/samplers.yaml)
 # ------------------------------------------------------------------------------
 # samplers_default = the PPU version of the upstream "Samplers Test" step (2 of 4 files):
 SAMPLERS_SINGLE_ARGS=(
@@ -49,7 +49,7 @@ SAMPLERS_SINGLE_ARGS=(
 # maybe_model_redirect -> red-zone cache miss -> 2/8 fail.
 # GHA symlinks the standard HF cache layout (see MODEL_MAP below), so from_pretrained
 # reads the cache offline without going through the vLLM redirect and that gap does
-# not exist. The distilgpt2 NAS path is unconfirmed by the list (Aone aliases are
+# not exist. The distilgpt2 NAS path is unconfirmed by the list (Legacy aliases are
 # isomorphic), so this version keeps the ignore; drop it once a run shows the symlink OK.
   --ignore=tests/samplers/test_no_bad_words.py
 )
@@ -96,17 +96,17 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list use the
-# isomorphic Aone ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
+# isomorphic Legacy ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
 
 MODEL_MAP = {
     # test_logprobs.py + test_ignore_eos.py
-# list MISS, use the isomorphic Aone aliases path
+# list MISS, use the isomorphic Legacy aliases path
     "distilbert/distilgpt2":
         "/nas_aisw/datasets/checkpoints/LLM/gpt/v1.0/distilgpt2",
-# test_ignore_eos.py (Aone redirected it to Instruct; the GHA symlink maps the real
+# test_ignore_eos.py (Legacy redirected it to Instruct; the GHA symlink maps the real
 # name and the list hit is path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B)
     "meta-llama/Llama-3.2-1B":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B",

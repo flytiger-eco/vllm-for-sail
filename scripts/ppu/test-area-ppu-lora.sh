@@ -45,7 +45,7 @@ TMP_JUNIT="/tmp/ppu-lora-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/lora.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/lora.yaml)
 # ------------------------------------------------------------------------------
 # single = the PPU version of the upstream "LoRA %N" job (parallelism=4):
 #   - drops the 7 TP files (they run in the multi section) plus 3 files PPU cannot run
@@ -104,7 +104,7 @@ LORA_SINGLE_ARGS=(
 # -k excludes two TP cases for now: engine init fails on PPU - TP worker rank1 reports a
 # CUDA OOM while allocating 20 MiB with 95.51 GiB free (false OOM). expandable_segments
 # has been disabled (see [env] below, the prime suspect: the bc single uni section shows
-# the same symptom, Aone does not set it and is all green); drop the -k below once a rerun
+# the same symptom, Legacy does not set it and is all green); drop the -k below once a rerun
 # confirms the false OOM is gone
 LORA_MULTI_ARGS=(
   tests/lora/test_qwen3_with_multi_loras.py
@@ -219,7 +219,7 @@ MODEL_MAP = {
     "jeeejeee/qwen25-vl-lora-pokemon":
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/qwen25-vl-lora-pokemon",
 # NAS has no separate tower directory; it shares the tower-connector one
-# (the Aone aliases map the same way, not a typo)
+# (the Legacy aliases map the same way, not a typo)
     "prashanth058/qwen2vl-flickr-lora-tower":
         "/nas_aisw/datasets/checkpoints/LLM/qwen2vl/v1.0/qwen2vl-flickr-lora-tower-connector",
     "prashanth058/qwen2vl-flickr-lora-tower-connector":
@@ -230,7 +230,7 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v2.5/qwen2.5-3b-vl-lora-vision-connector",
     "EpochEcho/qwen3-4b-vl-lora-vision-connector":
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/qwen3-4b-vl-lora-vision-connector",
-# ---- not in the list: guessed from the isomorphic Aone /ppusw -> /nas_aisw path, watch MISS on the first run ----
+# ---- not in the list: guessed from the isomorphic Legacy /ppusw -> /nas_aisw path, watch MISS on the first run ----
 # quantized base of test_quant_model.py (the list only has the v1.0 non-quantized one)
     "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v0.3/TinyLlama-1.1B-Chat-v0.3-AWQ",

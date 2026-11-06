@@ -7,7 +7,7 @@
 # The case selection mirrors the 3 nightly steps of upstream
 # .buildkite/test_areas/models_language.yaml: Standard (torch_nightly) / Extra Standard (%N) /
 # Hybrid (%N), where the Standard part is snapshotted from the single section of
-# aone_ci/ppu_extras/models_language.yaml. The 4 optional upstream steps (Extended Generation /
+# legacy_ci/ppu_extras/models_language.yaml. The 4 optional upstream steps (Extended Generation /
 # PPL / Extended Pooling / MTEB) are out of scope for now per the migration decision.
 #
 # Environment variables:
@@ -108,12 +108,12 @@ echo "[deps] HYBRID_READY=${HYBRID_READY}"
 # [tests] case selection
 # ------------------------------------------------------------------------------
 # Step 1 standard - mirrors upstream "Language Models Tests (Standard)" (torch_nightly, 25min):
-# snapshotted from the single section of aone_ci/ppu_extras/models_language.yaml
+# snapshotted from the single section of legacy_ci/ppu_extras/models_language.yaml
 ML_STANDARD_ARGS=(
   tests/models/language
   -m
   "core_model and (not slow_test)"
-# Known failure kept from the Aone snapshot: e5-mistral-7b-instruct embedding forward returns
+# Known failure kept from the Legacy snapshot: e5-mistral-7b-instruct embedding forward returns
 # a wrong magnitude on PPU (cosine similarity 0.53, the vllm output is 100x smaller than hf),
 # PPU issue #10. Deselected until upstream fixes it.
   "--deselect=tests/models/language/pooling/test_embedding.py::test_models[intfloat/e5-mistral-7b-instruct]"
@@ -126,7 +126,7 @@ ML_STANDARD_ARGS=(
 )
 # Step 2 extra_standard - mirrors upstream "Language Models Tests (Extra Standard) %N"
 # (torch_nightly, parallelism 2 -> shards=2, 45min): the slow_test subset.
-# This is newly covered on PPU (deferred in the first Aone version), so PARTIAL RED is
+# This is newly covered on PPU (deferred in the first Legacy version), so PARTIAL RED is
 # expected (models missing and so on); the snapshot adds no extra ignore, to be tracked later
 ML_EXTRA_STANDARD_ARGS=(
   tests/models/language
@@ -196,7 +196,7 @@ fi
 # ------------------------------------------------------------------------------
 # Mapping source (batch check on 2026-08-28): the whole tests/models/language tree references
 # 136 HF ids; against the red-zone lists checkpoints_cleaned.json / syncing_cleaned.json plus
-# aone_ci/scripts/ppu_model_aliases.json (/ppusw->/nas_aisw), 106 hit and are recorded below;
+# legacy_ci/scripts/ppu_model_aliases.json (/ppusw->/nas_aisw), 106 hit and are recorded below;
 # 30 MISS (mostly referenced by optional pooling/mteb cases such as gte-*-v1.5,
 # cross-encoder/*, gemma-3-4b-it, ibm/Power*), to be added as needed after the first run is
 # observed. Paths are copied from the list's path field without an individual ls check - a
@@ -533,7 +533,7 @@ PYEOF
 }
 
 _run_all() {
-# Matches the Aone 1-PPU pod semantics: the standard part limits the visible cards to 1
+# Matches the Legacy 1-PPU pod semantics: the standard part limits the visible cards to 1
   CUDA_VISIBLE_DEVICES=0 _run_step "standard" 1 "${ML_STANDARD_ARGS[@]}"
   if [ "${MODE}" = "single" ]; then
     return

@@ -34,7 +34,7 @@ TMP_JUNIT="/tmp/ppu-model-executor-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/model_executor.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/model_executor.yaml)
 # ------------------------------------------------------------------------------
 # model_executor_unit = the PPU version of the upstream "Model Executor Test"
 # step: the whole tests/model_executor/ tree minus the files below:

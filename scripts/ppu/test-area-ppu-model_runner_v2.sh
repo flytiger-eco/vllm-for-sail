@@ -49,12 +49,12 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # ------------------------------------------------------------------------------
 # The upstream buildkite model_runner_v2.yaml Examples step runs `pip install tensorizer`,
 # but the PPU scope of this area has no Examples (python3 scripts, not pytest, and many MM
-# models are not staged; see the audit summary of aone_ci/ppu_extras/model_runner_v2.yaml).
+# models are not staged; see the audit summary of legacy_ci/ppu_extras/model_runner_v2.yaml).
 # The core/distributed/spec_decode steps only use the image stack plus the pytest toolchain
 # already installed by ppu_install_dependency.sh (pytest-asyncio/tblib/pytest-shard/pyyaml).
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/model_runner_v2.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/model_runner_v2.yaml)
 # ------------------------------------------------------------------------------
 # single = the PPU version of the upstream buildkite "Model Runner V2 Core Tests" + "Spec
 # Decode" steps (single card), mapped back to the single section of ppu_extras model_runner_v2.yaml.
@@ -185,7 +185,7 @@ export TOKENIZERS_PARALLELISM="false"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 # Core switch of this area: enable the V2 model runner (the upstream buildkite file exports
 # VLLM_USE_V2_MODEL_RUNNER=1 for every step and ppu_extras declares it as an area-level env.
-# The auto-generated aone script missed this line; the GHA version restores it, otherwise the
+# The auto-generated legacy script missed this line; the GHA version restores it, otherwise the
 # whole area loses its meaning).
 export VLLM_USE_V2_MODEL_RUNNER="1"
 
@@ -221,7 +221,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -233,7 +233,7 @@ MODEL_MAP = {
 # list hit: checkpoints_cleaned.json path=checkpoints/LLM/misc/v1.0/opt-125m
     "facebook/opt-125m": "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
     # test_llm_engine.py / test_async_scheduling.py / basic_correctness / PP TEST_MODELS
-# list hit (cleaned name=Llama-3.2-1B-Instruct path v3.2; the Aone /ppusw side has v3.1, so the
+# list hit (cleaned name=Llama-3.2-1B-Instruct path v3.2; the Legacy /ppusw side has v3.1, so the
 # red-zone main list v3.2 wins, consistent with the basic-correctness sh)
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
@@ -244,7 +244,7 @@ MODEL_MAP = {
 # list hit: checkpoints/LLM/llama/v1.0/llama-160m
     "JackFram/llama-160m": "/nas_aisw/datasets/checkpoints/LLM/llama/v1.0/llama-160m",
 # main model of test_struct_output_generate.py (xgrammar group)
-# Ministral: Aone aliases hit LLM/Ministral/v1.0
+# Ministral: Legacy aliases hit LLM/Ministral/v1.0
     "mistralai/Ministral-8B-Instruct-2410":
         "/nas_aisw/datasets/checkpoints/LLM/Ministral/v1.0/Ministral-8B-Instruct-2410",
 # Qwen2.5-1.5B: list hit checkpoints/LLM/qwen/v2.5/Qwen2.5-1.5B-Instruct
@@ -258,7 +258,7 @@ MODEL_MAP = {
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B":
         "/nas_aisw/datasets/checkpoints/LLM/deepseek/R1/DeepSeek-R1-Distill-Qwen-1.5B",
 
-# ---- single: spec_decode eagle/mtp (the cases picked by -k; all hit Aone aliases or the list) ----
+# ---- single: spec_decode eagle/mtp (the cases picked by -k; all hit Legacy aliases or the list) ----
 # Llama-3.1-8B base (main list path v3.1)
     "meta-llama/Llama-3.1-8B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.1/Llama-3.1-8B-Instruct",
@@ -313,13 +313,13 @@ MODEL_MAP = {
 # "taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3": "<NAS path once staged>",
 
     # ---- multi: distributed / DP / eagle_dp ----
-# used by basic_correctness distributed as tiny-random (not in the list, Aone aliases hit tiny/v1.0)
+# used by basic_correctness distributed as tiny-random (not in the list, Legacy aliases hit tiny/v1.0)
     "hmellor/tiny-random-LlamaForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
     "hmellor/tiny-random-Gemma2ForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-Gemma2ForCausalLM",
 # test_async_llm_dp.py (DP_SIZE=2) uses PowerMoE-3b
-# HF org=ibm-research (referenced by the test); Aone aliases hit PowerMoE/v1.0
+# HF org=ibm-research (referenced by the test); Legacy aliases hit PowerMoE/v1.0
     "ibm-research/PowerMoE-3b":
         "/nas_aisw/datasets/checkpoints/LLM/PowerMoE/v1.0/PowerMoE-3b",
 # test_eagle_dp.py reuses Llama-3.1-8B + EAGLE-LLaMA3.1-Instruct-8B above
@@ -533,7 +533,7 @@ _run_step() {
   fi
 }
 
-# Mirrors the single/multi sections of aone_ci/scripts/test_area_ppu_model_runner_v2.sh:
+# Mirrors the single/multi sections of legacy_ci/scripts/test_area_ppu_model_runner_v2.sh:
 # each step is its own pytest process; the per-step env (ENFORCE_EAGER / TARGET_TEST_SUITE /
 # TP_SIZE / DP_SIZE / NCCL_CUMEM_HOST_ENABLE) is injected as a command prefix and only
 # affects that _run_step call. Every step has shards=1 (no sharding, the tests use multi-card internally).

@@ -79,7 +79,7 @@ TMP_JUNIT="/tmp/ppu-engine-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/engine.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/engine.yaml)
 # ------------------------------------------------------------------------------
 # Step 1: engine_basic - tests/engine/test_arg_utils.py plus the root-level
 #   test_sequence/logger/vllm_port (all GPU-free).
@@ -136,7 +136,7 @@ ENGINE_SINGLE_E2E_ARGS=(
   --ignore=tests/v1/e2e/general/test_mamba_prefix_cache.py
 # Qwen3-Embedding-0.6B embedding model, deferred in the first version
   --ignore=tests/v1/e2e/general/test_pooling_chunked_prefill.py
-# JackFram/llama-160m is not in the red zone (missing from the GHA list and the Aone aliases);
+# JackFram/llama-160m is not in the red zone (missing from the GHA list and the Legacy aliases);
 # only test_decoder_max_context_length_validation uses it, so the whole file is ignored;
 # delete this line and add the MODEL_MAP path once the model is staged
   --ignore=tests/v1/e2e/general/test_context_length.py
@@ -184,7 +184,7 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list use the
-# isomorphic Aone ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
+# isomorphic Legacy ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -206,7 +206,7 @@ MODEL_MAP = {
     "hmellor/tiny-random-LlamaForCausalLM":
         "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",
 # v1_e2e_general (cascade_attention and others);
-# list MISS, use the isomorphic Aone aliases path
+# list MISS, use the isomorphic Legacy aliases path
     "deepseek-ai/DeepSeek-V2-Lite":
         "/nas_aisw/datasets/checkpoints/LLM/DeepSeek/V2/DeepSeek-V2-Lite",
     # v1_e2e_general
@@ -216,17 +216,17 @@ MODEL_MAP = {
     # v1_e2e_general
 # list hit: path=checkpoints/LLM/qwen/v3/Qwen3-0.6B
     "Qwen/Qwen3-0.6B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-0.6B",
-# v1_e2e_general; list MISS, use the isomorphic Aone aliases path (note the capital Qwen directory)
+# v1_e2e_general; list MISS, use the isomorphic Legacy aliases path (note the capital Qwen directory)
     "Qwen/Qwen2-1.5B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen2-1.5B-Instruct",
-# v1_e2e_general (min_tokens and others); list MISS, use the isomorphic Aone aliases path
+# v1_e2e_general (min_tokens and others); list MISS, use the isomorphic Legacy aliases path
     "bigcode/starcoder2-3b":
         "/nas_aisw/datasets/checkpoints/LLM/starcoder/v1.0/starcoder2-3b",
     # test_fast_incdec_prefix_err.py + test_correctness_sliding_window.py
-# list MISS, use the isomorphic Aone aliases path
+# list MISS, use the isomorphic Legacy aliases path
     "google/gemma-3-1b-it":
         "/nas_aisw/datasets/checkpoints/LLM/gemma/v1.0/gemma-3-1b-it",
-# test_async_scheduling.py speculator; list MISS, use the isomorphic Aone aliases path
+# test_async_scheduling.py speculator; list MISS, use the isomorphic Legacy aliases path
     "nm-testing/Llama3_2_1B_speculator.eagle3":
         "/nas_aisw/datasets/checkpoints/LLM/optimization/v1.0/Llama3_2_1B_speculator.eagle3",
 # JackFram/llama-160m (test_context_length.py): missing from both lists and waiting to be
@@ -425,7 +425,7 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: 1 card makes multi_gpu_test skip itself, matching
+# The Legacy single job is a 1-PPU pod: 1 card makes multi_gpu_test skip itself, matching
   CUDA_VISIBLE_DEVICES=0 _run_step "engine_basic" 1 "${ENGINE_SINGLE_BASIC_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "v1_engine" 1 "${ENGINE_SINGLE_V1_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "v1_e2e_general" 1 "${ENGINE_SINGLE_E2E_ARGS[@]}"

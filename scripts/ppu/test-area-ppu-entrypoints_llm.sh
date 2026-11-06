@@ -31,7 +31,7 @@ TMP_JUNIT="/tmp/ppu-ep-llm-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of aone_ci/ppu_extras/entrypoints_llm.yaml)
+# [tests] case selection (snapshot of legacy_ci/ppu_extras/entrypoints_llm.yaml)
 # ------------------------------------------------------------------------------
 # This area covers the "Entrypoints Integration (LLM)" step of upstream entrypoints.yaml
 # (split per file); the other entrypoints steps belong to the entrypoints area.
@@ -118,7 +118,7 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list use the
-# isomorphic Aone ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
+# isomorphic Legacy ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
 import os
@@ -330,12 +330,12 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: 1 card makes tp=2 cases skip, matching
+# The Legacy single job is a 1-PPU pod: 1 card makes tp=2 cases skip, matching
   CUDA_VISIBLE_DEVICES=0 _run_step "test_chat" 1 "${EP_LLM_SINGLE_CHAT_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "test_collective_rpc" 1 "${EP_LLM_SINGLE_RPC_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "test_gpu_utilization" 1 "${EP_LLM_SINGLE_GPU_UTIL_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
-# The Aone multi job is a 2-PPU pod: no card limit, tp=2 cases use 2 cards
+# The Legacy multi job is a 2-PPU pod: no card limit, tp=2 cases use 2 cards
 # 2026-08-27: the multi step is disabled (mp-2/ray-2 all fail on FlexAttention OOM,
 # see the EP_LLM_MULTI_RPC_ARGS comment), so this mode has no cases
 echo "[mode] multi steps are disabled (2026-08-27 FlexAttention OOM), nothing to run"

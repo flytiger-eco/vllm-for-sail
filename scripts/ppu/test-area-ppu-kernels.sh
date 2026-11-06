@@ -101,7 +101,7 @@ TMP_JUNIT="/tmp/ppu-kernels-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/kernels.yaml,
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/kernels.yaml,
 #         with the device=OAM-810E device_conditional_ignores folded in)
 # ------------------------------------------------------------------------------
 # Scope: the PPU-relevant subset of the 11 upstream kernels.yaml steps - core / mamba / moe
@@ -459,7 +459,7 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: 1 card per step (multi_gpu_test self-skips)
+# The Legacy single job is a 1-PPU pod: 1 card per step (multi_gpu_test self-skips)
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"

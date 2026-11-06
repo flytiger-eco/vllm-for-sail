@@ -69,7 +69,7 @@ TMP_JUNIT="/tmp/ppu-entrypoints-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/entrypoints.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/entrypoints.yaml)
 # ------------------------------------------------------------------------------
 # Step 1: entrypoints_unit - the PPU version of upstream "Entrypoints Unit Tests":
 #   tool_parsers plus the non-LLM subset of tests/entrypoints/ (no model dependency, fast).
@@ -156,7 +156,7 @@ fi
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
 # (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list use the
-# isomorphic Aone ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
+# isomorphic Legacy ppu_model_aliases.json path (/ppusw/ -> /nas_aisw/). A missing path warns and is skipped.
 #
 # Note: the symlinks the old snapshot prepared for v1/entrypoints (opt-125m, llava-1.5-7b,
 # DeepSeek-R1-Distill, Meta-Llama-3.1-8B, Ministral, Qwen2.5-1.5B, Qwen3-1.7B,
@@ -174,10 +174,10 @@ MODEL_MAP = {
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
 # test_hermes_tool_parser.py::test_qwen3 series; list hit qwen/v3
     "Qwen/Qwen3-32B": "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-32B",
-# test_granite4_tool_parser.py; list MISS, use the isomorphic Aone aliases path
+# test_granite4_tool_parser.py; list MISS, use the isomorphic Legacy aliases path
     "ibm-granite/granite-4.0-h-tiny":
         "/nas_aisw/datasets/checkpoints/LLM/granite/v1.0/granite-4.0-h-tiny",
-# test_hermes_tool_parser.py LoRA tokenizer; list MISS, isomorphic Aone path
+# test_hermes_tool_parser.py LoRA tokenizer; list MISS, isomorphic Legacy path
     "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci":
         "/nas_aisw/datasets/checkpoints/LLM/LoRA/v1.0/LoRA-Llama-3.2-1B-tool-vllm-ci",
 # ---- anthropic (engine-level, RemoteOpenAIServer) ----
@@ -381,7 +381,7 @@ if [ "${MODE}" = "multi" ]; then
 else
 # single / all: Step 1 is mostly pure CPU unit tests (tool_parsers + light entrypoints);
 # the anthropic cases bring up one Qwen3-0.6B server. 1 card everywhere, matching the
-# Aone 1-PPU pod.
+# Legacy 1-PPU pod.
   CUDA_VISIBLE_DEVICES=0 _run_step "entrypoints_unit" 1 "${EP_SINGLE_UNIT_ARGS[@]}"
 fi
 

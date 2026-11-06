@@ -30,9 +30,9 @@ mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 # [deps] area-specific dependencies: none.
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the multi section in aone_ci/ppu_extras/models_distributed.yaml)
+# [tests] case selection (snapshot of the multi section in legacy_ci/ppu_extras/models_distributed.yaml)
 # ------------------------------------------------------------------------------
-# single = the Aone ppu:1 pod: this area has no single case (extras `single: []`), so
+# single = the Legacy ppu:1 pod: this area has no single case (extras `single: []`), so
 #   single and all only run the 3 multi steps below.
 #
 # Upstream .buildkite/test_areas/models_distributed.yaml has 1 step / 6 commands; PPU
@@ -116,7 +116,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -124,13 +124,13 @@ import os
 
 MODEL_MAP = {
 # Cmd 1 basic_correctness distributed (opt-125m mp) + several upstream references.
-# List hit: the Aone alias facebook/opt-125m=/ppusw/.../misc/v1.0/opt-125m
+# List hit: the Legacy alias facebook/opt-125m=/ppusw/.../misc/v1.0/opt-125m
 # (-> /nas_aisw; same value the basic-correctness area already uses).
     "facebook/opt-125m": "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
 # Cmd 1/2/3 share the main model (basic_correctness mp / sharded_state_loader
 # snapshot_download / test_transformers TP=2).
 # List hit: checkpoints_cleaned.json path=checkpoints/LLM/Llama/v3.2/
-# Llama-3.2-1B-Instruct (its ms_name is unsloth/..., matched by name; the Aone
+# Llama-3.2-1B-Instruct (its ms_name is unsloth/..., matched by name; the Legacy
 # /ppusw side has a v3.1 directory and the red-zone list's v3.2 wins).
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
@@ -326,7 +326,7 @@ _run_step() {
   fi
 }
 
-# The 3 multi steps (replicating the Aone sh multi branch order): all single-process,
+# The 3 multi steps (replicating the Legacy sh multi branch order): all single-process,
 # with the tests taking 2 cards through TP=2 / @multi_gpu_test(num_gpus=2) themselves,
 # so no CUDA_VISIBLE_DEVICES and every card the pod injects stays visible.
 _run_multi_steps() {
@@ -336,7 +336,7 @@ _run_multi_steps() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# This area has no single case (the Aone ppu:1 pod has no models_distributed single step)
+# This area has no single case (the Legacy ppu:1 pod has no models_distributed single step)
   echo "[run] no single steps configured for this area"
 elif [ "${MODE}" = "multi" ]; then
   _run_multi_steps

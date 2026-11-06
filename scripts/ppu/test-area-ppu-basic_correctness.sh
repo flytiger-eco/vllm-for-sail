@@ -39,9 +39,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single/multi sections in aone_ci/ppu_extras/basic_correctness.yaml)
+# [tests] case selection (snapshot of the single/multi sections in legacy_ci/ppu_extras/basic_correctness.yaml)
 # ------------------------------------------------------------------------------
-# single = the Aone "basic-correctness single" job (1-PPU pod):
+# single = the Legacy "basic-correctness single" job (1-PPU pod):
 #   - test_basic_correctness.py (its 12 multi_gpu_test cases skip automatically on 1
 #     card; the single section pins CUDA_VISIBLE_DEVICES=0 to keep that behaviour)
 # test_mem.py is disabled as a whole unit (2026-08-27): once the known failures were
@@ -114,7 +114,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -126,7 +126,7 @@ MODEL_MAP = {
     "facebook/opt-125m": "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",
 # test_basic_correctness.py MODELS + distributed group;
 # list hit: path=checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct
-# (its ms_name is unsloth/..., matched by name; the Aone /ppusw side has a v3.1
+# (its ms_name is unsloth/..., matched by name; the Legacy /ppusw side has a v3.1
 # directory and the red-zone list's v3.2 wins)
     "meta-llama/Llama-3.2-1B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Llama/v3.2/Llama-3.2-1B-Instruct",
@@ -334,7 +334,7 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-# The Aone single job is a 1-PPU pod: 1 card makes multi_gpu_test skip itself, matching
+# The Legacy single job is a 1-PPU pod: 1 card makes multi_gpu_test skip itself, matching
   CUDA_VISIBLE_DEVICES=0 _run_step "test_basic_correctness" 1 "${BC_SINGLE_BASIC_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   _run_step "test_basic_correctness_distributed" 1 "${BC_MULTI_ARGS[@]}"

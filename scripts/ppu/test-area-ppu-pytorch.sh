@@ -31,7 +31,7 @@ TMP_JUNIT="/tmp/ppu-pytorch-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/pytorch.yaml)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/pytorch.yaml)
 # ------------------------------------------------------------------------------
 # Upstream .buildkite/test_areas/pytorch.yaml has 5 steps; the PPU scope takes the first
 # 2 pure unit steps. Fullgraph Smoke / Fullgraph (7+ unstaged models) and the Nightly
@@ -319,7 +319,7 @@ _run_step() {
 }
 
 # Two single-card steps, no shard and no multi. single and all both run the two steps;
-# multi has no matching step and fails fast (matching Aone test_area_ppu_pytorch.sh).
+# multi has no matching step and fails fast (matching Legacy test_area_ppu_pytorch.sh).
 if [ "${MODE}" = "multi" ]; then
   echo "[mode] ERROR: area pytorch has no multi-mode steps configured" >&2
   exit 2

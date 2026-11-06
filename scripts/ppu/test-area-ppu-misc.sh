@@ -75,13 +75,13 @@ RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-misc-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
-# No area-specific pip dependencies: aone_ci/scripts/test_area_ppu_misc.sh only installs the
+# No area-specific pip dependencies: legacy_ci/scripts/test_area_ppu_misc.sh only installs the
 # pytest toolchain (pytest-asyncio/tblib/pytest-shard), already installed by
 # ppu_install_dependency.sh. The upstream misc steps that need kv_connectors/opentelemetry/
 # lm-eval are all skipped or ignored in the PPU scope (see [tests] below), so nothing to add.
 
 # ------------------------------------------------------------------------------
-# [tests] case selection (snapshot of the single section in aone_ci/ppu_extras/misc.yaml, 5 labels)
+# [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/misc.yaml, 5 labels)
 # ------------------------------------------------------------------------------
 # misc PPU scope = the GPU subset of upstream .buildkite/test_areas/misc.yaml:
 #   ✅ Step 1 V1 Others (GPU) → v1/{core,executor,kv_offload,sample,
@@ -340,7 +340,7 @@ fi
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
 # ------------------------------------------------------------------------------
 # paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Aone
+# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
 # /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
 python3 - <<'PYEOF'
@@ -349,12 +349,12 @@ import os
 MODEL_MAP = {
 # HF ids referenced from tests/{v1,detokenizer,multimodal,utils_} (grepped with double quotes)
 # checked one by one against the red-zone list: prefer the list's path field (marked cleaned),
-# then the /ppusw->/nas_aisw mapping of aone_ci/scripts/ppu_model_aliases.json (marked aone).
+# then the /ppusw->/nas_aisw mapping of legacy_ci/scripts/ppu_model_aliases.json (marked legacy).
 # All 38 ids hit, none pending staging.
 # Large models (8B/20B and up) are mostly used by the already --ignore'd spec_decode/slow/cpu
 # cases; creating the symlink is harmless; when missing, [setup] logs MISS and skips.
     "amd/PARD-Llama-3.2-1B":
-        "/nas_aisw/datasets/checkpoints/LLM/PARD/v1.0/PARD-Llama-3.2-1B",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/PARD/v1.0/PARD-Llama-3.2-1B",  # legacy
     "BAAI/bge-base-en-v1.5":
         "/nas_aisw/datasets/checkpoints/LLM/BAAI/v1.5/bge-base-en-v1.5",  # cleaned
     "distilbert/distilgpt2":
@@ -362,19 +362,19 @@ MODEL_MAP = {
     "facebook/opt-125m":
         "/nas_aisw/datasets/checkpoints/LLM/misc/v1.0/opt-125m",  # cleaned
     "facebook/opt-350m":
-        "/nas_aisw/datasets/checkpoints/LLM/opt/v1.0/opt-350m",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/opt/v1.0/opt-350m",  # legacy
     "google/gemma-3-1b-it":
-        "/nas_aisw/datasets/checkpoints/LLM/gemma/v1.0/gemma-3-1b-it",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/gemma/v1.0/gemma-3-1b-it",  # legacy
     "hmellor/tiny-random-LlamaForCausalLM":
-        "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/tiny/v1.0/tiny-random-LlamaForCausalLM",  # legacy
     "ibm-granite/granite-4.0-tiny-preview":
-        "/nas_aisw/datasets/checkpoints/LLM/granite/v1.0/granite-4.0-tiny-preview",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/granite/v1.0/granite-4.0-tiny-preview",  # legacy
     "llava-hf/llava-1.5-7b-hf":
         "/nas_aisw/datasets/checkpoints/LLM/llava-hf/v1.5/llava-1.5-7b-hf",  # cleaned
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf":
-        "/nas_aisw/datasets/checkpoints/LLM/llava/v1.0/llava-onevision-qwen2-0.5b-ov-hf",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/llava/v1.0/llava-onevision-qwen2-0.5b-ov-hf",  # legacy
     "llava-hf/llava-v1.6-mistral-7b-hf":
-        "/nas_aisw/datasets/checkpoints/LLM/llava/v1.6/llava-v1.6-mistral-7b-hf",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/llava/v1.6/llava-v1.6-mistral-7b-hf",  # legacy
     "meta-llama/llama-2-7b-hf":
         "/nas_aisw/datasets/checkpoints/LLM/llama/v2.0/llama-2-7b-hf",  # cleaned
     "meta-llama/Llama-3.1-8B-Instruct":
@@ -386,19 +386,19 @@ MODEL_MAP = {
     "meta-llama/Meta-Llama-3-8B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/llama/v3/Meta-Llama-3-8B-Instruct",  # cleaned
     "nm-testing/Llama3_2_1B_speculator.eagle3":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v1.0/Llama3_2_1B_speculator.eagle3",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/optimization/v1.0/Llama3_2_1B_speculator.eagle3",  # legacy
     "nm-testing/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized",  # legacy
     "nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-30B-MOE-VL-Eagle3",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-30B-MOE-VL-Eagle3",  # legacy
     "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",  # legacy
     "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16":
-        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/optimization/v3.0/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",  # legacy
     "openai/gpt-oss-20b":
         "/nas_aisw/datasets/checkpoints/LLM/gpt/v1/gpt-oss-20b",  # cleaned
     "Qwen/Qwen1.5-7B":
-        "/nas_aisw/datasets/checkpoints/LLM/Qwen1.5/v1.0/Qwen1.5-7B",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen1.5/v1.0/Qwen1.5-7B",  # legacy
     "Qwen/Qwen2-0.5B-Instruct":
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen2-0.5B-Instruct",  # cleaned
     "Qwen/Qwen2.5-1.5B-Instruct":
@@ -412,26 +412,26 @@ MODEL_MAP = {
     "Qwen/Qwen3-8B":
         "/nas_aisw/datasets/checkpoints/LLM/qwen/v3/Qwen3-8B",  # cleaned
     "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8":
-        "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-VL-30B-A3B-Instruct-FP8",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/qwen/v3.0/Qwen3-VL-30B-A3B-Instruct-FP8",  # legacy
     "RedHatAI/gpt-oss-20b-speculator.eagle3":
-        "/nas_aisw/datasets/checkpoints/LLM/gpt/v1.0/gpt-oss-20b-speculator.eagle3",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/gpt/v1.0/gpt-oss-20b-speculator.eagle3",  # legacy
     "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3":
-        "/nas_aisw/datasets/checkpoints/LLM/Llama/v1.0/Llama-3.1-8B-Instruct-speculator.eagle3",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/Llama/v1.0/Llama-3.1-8B-Instruct-speculator.eagle3",  # legacy
 # The NAS directory name ends with a dot: Qwen. (copied from the list path, not a typo)
     "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8":
-        "/nas_aisw/datasets/checkpoints/LLM/Qwen./v1.0/Qwen2.5-VL-3B-Instruct-quantized.w8a8",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen./v1.0/Qwen2.5-VL-3B-Instruct-quantized.w8a8",  # legacy
     "RedHatAI/Qwen3-8B-speculator.eagle3":
-        "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen3-8B-speculator.eagle3",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/Qwen/v1.0/Qwen3-8B-speculator.eagle3",  # legacy
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0":
         "/nas_aisw/datasets/checkpoints/LLM/TinyLlama/v1.0/TinyLlama-1.1B-Chat-v1.0",  # cleaned
     "XiaomiMiMo/MiMo-7B-Base":
-        "/nas_aisw/datasets/checkpoints/LLM/MiMo/v1.0/MiMo-7B-Base",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/MiMo/v1.0/MiMo-7B-Base",  # legacy
     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B":
-        "/nas_aisw/datasets/checkpoints/LLM/EAGLE3/v3/EAGLE3-LLaMA3.1-Instruct-8B",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/EAGLE3/v3/EAGLE3-LLaMA3.1-Instruct-8B",  # legacy
     "yuhuili/EAGLE-LLaMA3.1-Instruct-8B":
-        "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/EAGLE-LLaMA3.1-Instruct-8B",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/EAGLE-LLaMA3.1-Instruct-8B",  # legacy
     "yuhuili/EAGLE-LLaMA3-Instruct-8B":
-        "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/EAGLE-LLaMA3-Instruct-8B",  # aone
+        "/nas_aisw/datasets/checkpoints/LLM/EAGLE/v1.0/EAGLE-LLaMA3-Instruct-8B",  # legacy
 }
 
 HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(

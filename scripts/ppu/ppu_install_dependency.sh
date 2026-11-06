@@ -7,8 +7,8 @@
 #   pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-...-vllm0.27.0-py312-20261001
 #
 # References:
-#   - on the Aone CI side the wheel/dependency install is spread over
-#     .aoneci/build-wheel-ppu.yaml and the [setup] section of aone_ci/scripts/test_area_ppu_lora.sh
+#   - on the Legacy CI side the wheel/dependency install is spread over
+#     .legacyci/build-wheel-ppu.yaml and the [setup] section of legacy_ci/scripts/test_area_ppu_lora.sh
 #   - the layout of sglang-for-sail scripts/ci/ppu/ppu_install_dependency.sh
 #
 # Core rule (learned from sglang, see its script comments): never touch the PPU stack the
@@ -187,7 +187,7 @@ _pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 # tree, giving the hybrid "Python layer = branch sources + C extensions = image build"
 # shape. ABI premise: the branch does not change the csrc/ Python bindings (the current
 # changes are pure Python under vllm/lora). The official flow later switches to the wheel
-# build (mirroring Aone .aoneci/build-wheel-ppu.yaml), at which point this section can go.
+# build (mirroring Legacy .legacyci/build-wheel-ppu.yaml), at which point this section can go.
 # Gate impact: because the C extensions come from the image rather than the change under
 # test, a PR touching csrc/ still exercises the old .so from the image and a green run is a
 # false green. That is why the kernels area path filter deliberately excludes csrc/**;
