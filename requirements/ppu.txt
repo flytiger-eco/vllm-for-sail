@@ -2,6 +2,15 @@
 -r common.txt
 
 # numba == 0.65.0 # Required for N-gram speculative decoding
+# Kept commented: the artifactory resolves numba==0.65.0 to a PPU source
+# wrapper (numba-0.65.0+v0.1.0.ppu2.2.1.tar.gz) whose local version out-ranks
+# the community 0.65.0 wheel and whose setup.py exits with "No installation
+# package compatible with the current environment" for
+# python cp312 / linux_x86_64 / ubuntu2404 / runtime 130, taking the whole
+# requirements install down with it (PR #57 run 42194854556: every area died
+# installing deps, 0 tests run). numba is instead installed from the aliyun
+# mirror by ppu_ci_nightly_install_dependency.sh, which also uninstalls the
+# image's numpy-1.x-ABI numba first (same-release local tag satisfies ==0.65.0).
 
 # Dependencies for PPU
 
