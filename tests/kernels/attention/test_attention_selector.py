@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from unittest.mock import patch
 
 import pytest
@@ -181,19 +182,28 @@ def test_backend_selection(
                         if block_size != 64:
                             # FlashMLA only supports block_size == 64
                             pytest.skip("FlashMLA only supports block_size 64")
-                        from vllm.v1.attention.backends.mla.flashmla import (
-                            is_flashmla_dense_supported,
+                        # On PPU, FlashMLA and fa_utils branch on is_ppu() at
+                        # import time, so a generic CudaPlatform would pick the
+                        # NVIDIA-only code paths. Simulate the real PPU platform.
+                        platform_ctx = (
+                            patch("vllm.platforms.current_platform", current_platform)
+                            if current_platform.is_ppu()
+                            else contextlib.nullcontext()
                         )
+                        with platform_ctx:
+                            from vllm.v1.attention.backends.mla.flashmla import (
+                                is_flashmla_dense_supported,
+                            )
 
-                        is_supported, _ = is_flashmla_dense_supported()
-                        if not is_supported:
-                            pytest.skip("FlashMLA not supported on this platform")
-                        backend = get_attn_backend(
-                            576,
-                            torch.float16,
-                            None,
-                            use_mla=use_mla,
-                        )
+                            is_supported, _ = is_flashmla_dense_supported()
+                            if not is_supported:
+                                pytest.skip("FlashMLA not supported on this platform")
+                            backend = get_attn_backend(
+                                576,
+                                torch.float16,
+                                None,
+                                use_mla=use_mla,
+                            )
                         expected = name
                         assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":

@@ -17,6 +17,21 @@
 #  - mm_processing: every test_tensor_schema case failed (108/108 on v0.26.0,
 #    110/110 on v0.27.0), so the whole file is rerun here.
 #
+# Root causes (run 42200535187) and fixes under verification:
+#  - mm_prefix_lm: the PPU flash_attn_interface asserted on the FA4 capability
+#    probe; it now reports unsupported versions (source fix).
+#  - vit_cudagraph_video: sample_demo_1.mp4 was never staged; [assets] now also
+#    takes it from the HF cache dataset raushan-testing-hf/videos-test.
+#  - missing repos (LocalEntryNotFoundError / Invalid repository ID) and
+#    non-hash snapshots (PosixPath / None in transformers dynamic modules):
+#    ppu_mm_hf_cache.py links /nas_aisw checkpoints with a 40-hex revision
+#    ([setup]) and lists what the offline cache still lacks ([preflight],
+#    test-results/mm-hf-cache-missing.tsv); fill it on a networked host with
+#    `ppu_mm_hf_cache.py prefetch --list <tsv>`.
+#  - MiniCPM-o: torchaudio is now installed by ppu_ci_nightly_install_dependency.sh.
+# A skipped case does not count as verified: the step rc becomes 1 and the
+# summary marks the unit SKIPPED.
+#
 # Modeled on scripts/ppu/test-area-ppu-models_multimodal.sh of the
 # ci/ppu-nightly-all-areas branch (env, MODEL_MAP symlinks, assets bootstrap,
 # junit/summary emission); the area-wide -m core_model selection is dropped
@@ -93,53 +108,23 @@ fi
 
 # ------------------------------------------------------------------------------
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
-# (kept from the area script for collection parity of the generation files)
+# (MODEL_MAP plus a by-name probe for the generation models; extend with
+# PPU_MM_MODEL_MAP="org/a=/path/a,..."). The snapshot is named by a 40-hex
+# revision because trust_remote_code models cannot load from snapshots/main.
 # ------------------------------------------------------------------------------
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
-python3 - <<'PYEOF'
-import os
-
-MODEL_MAP = {
-    "nvidia/NVIDIA-Nemotron-Parse-v1.1":
-        "/nas_aisw/datasets/checkpoints/LLM/NVIDIA/v1.1/NVIDIA-Nemotron-Parse-v1.1",
-    "royokong/e5-v": "/nas_aisw/datasets/checkpoints/LLM/e5/v1.0/e5-v",
-}
-
-HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(
-    "~/.cache/huggingface/hub")
-os.makedirs(HF_CACHE, exist_ok=True)
-
-created = skipped = missing = 0
-for hf_id, local_path in MODEL_MAP.items():
-    if not os.path.isdir(local_path):
-        print(f"[setup] MISS  {hf_id} -> {local_path} (tests using it will fail)")
-        missing += 1
-        continue
-    org, repo = hf_id.split("/", 1)
-    cache_dir = os.path.join(HF_CACHE, f"models--{org}--{repo}")
-    snap_link = os.path.join(cache_dir, "snapshots", "main")
-    refs_file = os.path.join(cache_dir, "refs", "main")
-    if os.path.islink(snap_link) or os.path.exists(snap_link):
-        skipped += 1
-        continue
-    os.makedirs(os.path.dirname(snap_link), exist_ok=True)
-    os.makedirs(os.path.dirname(refs_file), exist_ok=True)
-    os.symlink(local_path, snap_link)
-    with open(refs_file, "w") as rf:
-        rf.write("main")
-    created += 1
-    print(f"[setup] OK    {hf_id} -> {local_path}")
-print(f"[setup] symlinks: created={created} skipped={skipped} "
-      f"missing={missing} (total {len(MODEL_MAP)})")
-PYEOF
+python3 scripts/ppu/ppu_mm_hf_cache.py link \
+  || echo "[setup] WARN: HF cache link step failed; generation cases may miss checkpoints"
 
 # ------------------------------------------------------------------------------
 # [assets] offline fallback for the vLLM public assets (images + video)
-# kept from the area script: test_common.py (imported by test_tensor_schema.py)
-# downloads sample_demo_1.mp4 at module level and would crash at collection.
+# download_video_asset() returns <VLLM_ASSETS_CACHE>/video-example-data/<file>
+# as-is when present and only otherwise calls hf_hub_download, which fails in
+# offline mode (vit_cudagraph_video: OfflineModeIsEnabled).
 # ------------------------------------------------------------------------------
 echo "========== [assets] bootstrap vLLM public assets (/nas_aisw) =========="
 python3 - <<'PYEOF'
+import glob
 import os
 import shutil
 
@@ -154,10 +139,14 @@ IMG_SRC_CANDS = [
     "/nas_aisw/datasets/assets/vllm_public_assets",
 ]
 VID_SRC_CANDS = [
+    p for p in (os.environ.get("PPU_VIDEO_ASSET_SRC"),) if p
+] + [
     "/nas_aisw/datasets/vllm_public_assets",
     "/nas_aisw/datasets/vllm_assets/multimodal_asset",
     "/nas_aisw/datasets/assets/vllm_public_assets",
-]
+] + sorted(glob.glob(os.path.join(
+    os.environ.get("HF_HUB_CACHE") or os.path.expanduser("~/.cache/huggingface/hub"),
+    "datasets--raushan-testing-hf--videos-test", "snapshots", "*")))
 
 def _bootstrap(dst, cands, only=None):
     os.makedirs(dst, exist_ok=True)
@@ -183,8 +172,16 @@ print(f"[assets] images bootstrapped={img_n} -> {IMG_DST}")
 print(f"[assets] video bootstrapped={vid_n} -> {VID_DST}")
 if not os.path.exists(os.path.join(VID_DST, "sample_demo_1.mp4")):
     print("[assets] WARN: sample_demo_1.mp4 absent (not staged) - "
-          "test_common/test_tensor_schema collection will crash")
+          "test_vit_cudagraph_video cases will fail")
 PYEOF
+
+# ------------------------------------------------------------------------------
+# [preflight] diagnostic only: list what the offline HF cache cannot serve, so a
+# red step points at the cache gap instead of 100 near-identical tracebacks.
+# ------------------------------------------------------------------------------
+echo "========== [preflight] offline HF cache coverage =========="
+python3 scripts/ppu/ppu_mm_hf_cache.py check --out "${RESULTS_DIR}/mm-hf-cache-missing.tsv" \
+  || echo "[preflight] WARN: HF cache coverage check failed to run"
 
 # ------------------------------------------------------------------------------
 # [junit] merge helper (with a fallback when pytest crashes)
@@ -262,12 +259,14 @@ for label in LABELS:
             bad_units += 1
             continue
         n_t, n_f, n_e, n_s = (int(agg[k]) for k in COLS[:4])
-        ok = (n_f == 0 and n_e == 0)
+        # a skip is not a verified pass for a targeted rerun
+        ok = (n_f == 0 and n_e == 0 and n_s == 0)
         if not ok:
             bad_units += 1
+        status = "PASSED" if ok else ("FAILED" if n_f or n_e else "SKIPPED")
         lines.append(f"| {label} | {n_t} | {n_t - n_f - n_e - n_s} | {n_f} "
                      f"| {n_e} | {n_s} | {agg['time']:.0f}s | "
-                     f"{'PASSED' if ok else 'FAILED'} |")
+                     f"{status} |")
         for k in COLS:
             tot[k] += agg[k]
 n_t, n_f, n_e, n_s = (int(tot[k]) for k in COLS[:4])
@@ -286,6 +285,8 @@ PYEOF
     if mkdir -p "${PPU_SUMMARY_NAS_DIR}" 2>/dev/null && \
        cp -f "${RESULTS_DIR}/summary.md" "${PPU_SUMMARY_NAS_DIR}/summary.md"; then
       echo "[k8s-summary] summary.md -> ${PPU_SUMMARY_NAS_DIR}/summary.md"
+      # the [preflight] gap list is the input of `ppu_mm_hf_cache.py prefetch --list`
+      cp -f "${RESULTS_DIR}/mm-hf-cache-missing.tsv" "${PPU_SUMMARY_NAS_DIR}/" 2>/dev/null || true
     else
       echo "[k8s-summary] WARN: NAS upload failed (is ${PPU_SUMMARY_NAS_DIR} writable?)"
     fi
@@ -311,9 +312,19 @@ _run_step() {
   echo "========== [step] ${label} =========="
   local out_xml="${TMP_JUNIT}/${label}.xml"
   set +e
-  pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
+  pytest -v -s -rs "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
   local rc=$?
   set -e
+  if [ "${rc}" -eq 0 ] && [ -f "${out_xml}" ] && ! python3 - "${out_xml}" <<'PYEOF'
+import sys
+from xml.etree import ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+sys.exit(1 if sum(int(s.get("skipped") or 0) for s in root.iter("testsuite")) else 0)
+PYEOF
+  then
+    echo "[step] ${label}: skipped cases are not a verified pass"
+    rc=1
+  fi
   echo "[step] ${label} rc=${rc}"
   if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
 }

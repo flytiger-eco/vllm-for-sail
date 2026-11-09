@@ -130,6 +130,27 @@ done
 python3 -c "import numba; print(f'[verify] numba {numba.__version__}')" 2>/dev/null \
   || echo "[verify] numba NOT importable - misc test_ngram collection will fail" >&2
 
+# torchaudio is not shipped by the image and requirements/ppu.txt keeps it
+# commented (torch/torchaudio/torchvision come with the image), so the
+# multimodal processing cases whose remote code imports it (MiniCPM-o) fail with
+# "No module named 'torchaudio'". Match the image torch release and install with
+# --no-deps so the image torch is never replaced (asserted below). Try the
+# artifactory first (a PPU build, if published, carries a local version that still
+# satisfies ==<release>), then the aliyun mirror. Failure is a warning, not
+# fatal: only the cases that import torchaudio break.
+TORCH_RELEASE="$(python3 -c 'import torch; print(torch.__version__.split("+")[0])')"
+if python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio already importable, keep it"
+elif ${PIP_INSTALL} --no-deps "torchaudio == ${TORCH_RELEASE}" -i "${PPU_PIP_INDEX}" \
+    || ${PIP_INSTALL} --no-deps "torchaudio == ${TORCH_RELEASE}" -i "https://mirrors.aliyun.com/pypi/simple/"; then
+    echo "[deps] torchaudio == ${TORCH_RELEASE} installed"
+else
+    echo "[deps] WARNING: torchaudio == ${TORCH_RELEASE} install failed; multimodal cases importing torchaudio will fail" >&2
+fi
+# Diagnostic only: a torchaudio built for another torch ABI fails here, not in a test.
+python3 -c "import torchaudio; print(f'[verify] torchaudio {torchaudio.__version__}')" 2>/dev/null \
+  || echo "[verify] torchaudio NOT importable - MiniCPM-o processing cases will fail" >&2
+
 # Diagnostic only: the remaining image packages are not pinned against this numpy either, so
 # print the mismatches instead of letting the next one surface as an unrelated import error.
 python3 -m pip check || echo "[deps] WARNING: pip check reports unsatisfied requirements" >&2

@@ -7,8 +7,19 @@
 #
 # Failing cases (34, shared by the v0.26/v0.27 nightly runs):
 #   tests/kernels/attention/test_attention_selector.py::test_backend_selection[cuda_FLASHMLA_mla_T_blks64]
-#   tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[...] (all 32 parameter combos)
+#   tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[...] (all 32 parameter combos, removed)
 #   tests/kernels/quantization/test_marlin_tile_padding.py::test_check_moe_marlin_supports_layer_padding
+#
+# Fixes under verification:
+#   - FLASHMLA blks64: the test now simulates the real PPU platform for FlashMLA
+#     instead of a generic CudaPlatform (import-time is_ppu() branches).
+#   - block_int8: w8a8_block_int8_matmul had no production caller and is removed
+#     together with its test (backport of upstream 7d7b6f26f), so it is no longer
+#     rerun here.
+#   - marlin padding: split into a shape test (PPU gate opened) and a PPU gate
+#     test (test_check_moe_marlin_ppu_gate); both are rerun.
+# A skipped case does not count as verified: the step rc becomes 1 and the
+# summary marks the unit SKIPPED.
 #
 # Modeled on scripts/ppu/test-area-ppu-kernels.sh of the ci/ppu-nightly-all-areas
 # branch (env blocks, junit/summary emission); the 5-step area selection is
@@ -30,22 +41,9 @@ KERNELS_FAILED_ATTENTION_SELECTOR_ARGS=(
   "tests/kernels/attention/test_attention_selector.py::test_backend_selection[cuda_FLASHMLA_mla_T_blks64]"
 )
 
-KERNELS_FAILED_BLOCK_INT8_ARGS=(
-  # All 32 parameter combinations of test_w8a8_block_int8_matmul failed in run
-  # 41978966338, so rerun the whole function (M in {1,33,64,222} x N in {128,1024}
-  # x K in {256,4096} x block_size [128,128] x dtype in {half,bfloat16} x seed 0).
-  # The nightly deselect list spelled out per-combination node IDs with
-  # block_size0..block_size31 incrementing in lockstep with out_dtype0..out_dtype31;
-  # those ids are real -- pytest disambiguates repeated non-scalar param values
-  # (the [128, 128] list and the torch dtype objects) with a global counter, so
-  # every param set gets fresh indices. Selecting the function covers every
-  # combination without depending on that id spelling (verified in PR #57 run
-  # 42183043090: 32 failed, matching the nightly deselect exactly).
-  "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul"
-)
-
 KERNELS_FAILED_MARLIN_TILE_PADDING_ARGS=(
   "tests/kernels/quantization/test_marlin_tile_padding.py::test_check_moe_marlin_supports_layer_padding"
+  "tests/kernels/quantization/test_marlin_tile_padding.py::test_check_moe_marlin_ppu_gate"
 )
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -160,12 +158,14 @@ for label in LABELS:
             bad_units += 1
             continue
         n_t, n_f, n_e, n_s = (int(agg[k]) for k in COLS[:4])
-        ok = (n_f == 0 and n_e == 0)
+        # a skip is not a verified pass for a targeted rerun
+        ok = (n_f == 0 and n_e == 0 and n_s == 0)
         if not ok:
             bad_units += 1
+        status = "PASSED" if ok else ("FAILED" if n_f or n_e else "SKIPPED")
         lines.append(f"| {label} | {n_t} | {n_t - n_f - n_e - n_s} | {n_f} "
                      f"| {n_e} | {n_s} | {agg['time']:.0f}s | "
-                     f"{'PASSED' if ok else 'FAILED'} |")
+                     f"{status} |")
         for k in COLS:
             tot[k] += agg[k]
 n_t, n_f, n_e, n_s = (int(tot[k]) for k in COLS[:4])
@@ -209,15 +209,24 @@ _run_step() {
   echo "========== [step] ${label} =========="
   local out_xml="${TMP_JUNIT}/${label}.xml"
   set +e
-  pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
+  pytest -v -s -rs "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} --junit-xml="${out_xml}"
   local rc=$?
   set -e
+  if [ "${rc}" -eq 0 ] && [ -f "${out_xml}" ] && ! python3 - "${out_xml}" <<'PYEOF'
+import sys
+from xml.etree import ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+sys.exit(1 if sum(int(s.get("skipped") or 0) for s in root.iter("testsuite")) else 0)
+PYEOF
+  then
+    echo "[step] ${label}: skipped cases are not a verified pass"
+    rc=1
+  fi
   echo "[step] ${label} rc=${rc}"
   if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
 }
 
 CUDA_VISIBLE_DEVICES=0 _run_step "kernels_failed_attention_selector" 1 "${KERNELS_FAILED_ATTENTION_SELECTOR_ARGS[@]}"
-CUDA_VISIBLE_DEVICES=0 _run_step "kernels_failed_block_int8" 1 "${KERNELS_FAILED_BLOCK_INT8_ARGS[@]}"
 CUDA_VISIBLE_DEVICES=0 _run_step "kernels_failed_marlin_tile_padding" 1 "${KERNELS_FAILED_MARLIN_TILE_PADDING_ARGS[@]}"
 
 # ------------------------------------------------------------------------------
