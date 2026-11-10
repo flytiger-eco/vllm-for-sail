@@ -11,15 +11,17 @@
 # The nightly ran it inside a 2-shard hybrid step and only the shard log tail
 # reached the job log, so the assertion itself was never visible; every other
 # hybrid model of the same step (Jamba, Zamba2, Falcon-H1, LFM2, qwen3-next)
-# passed, and the case fails on v0.26.0 / v0.28.0 as well. granite-4.0-tiny
-# is the only one of them combining mamba2 layers with an unquantized MoE, so
-# this rerun is diagnostic:
-#   1. hybrid_granite: the case as the nightly runs it (default PPU MoE
-#      backend), with the full pytest output in the job log;
-#   2. hybrid_granite_moe_triton: only when step 1 fails, the same case with
-#      VLLM_PPU_MOE_BACKEND=triton, to tell a PPU MoE kernel deviation from a
-#      mamba / attention / HF-reference problem. It is a diagnostic step and
-#      keeps the area red whatever it reports.
+# passed, and the case fails on v0.26.0 / v0.28.0 as well. The first rerun
+# (PR #60) showed the vLLM engine refusing to start: the HF reference model
+# (about 13 GiB, the largest of the hybrid list) is still resident on the
+# device after HfRunner exits, so free memory (83/96 GiB) is below the
+# 0.92 gpu_memory_utilization startup guard. This rerun localizes that:
+#   1. hybrid_granite: the case as the nightly runs it;
+#   2. hybrid_granite_mem_diag: only when step 1 fails, the same case with a
+#      pytest plugin reporting the torch / driver memory views and the live
+#      CUDA tensors after HfRunner exits, then polling up to 120 s for a lazy
+#      driver release before vLLM starts. It is a diagnostic step and keeps
+#      the area red whatever it reports.
 # A skipped case does not count as verified: the step rc becomes 1 and the
 # summary marks the unit SKIPPED.
 #
@@ -294,10 +296,86 @@ PYEOF
   if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
 }
 
+# [diag] pytest plugin: device memory right after HfRunner exits (torch view,
+# driver view, live CUDA tensors and their referrers), then poll the driver
+# view for up to 120 s before vLLM starts
+DIAG_DIR=/tmp/ppu-models-language-diag
+mkdir -p "${DIAG_DIR}"
+cat > "${DIAG_DIR}/ppu_mem_diag.py" <<'PYEOF'
+import gc
+import sys
+import time
+
+import torch
+
+_patched = False
+
+
+def _gib(n):
+    return f"{n / 2**30:.2f}"
+
+
+def _report(tag):
+    torch.cuda.synchronize()
+    free, total = torch.cuda.mem_get_info()
+    print(f"[mem-diag] {tag}: torch allocated={_gib(torch.cuda.memory_allocated())} "
+          f"reserved={_gib(torch.cuda.memory_reserved())} "
+          f"driver used={_gib(total - free)}/{_gib(total)} GiB", flush=True)
+    return total - free
+
+
+def _live_tensors():
+    live = []
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, torch.Tensor) and obj.is_cuda:
+                live.append(obj)
+        except Exception:
+            pass
+    live.sort(key=lambda t: t.numel() * t.element_size(), reverse=True)
+    total = sum(t.numel() * t.element_size() for t in live)
+    print(f"[mem-diag] live CUDA tensors: {len(live)} ({_gib(total)} GiB)", flush=True)
+    for t in live[:8]:
+        refs = [type(r).__name__ for r in gc.get_referrers(t) if r is not live][:6]
+        print(f"[mem-diag]   {tuple(t.shape)} {t.dtype} "
+              f"{_gib(t.numel() * t.element_size())} GiB referrers={refs}", flush=True)
+    live.clear()
+
+
+def pytest_runtest_setup(item):
+    global _patched
+    if _patched:
+        return
+    for mod in list(sys.modules.values()):
+        runner = getattr(mod, "HfRunner", None)
+        if runner is None or not getattr(mod, "__name__", "").endswith("conftest"):
+            continue
+        orig_exit = runner.__exit__
+
+        def _exit(self, *args, _orig=orig_exit):
+            ret = _orig(self, *args)
+            _report("after HfRunner exit")
+            _live_tensors()
+            gc.collect()
+            torch.cuda.empty_cache()
+            start = time.time()
+            used = _report("after extra gc + empty_cache")
+            while used > 4 * 2**30 and time.time() - start < 120:
+                time.sleep(10)
+                used = _report(f"poll +{time.time() - start:.0f}s")
+            return ret
+
+        runner.__exit__ = _exit
+        _patched = True
+        print(f"[mem-diag] patched {mod.__name__}.HfRunner.__exit__", flush=True)
+        return
+PYEOF
+
 CUDA_VISIBLE_DEVICES=0 _run_step "hybrid_granite" 1 "${ML_FAILED_GRANITE_ARGS[@]}"
 if [ "${TOTAL_RC}" -ne 0 ]; then
-  echo "[diag] hybrid_granite failed - rerun with the Triton MoE backend to localize it"
-  VLLM_PPU_MOE_BACKEND=triton CUDA_VISIBLE_DEVICES=0 _run_step "hybrid_granite_moe_triton" 1 "${ML_FAILED_GRANITE_ARGS[@]}"
+  echo "[diag] hybrid_granite failed - rerun with the memory diagnostics plugin"
+  PYTHONPATH="${DIAG_DIR}${PYTHONPATH:+:${PYTHONPATH}}" CUDA_VISIBLE_DEVICES=0 \
+    _run_step "hybrid_granite_mem_diag" 1 -p ppu_mem_diag "${ML_FAILED_GRANITE_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------
