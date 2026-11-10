@@ -15,13 +15,14 @@
 # (PR #60) showed the vLLM engine refusing to start: the HF reference model
 # (about 13 GiB, the largest of the hybrid list) is still resident on the
 # device after HfRunner exits, so free memory (83/96 GiB) is below the
-# 0.92 gpu_memory_utilization startup guard. This rerun localizes that:
+# 0.92 gpu_memory_utilization startup guard. The second rerun showed it is
+# not a lazy driver release: all 586 HF weights (12.4 GiB) stay referenced
+# after HfRunner deletes its model, and 120 s of polling freed nothing.
 #   1. hybrid_granite: the case as the nightly runs it;
 #   2. hybrid_granite_mem_diag: only when step 1 fails, the same case with a
-#      pytest plugin reporting the torch / driver memory views and the live
-#      CUDA tensors after HfRunner exits, then polling up to 120 s for a lazy
-#      driver release before vLLM starts. It is a diagnostic step and keeps
-#      the area red whatever it reports.
+#      pytest plugin reporting the memory views after HfRunner exits and the
+#      referrer chain of the HF model that is still alive. It is a
+#      diagnostic step and keeps the area red whatever it reports.
 # A skipped case does not count as verified: the step rc becomes 1 and the
 # summary marks the unit SKIPPED.
 #
@@ -297,14 +298,13 @@ PYEOF
 }
 
 # [diag] pytest plugin: device memory right after HfRunner exits (torch view,
-# driver view, live CUDA tensors and their referrers), then poll the driver
-# view for up to 120 s before vLLM starts
+# driver view, live CUDA tensors) and the referrer chain of the HF model that
+# is still alive
 DIAG_DIR=/tmp/ppu-models-language-diag
 mkdir -p "${DIAG_DIR}"
 cat > "${DIAG_DIR}/ppu_mem_diag.py" <<'PYEOF'
 import gc
 import sys
-import time
 
 import torch
 
@@ -339,7 +339,70 @@ def _live_tensors():
         refs = [type(r).__name__ for r in gc.get_referrers(t) if r is not live][:6]
         print(f"[mem-diag]   {tuple(t.shape)} {t.dtype} "
               f"{_gib(t.numel() * t.element_size())} GiB referrers={refs}", flush=True)
+    if live:
+        print(f"[mem-diag] referrer chain of the largest tensor:", flush=True)
+        _walk(live[0], 3, {id(live)})
     live.clear()
+
+
+def _describe(obj):
+    import types
+    if isinstance(obj, types.FrameType):
+        code = obj.f_code
+        return f"frame {code.co_name} {code.co_filename}:{obj.f_lineno}"
+    if isinstance(obj, types.ModuleType):
+        return f"module {obj.__name__}"
+    if isinstance(obj, (types.FunctionType, types.MethodType)):
+        return f"{type(obj).__name__} {getattr(obj, '__qualname__', '?')}"
+    if isinstance(obj, types.CellType):
+        return "cell"
+    if isinstance(obj, dict):
+        keys = [str(k)[:40] for k in list(obj)[:6]]
+        return f"dict(len={len(obj)}) keys={keys}"
+    if isinstance(obj, (list, tuple, set)):
+        heads = [type(x).__name__ for x in list(obj)[:4]]
+        return f"{type(obj).__name__}(len={len(obj)}) items={heads}"
+    return f"{type(obj).__module__}.{type(obj).__qualname__}"
+
+
+def _walk(obj, depth, seen, indent="  "):
+    import types
+    if depth == 0:
+        return
+    me = sys._getframe()
+    refs = gc.get_referrers(obj)
+    seen.add(id(refs))
+    shown = 0
+    for ref in refs:
+        if shown == 12:
+            break
+        if id(ref) in seen or ref is me or ref is seen:
+            continue
+        if type(ref).__name__ == "list_iterator":
+            continue
+        if isinstance(ref, types.FrameType) and ref.f_code.co_filename == __file__:
+            continue
+        seen.add(id(ref))
+        shown += 1
+        print(f"[mem-diag] {indent}<- {_describe(ref)}", flush=True)
+        if not isinstance(ref, types.ModuleType):
+            _walk(ref, depth - 1, seen, indent + "  ")
+
+
+def _who_holds_model():
+    # the leaked HF model: root nn.Modules (not a child of another live module)
+    roots = []
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, torch.nn.Module) and hasattr(obj, "config") and hasattr(obj, "generate"):
+                roots.append(obj)
+        except Exception:
+            pass
+    print(f"[mem-diag] live generate-capable modules: {[type(m).__qualname__ for m in roots]}", flush=True)
+    for m in roots[:2]:
+        print(f"[mem-diag] referrer chain of {type(m).__qualname__}:", flush=True)
+        _walk(m, 4, {id(roots)})
+    roots.clear()
 
 
 def pytest_runtest_setup(item):
@@ -356,13 +419,10 @@ def pytest_runtest_setup(item):
             ret = _orig(self, *args)
             _report("after HfRunner exit")
             _live_tensors()
+            _who_holds_model()
             gc.collect()
             torch.cuda.empty_cache()
-            start = time.time()
-            used = _report("after extra gc + empty_cache")
-            while used > 4 * 2**30 and time.time() - start < 120:
-                time.sleep(10)
-                used = _report(f"poll +{time.time() - start:.0f}s")
+            _report("after extra gc + empty_cache")
             return ret
 
         runner.__exit__ = _exit
