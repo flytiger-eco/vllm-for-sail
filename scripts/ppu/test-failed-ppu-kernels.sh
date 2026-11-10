@@ -16,9 +16,11 @@
 # Fixes under verification:
 #   - FLASHMLA blks64: the test now simulates the real PPU platform for FlashMLA
 #     instead of a generic CudaPlatform (import-time is_ppu() branches).
-#   - GDN PLA: the CUDA fast decode path only handles one token per sequence,
-#     so fused_sigmoid_gating_delta_rule_update keeps multi-token varlen
-#     non-spec calls on Triton (query_lens1 produced a wrong final state).
+#   - GDN PLA: query_lens1 compared CUDA against the in-place Triton path,
+#     which with 1D state indices stores token i_t of sequence i_n to slot
+#     index i_n + i_t, so multi-token varlen batches race on other slots and
+#     read past the index tensor (Triton vs Triton also mismatched). The test
+#     now builds the Triton reference from the non-inplace per-token states.
 #     The other two cases pinned outdated kernel semantics: the CUDA kernel
 #     skips the null slot 0 (is_sglang=False) and serves vLLM spec decoding via
 #     MTP_VERIFY, so the old fallback test is now the parity test

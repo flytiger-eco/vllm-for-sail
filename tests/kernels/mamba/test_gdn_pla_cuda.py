@@ -190,6 +190,39 @@ def _run_update(
     return o
 
 
+def _run_update_triton_varlen_ref(
+    inp: SimpleNamespace, ssm_state: torch.Tensor
+) -> torch.Tensor:
+    """Triton reference for multi-token varlen batches with 1D state indices.
+
+    The in-place Triton kernel stores token ``i_t`` of sequence ``i_n`` to
+    ``ssm_state_indices[i_n + i_t]``, which is only well defined for one token
+    per sequence: with multi-token sequences the writes land in other
+    requests' slots (racing with their reads) or past the index tensor. The
+    non-inplace mode stores every token state instead, so the final state of
+    each sequence is taken from its last token and scattered into its slot.
+    """
+    o, token_states = fused_sigmoid_gating_delta_rule_update(
+        A_log=inp.A_log,
+        a=inp.a,
+        b=inp.b,
+        dt_bias=inp.dt_bias,
+        q=inp.q,
+        k=inp.k,
+        v=inp.v,
+        initial_state=ssm_state,
+        inplace_final_state=False,
+        cu_seqlens=inp.cu_seqlens,
+        ssm_state_indices=inp.ssm_state_indices,
+        use_qk_l2norm_in_kernel=True,
+    )
+    last_tokens = inp.cu_seqlens[1:].long() - 1
+    ssm_state[inp.ssm_state_indices.long()] = token_states[last_tokens].to(
+        ssm_state.dtype
+    )
+    return o
+
+
 def _assert_parity(
     cuda_out: torch.Tensor,
     triton_out: torch.Tensor,
@@ -281,9 +314,8 @@ def test_packed_decode_cuda_matches_triton(
     "query_lens",
     [
         [1, 1, 1, 1],  # pure decode batch
-        # varlen (mixed token counts per request): outside the CUDA fast
-        # decode path (one token per sequence), so the wrapper must keep it
-        # on Triton and still match.
+        # varlen (mixed token counts per request): the in-place Triton path
+        # is not a valid reference here, see _run_update_triton_varlen_ref.
         [2, 1, 3],
     ],
 )
@@ -298,7 +330,10 @@ def test_update_cuda_matches_triton(
 
     _force_triton(monkeypatch)
     state_t = inp.ssm_state.clone()
-    out_t = _run_update(inp, state_t)
+    if max(query_lens) > 1:
+        out_t = _run_update_triton_varlen_ref(inp, state_t)
+    else:
+        out_t = _run_update(inp, state_t)
 
     _force_cuda(monkeypatch, pla_module)
     state_c = inp.ssm_state.clone()
