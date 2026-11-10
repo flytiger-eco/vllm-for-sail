@@ -6,8 +6,11 @@
 # Structure (mirrors ppu-build-nightly.yml of the ci/ppu-nightly-all-areas
 # branch, narrowed to the failed cases):
 #   build-wheel -- build the v0.26.0 wheel from the PR head (ccache + Rust cache)
-#   test        -- 4-area matrix; each leg installs the verified wheel in the
-#                  PPU pod and runs scripts/ppu/test-failed-ppu-<area>.sh
+#   test        -- area matrix; each leg installs the verified wheel in the
+#                  PPU pod, runs scripts/ppu/test-failed-ppu-<area>.sh and
+#                  uploads its test-results/ (junit, pytest logs, failed
+#                  cases with root errors, dependency snapshot) as the
+#                  test-results-* artifact
 #   test-finish -- branch-protection aggregation point
 name: Nightly PPU test (v0.26.0 failed cases)
 
@@ -177,25 +180,11 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          # exactly the areas that failed in nightly run 41978966338 on v0.26.0
+          # only the area still failing in PR #57 run 42660076007 (attention,
+          # kernels and misc passed there and are dropped from this rerun).
           # job_timeout = run_timeout (in-pod action timeout) + 25 min orchestration
           # overhead; GitHub expressions do not support arithmetic, hence the
           # explicit field.
-          - area: attention
-            script: test-failed-ppu-attention.sh
-            nproc: 1
-            run_timeout: 15
-            job_timeout: 40
-          - area: kernels
-            script: test-failed-ppu-kernels.sh
-            nproc: 1
-            run_timeout: 30
-            job_timeout: 55
-          - area: misc
-            script: test-failed-ppu-misc.sh
-            nproc: 1
-            run_timeout: 10
-            job_timeout: 35
           - area: models-multimodal
             script: test-failed-ppu-models_multimodal.sh
             nproc: 1
@@ -288,6 +277,17 @@ jobs:
             fi
             echo "K8s job: \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+      # The area script ships its whole test-results/ dir to PPU_SUMMARY_NAS_DIR
+      # (/mnt/wl_nas in the pod is /wl_nas on this runner); upload it even when
+      # the tests failed so failed-cases.tsv and deps-*.txt can be inspected.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-results-${{ github.run_id }}-${{ github.run_attempt }}-v0.26.0-OAM-810E-${{ matrix.area }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/v0.26.0/OAM-810E/${{ matrix.area }}/
+          if-no-files-found: warn
+          retention-days: 30
 
   test-finish:
     needs: [build-wheel, test]
