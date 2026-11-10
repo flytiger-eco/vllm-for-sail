@@ -14,6 +14,11 @@ from ..utils import create_new_process_for_each_test
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
+# The tests touch CUDA in the child, and earlier tests in the same pytest
+# process may already have initialized CUDA in the parent, which makes a
+# forked child fail with "Cannot re-initialize CUDA in forked subprocess".
+# Spawn a fresh interpreter instead.
+
 
 def _no_sync():
     # Pure on-GPU compute, no implicit CPU sync...
@@ -33,7 +38,7 @@ def _causes_sync():
 
 
 @pytest.mark.parametrize("mode", ["warn", "error"])
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_with_env_set(monkeypatch, mode):
     # Env set + gate flipped on: the unguarded sync is detected.
     monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", mode)
@@ -51,7 +56,7 @@ def test_with_env_set(monkeypatch, mode):
         with_gpu_sync_check(_causes_sync)()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_without_env_set(monkeypatch):
     # Env unset: the decorator is a pass-through, no sync is detected.
     monkeypatch.delenv("VLLM_GPU_SYNC_CHECK", raising=False)

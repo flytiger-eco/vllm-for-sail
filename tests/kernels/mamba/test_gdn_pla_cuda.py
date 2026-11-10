@@ -13,9 +13,10 @@ These tests monkeypatch ``sail_cuda_pla``'s resolved kernel handles to force
 each implementation, then compare:
 
 1. numerical parity of the attention output and the updated fp32 ssm state
-   pool between the CUDA and Triton implementations;
+   pool between the CUDA and Triton implementations (including vLLM-style
+   speculative decoding, which is routed to the CUDA MTP_VERIFY path);
 2. the per-call gating: calls that violate the CUDA kernel constraints
-   (bf16 state pool, vLLM-style speculative decoding, head dims != 128)
+   (bf16 state pool, head dims != 128)
    must fall back to Triton, i.e. produce bitwise-identical results to the
    forced-Triton path;
 3. the NULL_BLOCK_ID=0 isolation: a padded request (CUDA-graph padding) must
@@ -280,7 +281,10 @@ def test_packed_decode_cuda_matches_triton(
     "query_lens",
     [
         [1, 1, 1, 1],  # pure decode batch
-        [2, 1, 3],  # varlen (mixed token counts per request)
+        # varlen (mixed token counts per request): outside the CUDA fast
+        # decode path (one token per sequence), so the wrapper must keep it
+        # on Triton and still match.
+        [2, 1, 3],
     ],
 )
 def test_update_cuda_matches_triton(
@@ -325,7 +329,7 @@ def test_update_falls_back_for_bf16_pool(monkeypatch: pytest.MonkeyPatch) -> Non
     torch.testing.assert_close(state_c, state_t, atol=0, rtol=0)
 
 
-def test_update_falls_back_for_spec_decoding(
+def test_update_spec_decoding_cuda_matches_triton(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pla_module = _requires_ppu_pla()
@@ -338,8 +342,8 @@ def test_update_falls_back_for_spec_decoding(
         seed=12,
     )
     # vLLM-style speculative decoding: per-token state slots (2D indices)
-    # plus num_accepted_tokens. The CUDA kernel cannot express this, so the
-    # wrapper must fall back to Triton.
+    # plus int32 num_accepted_tokens. The wrapper routes this to the CUDA
+    # kernel's MTP_VERIFY path, so it is a parity check, not a fallback one.
     idx2d = (
         (torch.randperm(batch * num_spec).reshape(batch, num_spec) + 1)
         .to(torch.int32)
@@ -361,8 +365,7 @@ def test_update_falls_back_for_spec_decoding(
         inp, state_c, ssm_state_indices=idx2d, num_accepted_tokens=num_accepted
     )
 
-    torch.testing.assert_close(out_c, out_t, atol=0, rtol=0)
-    torch.testing.assert_close(state_c, state_t, atol=0, rtol=0)
+    _assert_parity(out_c, out_t, state_c, state_t)
 
 
 def test_update_falls_back_for_non_128_head_dim(
@@ -391,10 +394,9 @@ def test_packed_null_state_idx_isolation(monkeypatch: pytest.MonkeyPatch) -> Non
     """A NULL_BLOCK_ID=0 (CUDA-graph padding) request must not disturb the
     real requests in the same batch on the CUDA path.
 
-    Note the semantic difference vs Triton: the CUDA kernel treats slot 0 as
-    a valid slot (reads/writes it), while the Triton kernel skips idx <= 0.
-    Slot 0 is vLLM's reserved null block that real requests never use, so
-    this is safe; this test pins the isolation property.
+    Every PLA call passes ``is_sglang=False``, so like the Triton kernel the
+    CUDA kernel treats slot 0 (vLLM's reserved null block) as padding and
+    skips it; this test pins both the isolation and the untouched slot 0.
     """
     pla_module = _requires_ppu_pla()
     batch = 4
@@ -429,9 +431,8 @@ def test_packed_null_state_idx_isolation(monkeypatch: pytest.MonkeyPatch) -> Non
     torch.testing.assert_close(
         state_pad[used_slots], state_ref[used_slots], atol=0, rtol=0
     )
-    # ... while slot 0 IS touched by the CUDA kernel (documented difference
-    # from the Triton kernel, which skips idx <= 0 entirely).
-    assert not torch.equal(state_pad[0], inp.ssm_state[0])
+    # ... and the null slot 0 is left untouched (is_sglang=False semantics).
+    assert torch.equal(state_pad[0], inp.ssm_state[0])
 
 
 # ---------------------------------------------------------------------------

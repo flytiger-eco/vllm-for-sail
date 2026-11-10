@@ -76,19 +76,21 @@ def _is_fa3_supported(device = None) -> Tuple[bool, Optional[str]]:
     return True, None
 
 def is_fa_version_supported(fa_version: int, device = None) -> bool:
-    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    # Callers probe newer versions (e.g. FA4 for mm-prefix support) as a
+    # capability query, so report unsupported versions instead of asserting.
     if fa_version == 2:
         return _is_fa2_supported(device)[0]
     elif fa_version == 3:
         return _is_fa3_supported(device)[0]
+    return False
 
 def fa_version_unsupported_reason(fa_version: int, device = None) \
     -> Optional[str]:
-    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[1]
     elif fa_version == 3:
         return _is_fa3_supported(device)[1]
+    return f"FA{fa_version} is not supported on PPU"
 
 #
 #  For vLLM we only care about `flash_attn_varlen_func` and 

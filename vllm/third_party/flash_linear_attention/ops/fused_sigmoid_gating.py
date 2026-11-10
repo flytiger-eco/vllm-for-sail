@@ -237,6 +237,11 @@ def fused_sigmoid_gating_delta_rule_update(
     #   ssm_state_indices slots and disable_state_update=True to skip the
     #   redundant final write-back (per-timestep writes already cover all
     #   slots, matching the Triton kernel's INPLACE_FINAL_STATE behavior).
+    # The non-spec fast decode path handles at most one token per sequence
+    # (B * T <= N): with multi-token varlen sequences it produces the right
+    # outputs but a wrong final state, so such calls must stay on Triton.
+    # Production non-spec decodes always satisfy this (reorder threshold 1;
+    # CUDA-graph padding only appends zero-length sequences, so T < N there).
     # Unsatisfied calls fall back to Triton.
     cuda_k_last = get_sail_cuda_pla_k_last()
     is_spec = num_accepted_tokens is not None
@@ -248,6 +253,7 @@ def fused_sigmoid_gating_delta_rule_update(
         and ssm_state_indices is not None
         and ssm_state_indices.dtype == torch.int32
         and (not is_spec or (ssm_state_indices.ndim == 2 and num_accepted_tokens.dtype == torch.int32))
+        and (is_spec or B * T <= N)
         and (cu_seqlens is None or cu_seqlens.dtype == torch.int32)
         and N > 0
         and K == 128
