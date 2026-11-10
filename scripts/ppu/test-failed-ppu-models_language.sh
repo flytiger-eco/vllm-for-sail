@@ -17,7 +17,13 @@
 # device after HfRunner exits, so free memory (83/96 GiB) is below the
 # 0.92 gpu_memory_utilization startup guard. The second rerun showed it is
 # not a lazy driver release: all 586 HF weights (12.4 GiB) stay referenced
-# after HfRunner deletes its model, and 120 s of polling freed nothing.
+# after HfRunner deletes its model. The third rerun traced the holder: in
+# offline mode HfRunner._init -> _get_and_verify_dtype ->
+# get_safetensors_params_metadata hits a Hub error, and with_retry logged the
+# exception object itself; pytest's log capture keeps that LogRecord for the
+# whole test, so its traceback pins every caller frame, including the
+# finished HfRunner._init frame whose `model` local is the HF model. Fixed in
+# vllm/transformers_utils/repo_utils.py (with_retry logs str(e)).
 #   1. hybrid_granite: the case as the nightly runs it;
 #   2. hybrid_granite_mem_diag: only when step 1 fails, the same case with a
 #      pytest plugin reporting the memory views after HfRunner exits and the
