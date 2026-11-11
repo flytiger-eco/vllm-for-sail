@@ -1,13 +1,12 @@
-# Rerun of the v0.28.0 cases that failed in nightly run 41978966338
-# (Nightly PPU test #18: kernels / entrypoints / lora).
-# Triggered by a PR against v0.28.0 so the failed-case rerun runs as PR CI:
+# Focused MiniCPM-o processing rerun for the v0.28.0 torchaudio 2.11
+# compatibility experiment. Triggered by a PR against v0.28.0 so it runs as PR CI:
 # open the PR from test/v0.28 into v0.28.0 and this workflow picks it up.
 #
 # Structure (mirrors ppu-build-nightly.yml of the ci/ppu-nightly-all-areas
 # branch, narrowed to the failed cases):
 #   build-wheel -- build the v0.28.0 wheel from the PR head (ccache + Rust cache)
-#   test        -- 3-area matrix; each leg installs the verified wheel in the
-#                  PPU pod and runs scripts/ppu/test-failed-ppu-<area>.sh
+#   test        -- one models-multimodal leg installs the verified wheel in the
+#                  PPU pod, runs only MiniCPM-o and uploads test-results/
 #   test-finish -- branch-protection aggregation point
 name: Nightly PPU test (v0.28.0 failed cases)
 
@@ -174,28 +173,18 @@ jobs:
       image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         include:
-          # exactly the areas that failed in nightly run 41978966338 on v0.28.0
+          # Only the MiniCPM-o torchaudio canary runs in this experiment.
           # job_timeout = run_timeout (in-pod action timeout) + 25 min orchestration
           # overhead; GitHub expressions do not support arithmetic, hence the
           # explicit field.
-          - area: kernels
-            script: test-failed-ppu-kernels.sh
+          - area: models-multimodal
+            script: test-failed-ppu-models_multimodal.sh
             nproc: 1
-            run_timeout: 30
-            job_timeout: 55
-          - area: entrypoints
-            script: test-failed-ppu-entrypoints.sh
-            nproc: 1
-            run_timeout: 25
-            job_timeout: 50
-          - area: lora
-            script: test-failed-ppu-lora.sh
-            nproc: 2
-            run_timeout: 30
-            job_timeout: 55
+            run_timeout: 60
+            job_timeout: 85
     timeout-minutes: ${{ matrix.job_timeout }}
     steps:
       - name: Checkout PR head
