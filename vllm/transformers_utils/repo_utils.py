@@ -62,11 +62,15 @@ def with_retry(
         try:
             return func()
         except Exception as e:
+            # Log str(e), not the exception: a LogRecord kept by a capturing
+            # handler (e.g. pytest's log capture) would otherwise pin the
+            # traceback and every caller frame's locals.
+            err = str(e)
             if attempt == max_retries - 1:
-                logger.error("%s: %s", log_msg, e)
+                logger.error("%s: %s", log_msg, err)
                 raise
             logger.error(
-                "%s: %s, retrying %d of %d", log_msg, e, attempt + 1, max_retries
+                "%s: %s, retrying %d of %d", log_msg, err, attempt + 1, max_retries
             )
             time.sleep(retry_delay)
             retry_delay *= 2

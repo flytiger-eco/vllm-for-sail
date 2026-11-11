@@ -664,38 +664,65 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
     torch.testing.assert_close(marlin_out, ref, atol=5e-2, rtol=0)
 
 
+def _make_moe_layer(hidden, intermediate):
+    layer = SimpleNamespace()
+    layer.hidden_size = hidden
+    layer.apply_router_weight_on_input = False
+    layer.moe_config = SimpleNamespace(
+        hidden_dim=hidden, intermediate_size_per_partition_unpadded=intermediate
+    )
+    return layer
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm(),
     reason="MoE Marlin is not selected on ROCm.",
 )
-def test_check_moe_marlin_supports_layer_padding():
+def test_check_moe_marlin_supports_layer_padding(monkeypatch):
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
         check_moe_marlin_supports_layer,
     )
 
-    def make_layer(hidden, intermediate):
-        layer = SimpleNamespace()
-        layer.hidden_size = hidden
-        layer.apply_router_weight_on_input = False
-        layer.moe_config = SimpleNamespace(
-            hidden_dim=hidden, intermediate_size_per_partition_unpadded=intermediate
-        )
-        return layer
+    # The PPU MoE Marlin gate is covered by test_check_moe_marlin_ppu_gate;
+    # open it here so only the platform-agnostic shape rules are exercised.
+    if current_platform.is_ppu():
+        monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
 
     # group=32 with intermediate % 64 != 0: rejected strictly, accepted w/ padding
-    layer = make_layer(4096, 96)
+    layer = _make_moe_layer(4096, 96)
     assert not check_moe_marlin_supports_layer(layer, 32)
     assert check_moe_marlin_supports_layer(layer, 32, allow_tile_padding=True)
     # channelwise misaligned intermediate is paddable
     assert check_moe_marlin_supports_layer(layer, -1, allow_tile_padding=True)
 
     # A group straddling the boundary cannot be fixed by padding
-    layer = make_layer(4096, 176)
+    layer = _make_moe_layer(4096, 176)
     assert not check_moe_marlin_supports_layer(layer, 128, allow_tile_padding=True)
 
     # hidden_size is the MoE I/O extent and is never padded
-    layer = make_layer(4090, 128)
+    layer = _make_moe_layer(4090, 128)
     assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_ppu(),
+    reason="The MoE Marlin enable gate only exists on PPU.",
+)
+def test_check_moe_marlin_ppu_gate(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        check_moe_marlin_supports_layer,
+    )
+
+    # A shape that is supported once the gate is open.
+    layer = _make_moe_layer(4096, 128)
+
+    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "0")
+    assert not check_moe_marlin_supports_layer(layer, 64)
+    assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
+
+    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
+    assert check_moe_marlin_supports_layer(layer, 64)
+    assert check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
 
 
 @pytest.mark.skipif(
