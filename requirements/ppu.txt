@@ -12,7 +12,8 @@
 # flashmla==2.0.0
 # flashinfer-python
 # tilelang
-apache-tvm-ffi==0.1.9
+apache-tvm-ffi==0.1.11
+xgrammar==0.2.9
 
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.2

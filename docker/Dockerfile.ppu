@@ -44,7 +44,8 @@ ARG PPU_PACKAGES="\
     mooncake==0.3.9+v0.1.0.ppu2.2.0 \
     nvidia-dali-cuda130==1.53.0+v0.1.0.ppu2.2.0 \
     pla==1.0.0+v0.1.0.ppu2.2.0 \
-    tilelang==0.1.8+v0.2.0.ppu2.2.0 \
+    tilelang==0.1.12+v0.1.0.ppu2.2.1 \
+    z3-solver==4.15 \
     torchao==0.11.0+v0.1.0.ppu2.2.0 \
     transformer-engine==2.8+v0.2.0.ppu2.2.0 \
     xformers==0.0.30+v0.2.0.ppu2.2.0"
@@ -128,11 +129,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python3 -c "import torch; print('base torch:', torch.__version__)"
 
 # Pin the PPU torch stack of the base image so no dependency solve below can
-# replace it with CUDA wheels from PyPI. The PPU numba/scipy builds need numpy<2.
+# replace it with CUDA wheels from PyPI.
 RUN mkdir -p /opt/vllm-ppu \
     && python3 -m pip list --format=freeze \
         | grep -iE '^(torch|torchvision|torchaudio|triton)==' > /opt/vllm-ppu/constraints.txt \
-    && echo "numpy<2" >> /opt/vllm-ppu/constraints.txt \
     && cat /opt/vllm-ppu/constraints.txt
 
 ########################################################
@@ -235,12 +235,20 @@ ARG TRANSFORMERS_VERSION
 COPY --from=ppu_kernels_builder /wheels /tmp/wheels/ppu
 COPY --from=vllm_builder /dist /tmp/wheels/vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install \
-        -c /opt/vllm-ppu/constraints.txt \
-        --prefer-binary \
-        --extra-index-url ${PPU_PIP_INDEX} \
-        /tmp/wheels/ppu/*.whl \
-        /tmp/wheels/vllm/*.whl \
+    for whl in /tmp/wheels/ppu/*.whl; do \
+        python3 -m pip install \
+            -c /opt/vllm-ppu/constraints.txt \
+            --prefer-binary \
+            --extra-index-url ${PPU_PIP_INDEX} \
+            "$whl"; \
+    done \
+    && for whl in /tmp/wheels/vllm/*.whl; do \
+        python3 -m pip install \
+            -c /opt/vllm-ppu/constraints.txt \
+            --prefer-binary \
+            --extra-index-url ${PPU_PIP_INDEX} \
+            "$whl"; \
+    done \
     && rm -rf /tmp/wheels
 
 # Pinned transformers (see TRANSFORMERS_VERSION above), plus the pytest
