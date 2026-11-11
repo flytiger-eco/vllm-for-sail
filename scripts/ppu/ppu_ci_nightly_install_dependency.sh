@@ -130,25 +130,27 @@ done
 python3 -c "import numba; print(f'[verify] numba {numba.__version__}')" 2>/dev/null \
   || echo "[verify] numba NOT importable - misc test_ngram collection will fail" >&2
 
-# torchaudio is not shipped by the image and requirements/ppu.txt keeps it
-# commented (torch/torchaudio/torchvision come with the image), so the
-# multimodal processing cases whose remote code imports it (MiniCPM-o) fail with
-# "No module named 'torchaudio'". Match the image torch release and install with
-# --no-deps so the image torch is never replaced (asserted below). Try the
-# artifactory first (a PPU build, if published, carries a local version that still
-# satisfies ==<release>), then the aliyun mirror. Failure is a warning, not
-# fatal: only the cases that import torchaudio break.
-TORCH_RELEASE="$(python3 -c 'import torch; print(torch.__version__.split("+")[0])')"
+# torchaudio is not shipped by the image and neither package index has a
+# 2.13.0 build matching the image torch. As an experiment, try the newest
+# available 2.11 builds with --no-deps so the image torch is never replaced
+# (asserted below). Try the PPU build first; if it cannot be installed or
+# imported, fall back to the aliyun build. The MiniCPM-o case is the canary for
+# whether this cross-version combination actually works.
+TORCHAUDIO_PPU_VERSION="2.11.0"
+TORCHAUDIO_ALIYUN_VERSION="2.11.1"
 if python3 -c "import torchaudio" 2>/dev/null; then
     echo "[deps] torchaudio already importable, keep it"
-elif ${PIP_INSTALL} --no-deps "torchaudio == ${TORCH_RELEASE}" -i "${PPU_PIP_INDEX}" \
-    || ${PIP_INSTALL} --no-deps "torchaudio == ${TORCH_RELEASE}" -i "https://mirrors.aliyun.com/pypi/simple/"; then
-    echo "[deps] torchaudio == ${TORCH_RELEASE} installed"
+elif ${PIP_INSTALL} --no-deps --force-reinstall "torchaudio == ${TORCHAUDIO_PPU_VERSION}" -i "${PPU_PIP_INDEX}" \
+    && python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio == ${TORCHAUDIO_PPU_VERSION} (PPU) installed and importable"
+elif ${PIP_INSTALL} --no-deps --force-reinstall "torchaudio == ${TORCHAUDIO_ALIYUN_VERSION}" -i "https://mirrors.aliyun.com/pypi/simple/" \
+    && python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio == ${TORCHAUDIO_ALIYUN_VERSION} (aliyun) installed and importable"
 else
-    echo "[deps] WARNING: torchaudio == ${TORCH_RELEASE} install failed; multimodal cases importing torchaudio will fail" >&2
+    echo "[deps] WARNING: torchaudio 2.11 install/import failed; MiniCPM-o processing will fail" >&2
 fi
 # Diagnostic only: a torchaudio built for another torch ABI fails here, not in a test.
-python3 -c "import torchaudio; print(f'[verify] torchaudio {torchaudio.__version__}')" 2>/dev/null \
+python3 -c "import torch, torchaudio; print(f'[verify] torch {torch.__version__}, torchaudio {torchaudio.__version__}')" 2>/dev/null \
   || echo "[verify] torchaudio NOT importable - MiniCPM-o processing cases will fail" >&2
 
 # Diagnostic only: the remaining image packages are not pinned against this numpy either, so

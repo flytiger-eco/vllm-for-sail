@@ -32,8 +32,9 @@
 # A skipped case does not count as verified: the step rc becomes 1 and the
 # summary marks the unit SKIPPED.
 #
-# Narrowed again to the cases still failing in PR #57 run 42660076007
-# (7/10 generation, 105/153 processing); the passing ones are dropped.
+# The arrays below retain the failures from PR #57 run 42660076007 as the
+# baseline for a later broader rerun. This run executes only MiniCPM-o to test
+# whether torchaudio 2.11 can coexist with the image's torch 2.13 build.
 # Everything under test-results/ (junit, summary, per-step pytest logs,
 # failed-cases.tsv with the root error per case, deps-*.txt dependency
 # snapshot, mm-hf-cache-missing.tsv) is shipped to PPU_SUMMARY_NAS_DIR and
@@ -54,11 +55,9 @@ cd "${REPO_ROOT}"
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 # ------------------------------------------------------------------------------
-# [tests] exactly the cases still failing in run 42660076007 on v0.26.0
+# [tests] historical failed-case baseline; only the canary below is executed
 # ------------------------------------------------------------------------------
-# Generation failures (mm_prefix_lm_e2e and vit_cudagraph_image[qwen3_vl,
-# internvl] passed in 42660076007); kept in one pytest step so one shared
-# fixture/import problem shows up as a single step failure.
+# Generation failures from run 42660076007, retained for a later broader rerun.
 MM_FAILED_GENERATION_ARGS=(
   "tests/models/multimodal/generation/test_moss_audio.py::test_moss_audio_generation_smoke"
   "tests/models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_video[qwen2_vl]"
@@ -70,7 +69,7 @@ MM_FAILED_GENERATION_ARGS=(
 )
 
 # Processing failures: 105 of the 153 test_tensor_schema cases still failed in
-# run 42660076007 (48 passed); only the failing node IDs are rerun.
+# run 42660076007 (48 passed). Keep this baseline out of the current canary run.
 MM_FAILED_PROCESSING_ARGS=(
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[moondream/moondream3-preview0]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[CohereLabs/cohere-transcribe-03-2026]"
@@ -177,6 +176,10 @@ MM_FAILED_PROCESSING_ARGS=(
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen2.5-Omni-3B]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen3-ForcedAligner-0.6B]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[stepfun-ai/Step3-VL-10B]"
+)
+
+MM_TORCHAUDIO_CANARY_ARGS=(
+  "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[openbmb/MiniCPM-o-2_6]"
 )
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -499,8 +502,7 @@ PYEOF
   if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
 }
 
-CUDA_VISIBLE_DEVICES=0 _run_step "mm_failed_generation" 1 "${MM_FAILED_GENERATION_ARGS[@]}"
-CUDA_VISIBLE_DEVICES=0 _run_step "mm_failed_processing" 1 "${MM_FAILED_PROCESSING_ARGS[@]}"
+CUDA_VISIBLE_DEVICES=0 _run_step "mm_failed_processing" 1 "${MM_TORCHAUDIO_CANARY_ARGS[@]}"
 
 # ------------------------------------------------------------------------------
 # [summary] aggregate exit code: the script exits with the merged rc so CI reports the truth
