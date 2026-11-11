@@ -23,8 +23,10 @@
 # A skipped case does not count as verified: the step rc becomes 1 and the
 # summary marks the unit SKIPPED.
 #
-# Narrowed again to the cases still failing in run 42777494317 (107/154
-# processing); the passing ones are dropped.
+# The array below retains the failures from run 42777494317 (107/154
+# processing) as the baseline for a later broader rerun. This run executes only
+# MiniCPM-o to test whether torchaudio 2.11 can coexist with the image's torch
+# 2.13 build.
 # Everything under test-results/ (junit, summary, per-step pytest logs,
 # failed-cases.tsv with the root error per case, deps-*.txt dependency
 # snapshot, mm-hf-cache-missing.tsv) is shipped to PPU_SUMMARY_NAS_DIR and
@@ -45,10 +47,10 @@ cd "${REPO_ROOT}"
 read -ra PYTEST_EXTRA <<< "${PYTEST_EXTRA_ARGS:-}"
 
 # ------------------------------------------------------------------------------
-# [tests] exactly the cases still failing in run 42777494317 on v0.27.0
+# [tests] historical failed-case baseline; only the canary below is executed
 # ------------------------------------------------------------------------------
 # Processing failures: 107 of the 154 test_tensor_schema cases still failed in
-# run 42777494317 (47 passed); only the failing node IDs are rerun.
+# run 42777494317 (47 passed). Keep this baseline out of the current canary run.
 MM_FAILED_PROCESSING_ARGS=(
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[LGAI-EXAONE/EXAONE-4.5-33B]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[stepfun-ai/step3]"
@@ -157,6 +159,10 @@ MM_FAILED_PROCESSING_ARGS=(
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Skywork/Skywork-R1V-38B]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[CohereLabs/command-a-vision-07-2025]"
   "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[CohereLabs/command-a-plus-05-2026-bf16]"
+)
+
+MM_TORCHAUDIO_CANARY_ARGS=(
+  "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[openbmb/MiniCPM-o-2_6]"
 )
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
@@ -479,7 +485,7 @@ PYEOF
   if [ "${rc}" -ne 0 ]; then TOTAL_RC=1; fi
 }
 
-CUDA_VISIBLE_DEVICES=0 _run_step "mm_failed_processing" 1 "${MM_FAILED_PROCESSING_ARGS[@]}"
+CUDA_VISIBLE_DEVICES=0 _run_step "mm_failed_processing" 1 "${MM_TORCHAUDIO_CANARY_ARGS[@]}"
 
 # ------------------------------------------------------------------------------
 # [summary] aggregate exit code: the script exits with the merged rc so CI reports the truth
