@@ -141,12 +141,14 @@ RUN source "${PPU_SDK}/envsetup.sh" ppu \
 RUN .venv/bin/python - <<'PY'
 from pathlib import Path
 from zipfile import ZipFile
+from packaging.utils import parse_wheel_filename
 
 for wheel in Path("/wheels").glob("*.whl"):
     with ZipFile(wheel) as archive:
         metadata, = (n for n in archive.namelist() if n.endswith(".dist-info/METADATA"))
-    name = metadata.split("/")[0].rsplit("-", 1)[0]
+    name = metadata.split("/")[0].removesuffix(".dist-info").rsplit("-", 1)[0]
     target = wheel.with_name(name + "-" + wheel.name.split("-", 1)[1])
+    parse_wheel_filename(target.name)
     if target != wheel:
         assert not target.exists(), target
         wheel.rename(target)
