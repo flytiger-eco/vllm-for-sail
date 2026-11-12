@@ -17,12 +17,27 @@ PPU_TOOLCHAIN_DIR="${PPU_TOOLCHAIN_DIR:-/workspace/source/source/ci-wheel/toolch
 : "${PPU_RELEASE:?nightly requires the release name}"
 : "${PPU_EXPECTED_VLLM_VERSION:?nightly requires the wheel version}"
 : "${PPU_EXPECTED_DEVICES:?nightly requires the allocated device count}"
-[[ "${PPU_WHEEL_PATH}" = /* && -f "${PPU_WHEEL_PATH}" ]]
-[[ "${PPU_WHEEL_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-[[ "${PPU_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-[[ "${PPU_CI_SHA}" =~ ^[0-9a-f]{40}$ ]]
-case "${PPU_RELEASE}" in v0.26.0|v0.27.0|v0.28.0) ;; *) exit 2 ;; esac
-printf '%s  %s\n' "${PPU_WHEEL_SHA256}" "${PPU_WHEEL_PATH}" | sha256sum -c -
+_verify_error() {
+    printf '[verify] ERROR: %s\n' "$*" >&2
+    exit 2
+}
+
+[[ "${PPU_WHEEL_PATH}" = /* ]] ||
+    _verify_error "PPU_WHEEL_PATH must be absolute: ${PPU_WHEEL_PATH}"
+[[ -f "${PPU_WHEEL_PATH}" ]] ||
+    _verify_error "PPU_WHEEL_PATH is not a file: ${PPU_WHEEL_PATH}"
+[[ "${PPU_WHEEL_SHA256}" =~ ^[0-9a-f]{64}$ ]] ||
+    _verify_error "invalid PPU_WHEEL_SHA256: expected 64 lowercase hex characters"
+[[ "${PPU_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+    _verify_error "invalid PPU_SOURCE_SHA: expected 40 lowercase hex characters"
+[[ "${PPU_CI_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+    _verify_error "invalid PPU_CI_SHA: expected 40 lowercase hex characters"
+case "${PPU_RELEASE}" in
+    v0.26.0|v0.27.0|v0.28.0) ;;
+    *) _verify_error "unsupported PPU_RELEASE: ${PPU_RELEASE}" ;;
+esac
+printf '%s  %s\n' "${PPU_WHEEL_SHA256}" "${PPU_WHEEL_PATH}" | sha256sum -c - ||
+    _verify_error "PPU_WHEEL_SHA256 verification failed for PPU_WHEEL_PATH: ${PPU_WHEEL_PATH}"
 
 python3 - "${PPU_EXPECTED_DEVICES}" <<'PY'
 import sys

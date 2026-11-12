@@ -8,27 +8,21 @@
 # Every difference from PR #6 and its reason is in scripts/ppu/docs/ppu-wheel-build.md.
 set -ex
 
-# CUDA_VERSION is $3 and is used unconditionally below, so at least three arguments are required.
-if [ $# -lt 3 ]; then
-  echo "Usage: $0 <TARGET_VERSION> <PYTHON_VERSION> <CUDA_VERSION> [ARCH]"
-  exit 1
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <TARGET_VERSION>" >&2
+  exit 2
 fi
 
 TARGET_VERSION="$1"
-PYTHON_VERSION="$2"          # e.g. 3.12
-CUDA_VERSION="$3"            # e.g. 13.0
-ARCH="${4:-$(uname -m)}"     # optional override; uname -i returns unknown on some distributions
 
-if [ "${ARCH}" = "aarch64" ]; then
-  echo "aarch64 is not supported yet: no aarch64 PPU base image / SDK tarball" >&2
-  exit 1
-else
-  # CI passes the image ID already used in the Rust cache key; a direct local call keeps
-  # the default image.
-  BASE_IMG="${PPU_BUILD_IMAGE:-pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06}"
+if [ "$(uname -m)" != "x86_64" ]; then
+  echo "Only x86_64 hosts are supported by the fixed PPU build toolchain" >&2
+  exit 2
 fi
 
-PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
+# CI passes the image ID already used in the Rust cache key; a direct local call keeps
+# the default image.
+BASE_IMG="${PPU_BUILD_IMAGE:-pkg.flytiger-eco.com/docker_build/pytorch:ubuntu24.04-py312.06}"
 
 # Output directory for wheels
 DIST_DIR="dist"
@@ -43,11 +37,8 @@ mkdir -p "${HOST_CCACHE_DIR}"
 echo "----------------------------------------"
 echo "Build configuration"
 echo "TARGET_VERSION:  ${TARGET_VERSION}"
-echo "PYTHON_VERSION:  ${PYTHON_VERSION}"
-echo "CUDA_VERSION:    ${CUDA_VERSION}"
-echo "ARCH:            ${ARCH}"
+echo "Toolchain:       Python 3.12 / CUDA 13.0 / x86_64"
 echo "BASE_IMG:        ${BASE_IMG}"
-echo "PYTHON_TAG:      ${PY_TAG}"
 echo "MAX_JOBS:        ${MAX_JOBS:-<unset→cpu_count>}"
 echo "NVCC_THREADS:    ${NVCC_THREADS:-<unset>}"
 echo "HOST_CCACHE_DIR: ${HOST_CCACHE_DIR}"
@@ -68,10 +59,7 @@ docker run --rm -i \
   -v "$(pwd):/workspace" \
   -v "${HOST_CCACHE_DIR}:/root/.ccache" \
   -w /workspace \
-  -e ARCH="${ARCH}" \
   -e TARGET_VERSION="${TARGET_VERSION}" \
-  -e PYTHON_VERSION="${PYTHON_VERSION}" \
-  -e CUDA_VERSION="${CUDA_VERSION}" \
   -e VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}" \
   -e MAX_JOBS="${MAX_JOBS:-$(getconf _NPROCESSORS_ONLN)}" \
   -e NVCC_THREADS="${NVCC_THREADS:-1}" \

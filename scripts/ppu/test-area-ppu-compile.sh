@@ -321,7 +321,7 @@ for label in LABELS:
             bad_units += 1
             continue
         n_t, n_f, n_e, n_s = (int(agg[k]) for k in COLS[:4])
-        ok = (n_f == 0 and n_e == 0)
+        ok = (n_t > 0 and n_f == 0 and n_e == 0)
         if not ok:
             bad_units += 1
         lines.append(f"| {unit} | {n_t} | {n_t - n_f - n_e - n_s} | {n_f} "
@@ -330,7 +330,7 @@ for label in LABELS:
         for k in COLS:
             tot[k] += agg[k]
 n_t, n_f, n_e, n_s = (int(tot[k]) for k in COLS[:4])
-status_all = "PASSED" if bad_units == 0 else "FAILED"
+status_all = "PASSED" if bad_units == 0 and n_t > 0 else "FAILED"
 lines.append(f"| **Total** | **{n_t}** | **{n_t - n_f - n_e - n_s}** "
              f"| **{n_f}** | **{n_e}** | **{n_s}** | **{tot['time']:.0f}s** "
              f"| **{status_all}** |")

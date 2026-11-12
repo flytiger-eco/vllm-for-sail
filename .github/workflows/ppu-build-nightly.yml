@@ -140,7 +140,7 @@ jobs:
           VLLM_VERSION_OVERRIDE="${RELEASE#v}.dev$(date -u +%Y%m%d)+g$(git -C source rev-parse --short HEAD)"
           export MAX_JOBS NVCC_THREADS HOST_CCACHE_DIR VLLM_VERSION_OVERRIDE
           mkdir -p "$HOST_CCACHE_DIR"
-          (cd source && bash scripts/ppu/ppu_ci_nightly_build_wheel.sh "${RELEASE#v}" 3.12 13.0 x86_64)
+          (cd source && bash scripts/ppu/ppu_ci_nightly_build_wheel.sh "${RELEASE#v}")
           python3 - "$RELEASE" "$SOURCE_SHA" "$CI_SHA" "$VLLM_VERSION_OVERRIDE" <<'PY'
           import hashlib, json, pathlib, sys, zipfile
           release, source_sha, ci_sha, version = sys.argv[1:]

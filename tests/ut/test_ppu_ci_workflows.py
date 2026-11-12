@@ -742,6 +742,91 @@ def test_nightly_runner_rejects_unsupported_modes_before_setup(area, unsupported
         assert f"invalid TEST_MODE '{mode}'" in result.stderr
 
 
+@pytest.mark.parametrize("area", nightly.AREAS, ids=lambda area: area.name)
+@pytest.mark.parametrize("case", ["empty", "mixed", "sharded", "no-steps", "passed"])
+def test_area_summary_requires_tests_for_units_and_totals(tmp_path, area, case):
+    text = (nightly.SCRIPT_DIR / area.script).read_text()
+    code = text.split("_emit_junit() {", 1)[1].split("<<PYEOF\n", 1)[1]
+    code = code.split("\nPYEOF", 1)[0]
+    labels = [] if case == "no-steps" else ["unit"]
+    count = int(case == "passed")
+    (tmp_path / "unit.xml").write_text(f'<testsuite tests="{count}"/>')
+    if case == "mixed":
+        labels.append("passed")
+        (tmp_path / "passed.xml").write_text('<testsuite tests="1"/>')
+    if case == "sharded":
+        (tmp_path / "unit-shard0.xml").write_text('<testsuite tests="0"/>')
+        (tmp_path / "unit-shard1.xml").write_text('<testsuite tests="1"/>')
+    code = code.replace("${RESULTS_DIR}", str(tmp_path))
+    code = code.replace("${TMP_JUNIT}", str(tmp_path))
+    code = code.replace("${STEP_LABELS_LIST}", " ".join(labels))
+    exec(compile(code, area.script, "exec"), {})
+    rows = (tmp_path / "summary.md").read_text().splitlines()
+    expected = "PASSED" if case == "passed" else "FAILED"
+    assert rows[-1].endswith(f"| **{expected}** |")
+    if labels:
+        label = "unit / shard 0" if case == "sharded" else "unit"
+        unit = next(row for row in rows if row.startswith(f"| {label} | {count} |"))
+        assert unit.endswith(f"| {expected} |")
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("PPU_WHEEL_PATH", "relative.whl", "PPU_WHEEL_PATH must be absolute"),
+        ("PPU_WHEEL_PATH", "missing", "PPU_WHEEL_PATH is not a file"),
+        ("PPU_WHEEL_PATH", "directory", "PPU_WHEEL_PATH is not a file"),
+        ("PPU_WHEEL_SHA256", "invalid", "invalid PPU_WHEEL_SHA256"),
+        ("PPU_SOURCE_SHA", "invalid", "invalid PPU_SOURCE_SHA"),
+        ("PPU_CI_SHA", "invalid", "invalid PPU_CI_SHA"),
+        ("PPU_RELEASE", "v0.99.0", "unsupported PPU_RELEASE"),
+        ("DIGEST_RC", "1", "PPU_WHEEL_SHA256 verification failed"),
+        ("PPU_RELEASE", "v0.26.0", None),
+        ("PPU_RELEASE", "v0.27.0", None),
+        ("PPU_RELEASE", "v0.28.0", None),
+    ],
+)
+def test_nightly_handoff_errors_are_explicit_before_install(
+    tmp_path, field, value, message
+):
+    wheel = tmp_path / "vllm.whl"
+    wheel.touch()
+    if value == "missing":
+        value = str(tmp_path / "missing.whl")
+    elif value == "directory":
+        value = str(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'sha256sum() { return "${DIGEST_RC:-0}"; }; '
+            'python3() { exit 97; }; source "$1"',
+            "bash",
+            str(nightly.SCRIPT_DIR / "ppu_ci_nightly_install_dependency.sh"),
+        ],
+        env={
+            **os.environ,
+            "PPU_WHEEL_PATH": str(wheel),
+            "PPU_WHEEL_SHA256": "a" * 64,
+            "PPU_SOURCE_SHA": "b" * 40,
+            "PPU_CI_SHA": "c" * 40,
+            "PPU_RELEASE": "v0.28.0",
+            "PPU_EXPECTED_VLLM_VERSION": "0.28.0",
+            "PPU_EXPECTED_DEVICES": "1",
+            "DIGEST_RC": "0",
+            field: value,
+        },
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == (2 if message else 97), result.stderr
+    if message:
+        assert f"[verify] ERROR: {message}" in result.stderr
+    else:
+        assert not result.stderr
+
+
 @pytest.mark.parametrize(
     "expected,visible", [(1, 0), (1, 1), (2, 1), (2, 2), (2, 4), (0, 2)]
 )
@@ -1025,6 +1110,45 @@ cp() {{
     assert int((nas / "exit-code.txt").read_text()) == int(bool(area_rc or install_rc))
 
 
+@pytest.mark.parametrize(
+    "args", [[], ["0.28.0"], ["0.28.0", "3.12"], ["0.28.0", "3.12", "13.0", "x86_64"]]
+)
+@pytest.mark.parametrize("arch", ["x86_64", "aarch64"])
+def test_nightly_build_accepts_only_target_version(args, arch):
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'uname() { printf "%s\\n" "$TEST_ARCH"; }; mkdir() { exit 97; }; '
+            'script="$1"; shift; source "$script" "$@"',
+            "bash",
+            str(nightly.SCRIPT_DIR / "ppu_ci_nightly_build_wheel.sh"),
+            *args,
+        ],
+        env={**os.environ, "TEST_ARCH": arch},
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    valid = len(args) == 1 and arch == "x86_64"
+    assert result.returncode == (97 if valid else 2), result.stderr
+    if len(args) != 1:
+        assert "<TARGET_VERSION>" in result.stderr
+    elif not valid:
+        assert "Only x86_64 hosts are supported" in result.stderr
+    build = next(
+        step
+        for step in workflow("ppu-build-nightly.yml")["jobs"]["build-wheel"]["steps"]
+        if step.get("id") == "build"
+    )
+    call = next(
+        line
+        for line in build["run"].splitlines()
+        if "ppu_ci_nightly_build_wheel.sh" in line
+    )
+    assert call.endswith('ppu_ci_nightly_build_wheel.sh "${RELEASE#v}")')
+
+
 def test_nightly_build_keeps_rust_required():
     text = (nightly.SCRIPT_DIR / "ppu_ci_nightly_build_wheel.sh").read_text()
     assert text.count("VLLM_REQUIRE_RUST_FRONTEND=") == 1
@@ -1070,10 +1194,10 @@ def test_nightly_wheel_requires_complete_unique_rust_artifacts(
     assert (dist / "manifest.json").exists() == valid
 
 
-def test_nightly_smoke_and_artifacts_are_device_scoped():
+def test_nightly_inputs_and_artifacts_are_device_scoped():
     config = workflow("ppu-nightly-ci.yml")
     dispatch_inputs = config[True]["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["zw_smoke"]["default"] is False
+    assert set(dispatch_inputs) == {"releases", "areas", "device"}
     assert dispatch_inputs["device"]["type"] == "choice"
     assert dispatch_inputs["device"]["default"] == "OAM-810E"
     assert dispatch_inputs["device"]["options"] == ["OAM-810E", "ZW-M890P"]
@@ -1089,13 +1213,8 @@ def test_nightly_smoke_and_artifacts_are_device_scoped():
             "PPU_ARTIFACTORY_PASSWORD": "${{ secrets.PPU_ARTIFACTORY_PASSWORD }}",
         }
         inputs = job["with"]
-        assert (
-            inputs["device"]
-            == "${{ inputs.zw_smoke && 'ZW-M890P' || inputs.device || 'OAM-810E' }}"
-        )
-        assert (
-            inputs["areas"] == "${{ inputs.zw_smoke && 'attention' || inputs.areas }}"
-        )
+        assert inputs["device"] == "${{ inputs.device || 'OAM-810E' }}"
+        assert inputs["areas"] == "${{ inputs.areas }}"
     release_config = workflow("ppu-build-nightly.yml")
     assert release_config[True]["workflow_call"]["secrets"] == {
         "PPU_ARTIFACTORY_USER": {"required": True},

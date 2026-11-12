@@ -16,16 +16,12 @@ on:
         type: string
         default: ""
       device:
-        description: "PPU device; zw_smoke always uses ZW-M890P"
+        description: "PPU device"
         type: choice
         default: OAM-810E
         options:
           - OAM-810E
           - ZW-M890P
-      zw_smoke:
-        description: "Run v0.28.0 attention on ZW-M890P (overrides releases/areas)"
-        type: boolean
-        default: false
 
 # A full regression can exceed one day. Queue a new trigger rather than
 # cancelling the previous one and losing its results.
@@ -54,7 +50,7 @@ jobs:
       - name: Resolve exact release commits
         id: resolve
         env:
-          REQUESTED: ${{ inputs.zw_smoke && 'v0.28.0' || inputs.releases || 'v0.26.0,v0.27.0,v0.28.0' }}
+          REQUESTED: ${{ inputs.releases || 'v0.26.0,v0.27.0,v0.28.0' }}
         run: |
           # shellcheck disable=SC2153 # REQUESTED is supplied by the step env.
           requested="${REQUESTED//,/ }"
@@ -96,8 +92,8 @@ jobs:
       release: v0.26.0
       source_sha: ${{ needs.resolve-releases.outputs.v0_26_0 }}
       ci_sha: ${{ github.sha }}
-      areas: ${{ inputs.zw_smoke && 'attention' || inputs.areas }}
-      device: ${{ inputs.zw_smoke && 'ZW-M890P' || inputs.device || 'OAM-810E' }}
+      areas: ${{ inputs.areas }}
+      device: ${{ inputs.device || 'OAM-810E' }}
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
@@ -110,8 +106,8 @@ jobs:
       release: v0.27.0
       source_sha: ${{ needs.resolve-releases.outputs.v0_27_0 }}
       ci_sha: ${{ github.sha }}
-      areas: ${{ inputs.zw_smoke && 'attention' || inputs.areas }}
-      device: ${{ inputs.zw_smoke && 'ZW-M890P' || inputs.device || 'OAM-810E' }}
+      areas: ${{ inputs.areas }}
+      device: ${{ inputs.device || 'OAM-810E' }}
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
@@ -124,8 +120,8 @@ jobs:
       release: v0.28.0
       source_sha: ${{ needs.resolve-releases.outputs.v0_28_0 }}
       ci_sha: ${{ github.sha }}
-      areas: ${{ inputs.zw_smoke && 'attention' || inputs.areas }}
-      device: ${{ inputs.zw_smoke && 'ZW-M890P' || inputs.device || 'OAM-810E' }}
+      areas: ${{ inputs.areas }}
+      device: ${{ inputs.device || 'OAM-810E' }}
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
