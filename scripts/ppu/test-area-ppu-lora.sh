@@ -429,7 +429,9 @@ _run_step() {
     set -e
     echo "[step] ${label} rc=${rc}"
     if [ "${rc}" -eq 5 ]; then
-      python3 scripts/ppu/ppu_ci_nightly.py skip-empty "${out_xml}" "${PPU_RELEASE:-}" "${label}" || TOTAL_RC=1
+      python3 scripts/ppu/ppu_ci_nightly.py skip-empty \
+        "${out_xml}" "${PPU_RELEASE:-}" "${label}" -- \
+        "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} || TOTAL_RC=1
     elif [ "${rc}" -ne 0 ]; then
       TOTAL_RC=1
     fi

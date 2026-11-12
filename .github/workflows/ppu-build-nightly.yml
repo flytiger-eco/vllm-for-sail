@@ -153,6 +153,15 @@ jobs:
               assert f"Name: vllm\n" in metadata
               assert f"Version: {version}\n" in metadata
               assert "vllm/_version.py" in archive.namelist()
+              for pattern in ("vllm-rs", "_rust_tool_parser*.so"):
+                  members = [
+                      item for item in archive.infolist()
+                      if pathlib.PurePosixPath(item.filename).parent == pathlib.PurePosixPath("vllm")
+                      and pathlib.PurePosixPath(item.filename).match(pattern)
+                  ]
+                  assert len(members) == 1 and members[0].file_size > 0, (
+                      f"Rust artifact is missing, empty, or not unique: {pattern}"
+                  )
           manifest = {
               "release": release, "source_sha": source_sha, "ci_sha": ci_sha,
               "wheel": wheel.name, "version": version,

@@ -180,7 +180,6 @@ PY
 
 export HGGC_ENABLE_COMPRESS=1
 export NVCC_APPEND_FLAGS="-Xfatbin -compress-all"
-export VLLM_REQUIRE_RUST_FRONTEND=0
 # Build SM80 kernels only (the same narrowing PR #6 used); consumers on other PPU targets
 # will fail, widen it when more hardware support is needed.
 export TORCH_CUDA_ARCH_LIST="8.0"

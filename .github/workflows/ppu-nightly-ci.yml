@@ -32,6 +32,7 @@ on:
 concurrency:
   group: nightly-ppu-releases
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read

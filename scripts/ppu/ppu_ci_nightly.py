@@ -350,15 +350,176 @@ def prepare_cache(source, destination):
             main.write_text("main", encoding="utf-8")
 
 
-def record_empty_skip(path, release, label):
-    """Mark only verified empty release/step combinations as explicit skips."""
-    allowed = {
-        ("v0.26.0", "spec_decode_ngram_suffix"),
-        ("v0.27.0", "spec_decode_ngram_suffix"),
-        ("v0.28.0", "spec_decode_draft_model"),
-        ("v0.28.0", "test_qwen3_with_multi_loras"),
-    }
-    if (release, label) not in allowed:
+def _deselects(path, *names):
+    return tuple(f"--deselect={path}::{name}" for name in names)
+
+
+EXPECTED_EMPTY_SELECTIONS = {
+    ("v0.26.0", "spec_decode_ngram_suffix"): (
+        "tests/v1/e2e/spec_decode/test_spec_decode.py",
+        "-k",
+        "(ngram or suffix) and not suffix_decoding_acceptance "
+        "and not speculative_config1",
+        *_deselects(
+            "tests/v1/e2e/spec_decode/test_lora_with_spec_decode.py",
+            "test_batch_inference_correctness[model_setup0]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/test_spec_decode.py",
+            "test_dflash_acceptance_rates[False]",
+            "test_dflash_acceptance_rates[True]",
+            "test_dflash_correctness[False]",
+            "test_dflash_correctness[True]",
+            "test_draft_model_parallel_drafting",
+            "test_draft_model_quantization[False-draft_quantized]",
+            "test_draft_model_quantization[False-target_quantized]",
+            "test_draft_model_quantization[True-draft_quantized]",
+            "test_draft_model_quantization[True-target_quantized]",
+            "test_draft_model_realistic_example",
+            "test_dspark_correctness_and_acceptance_rate",
+            "test_eagle_correctness_light[FLASH_ATTN-deepseek_eagle]",
+            "test_eagle_correctness_medium[FLASH_ATTN-qwen3_eagle3]",
+            "test_gemma4_dspark_correctness_and_acceptance_rate",
+            "test_medusa_acceptance_rate",
+            "test_mtp_correctness[deepseek]",
+            "test_mtp_correctness[gemma4-e4b]",
+            "test_mtp_correctness[qwen3_5-hybrid]",
+            "test_ngram_and_suffix_correctness[speculative_config0]",
+            "test_ngram_and_suffix_correctness[speculative_config1]",
+            "test_ngram_gpu_default_with_async_scheduling[async]",
+            "test_speculators_model_integration[llama3_eagle3_speculator]",
+            "test_speculators_model_integration[qwen3_eagle3_speculator]",
+            "test_suffix_decoding_acceptance",
+        ),
+    ),
+    ("v0.27.0", "spec_decode_ngram_suffix"): (
+        "tests/v1/e2e/spec_decode/ngram_suffix",
+        "-k",
+        "not suffix_decoding_acceptance and not speculative_config1",
+        *_deselects(
+            "tests/v1/e2e/spec_decode/draft_model/test_draft_model.py",
+            "test_draft_model_parallel_drafting",
+            "test_draft_model_quantization[False-draft_quantized]",
+            "test_draft_model_quantization[False-target_quantized]",
+            "test_draft_model_quantization[True-draft_quantized]",
+            "test_draft_model_quantization[True-target_quantized]",
+            "test_draft_model_realistic_example",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/eagle/test_eagle_correctness.py",
+            "test_eagle_correctness_light[FLASH_ATTN-deepseek_eagle]",
+            "test_eagle_correctness_medium[FLASH_ATTN-qwen3_eagle3]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/mtp/test_mtp.py",
+            "test_mtp_correctness[deepseek]",
+            "test_mtp_correctness[gemma4-e4b]",
+            "test_mtp_correctness[qwen3_5-hybrid]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/ngram_suffix/test_ngram_suffix.py",
+            "test_ngram_and_suffix_correctness[speculative_config0]",
+            "test_ngram_gpu_default_with_async_scheduling[async]",
+        ),
+    ),
+    ("v0.28.0", "spec_decode_draft_model"): (
+        "tests/v1/e2e/spec_decode/draft_model",
+        "--ignore=tests/v1/e2e/spec_decode/draft_model/test_lora.py",
+        "-k",
+        "not tensor_parallelism and not engine_args and not no_sync",
+        *_deselects(
+            "tests/v1/e2e/spec_decode/eagle/test_eagle_correctness.py",
+            "test_eagle_correctness_light[FLASH_ATTN-deepseek_eagle]",
+            "test_eagle_correctness_medium[FLASH_ATTN-qwen3_vl_eagle3]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/mtp/test_mtp.py",
+            "test_mtp_correctness[deepseek]",
+            "test_mtp_correctness[qwen3_5-hybrid]",
+            "test_mtp_correctness[gemma4-e4b]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/ngram_suffix/test_ngram_suffix.py",
+            "test_ngram_and_suffix_correctness[speculative_config0]",
+        ),
+        *_deselects(
+            "tests/v1/e2e/spec_decode/draft_model/test_draft_model.py",
+            "test_draft_model_correctness[True-args0]",
+            "test_draft_model_correctness[True-args1]",
+            "test_draft_model_correctness[False-args0]",
+            "test_draft_model_correctness[False-args1]",
+            "test_draft_model_realistic_example",
+            "test_draft_model_parallel_drafting",
+            "test_draft_model_quantization[True-target_quantized]",
+            "test_draft_model_quantization[True-draft_quantized]",
+            "test_draft_model_quantization[False-target_quantized]",
+            "test_draft_model_quantization[False-draft_quantized]",
+            "test_draft_model_moe_backend_override",
+            "test_draft_model_moe_backend_inherits_target",
+            "test_draft_model_moe_backend_default_auto",
+        ),
+    ),
+    ("v0.28.0", "test_qwen3_with_multi_loras"): (
+        "tests/lora/test_qwen3_with_multi_loras.py",
+        *_deselects(
+            "tests/lora/test_lora_functions.py",
+            "test_lora_functions_async",
+            "test_lora_functions_sync",
+        ),
+        *_deselects(
+            "tests/lora/test_worker.py",
+            "test_worker_apply_lora",
+        ),
+        *_deselects(
+            "tests/lora/test_lora_manager.py",
+            "test_lru_cache_worker_adapter_manager[cuda:0]",
+            "test_worker_adapter_manager[cuda:0]",
+        ),
+        *_deselects(
+            "tests/lora/test_qwen3_unembed.py",
+            "test_qwen3_unembed_lora",
+        ),
+        *_deselects(
+            "tests/lora/test_gemma4_tp.py",
+            "test_gemma4_lora",
+        ),
+        *_deselects(
+            "tests/lora/test_qwen3_with_multi_loras.py",
+            "test_multi_loras_with_tp_sync",
+            "test_multiple_lora_requests",
+            "test_load_inplace_offline_reload",
+            "test_load_inplace_false_no_reload",
+        ),
+    ),
+}
+
+
+def normalize_selection(arguments):
+    normalized = []
+    tokens = iter(arguments)
+    for token in tokens:
+        if token == "--":
+            normalized.append(token)
+            normalized.extend(tokens)
+            break
+        if token in ("--ignore", "--deselect"):
+            value = next(tokens, None)
+            if value is None:
+                raise SelectionError(f"{token} requires a path or node ID")
+            token = f"{token}={value}"
+        normalized.append(token)
+    return merge_pytest_args(normalized, "")
+
+
+def record_empty_skip(path, release, label, selection):
+    """Mark only verified empty release/step/selection combinations as skipped."""
+    expected = EXPECTED_EMPTY_SELECTIONS.get((release, label))
+    if expected is None or any(
+        os.environ.get(name, "").strip()
+        for name in ("PYTEST_EXTRA_ARGS", "PYTEST_ADDOPTS")
+    ):
+        return 1
+    if normalize_selection(selection) != normalize_selection(expected):
         return 1
     tree = ET.parse(path)
     suites = list(tree.iter("testsuite"))
@@ -383,6 +544,13 @@ def record_empty_skip(path, release, label):
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
     print(f"[step] {release}/{label}: SKIPPED ({reason})")
     return 0
+
+
+def command_skip_empty(args):
+    selection = args.selection
+    if selection[:1] == ["--"]:
+        selection = selection[1:]
+    return record_empty_skip(args.path, args.release, args.label, selection)
 
 
 def summarize_results(results_dir, exit_code):
@@ -477,9 +645,8 @@ def parse_args(argv):
     skip_parser.add_argument("path", type=Path)
     skip_parser.add_argument("release", choices=SUPPORTED_RELEASES)
     skip_parser.add_argument("label")
-    skip_parser.set_defaults(
-        func=lambda args: record_empty_skip(args.path, args.release, args.label)
-    )
+    skip_parser.add_argument("selection", nargs=argparse.REMAINDER)
+    skip_parser.set_defaults(func=command_skip_empty)
 
     summary_parser = sub.add_parser("summarize", help="validate and summarize JUnit")
     summary_parser.add_argument("results_dir", type=Path)

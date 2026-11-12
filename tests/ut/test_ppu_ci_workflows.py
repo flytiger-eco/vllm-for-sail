@@ -4,8 +4,10 @@
 """CPU-only contracts for the on-demand PPU CI workflows."""
 
 import os
+import shlex
 import subprocess
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -659,10 +661,15 @@ def test_nightly_summary_rejects_lost_or_invalid_raw_shards(tmp_path, xml):
         ("v0.28.0", "test_qwen3_with_multi_loras"),
     ],
 )
-def test_nightly_known_empty_step_is_explicitly_skipped(tmp_path, release, label):
+def test_nightly_known_empty_step_is_explicitly_skipped(
+    tmp_path, monkeypatch, release, label
+):
+    for name in ("PYTEST_EXTRA_ARGS", "PYTEST_ADDOPTS"):
+        monkeypatch.delenv(name, raising=False)
     path = tmp_path / "test.xml"
     path.write_text('<testsuites><testsuite tests="0"/></testsuites>')
-    assert nightly.record_empty_skip(path, release, label) == 0
+    selection = nightly.EXPECTED_EMPTY_SELECTIONS[(release, label)]
+    assert nightly.record_empty_skip(path, release, label, selection) == 0
     assert ET.parse(path).find("testcase/skipped") is not None
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw/step.xml").write_text(path.read_text())
@@ -670,12 +677,37 @@ def test_nightly_known_empty_step_is_explicitly_skipped(tmp_path, release, label
     assert "Total: **SKIPPED**" in (tmp_path / "summary.md").read_text()
 
 
-def test_nightly_empty_allowlist_does_not_hide_failures_or_other_steps(tmp_path):
+def test_nightly_empty_allowlist_does_not_hide_failures_or_other_steps(
+    tmp_path, monkeypatch
+):
+    for name in ("PYTEST_EXTRA_ARGS", "PYTEST_ADDOPTS"):
+        monkeypatch.delenv(name, raising=False)
     path = tmp_path / "test.xml"
     path.write_text('<testsuite tests="0"/>')
-    assert nightly.record_empty_skip(path, "v0.28.0", "spec_decode_eagle") == 1
+    assert nightly.record_empty_skip(path, "v0.28.0", "spec_decode_eagle", ()) == 1
     path.write_text('<testsuite tests="1" errors="1"/>')
-    assert nightly.record_empty_skip(path, "v0.28.0", "spec_decode_draft_model") == 1
+    key = ("v0.28.0", "spec_decode_draft_model")
+    selection = nightly.EXPECTED_EMPTY_SELECTIONS[key]
+    assert nightly.record_empty_skip(path, *key, selection) == 1
+
+
+@pytest.mark.parametrize("variable", ["PYTEST_EXTRA_ARGS", "PYTEST_ADDOPTS"])
+@pytest.mark.parametrize("extra", ["", "  ", "-k missing", "-m single"])
+def test_nightly_extra_pytest_args_disable_empty_skip(
+    tmp_path, monkeypatch, variable, extra
+):
+    for name in ("PYTEST_EXTRA_ARGS", "PYTEST_ADDOPTS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, extra)
+    path = tmp_path / "test.xml"
+    xml = '<testsuite tests="0"/>'
+    path.write_text(xml)
+    key = ("v0.28.0", "spec_decode_draft_model")
+    selection = nightly.EXPECTED_EMPTY_SELECTIONS[key]
+    rc = nightly.main(["skip-empty", str(path), *key, "--", *selection])
+    assert rc == int(bool(extra.strip()))
+    if rc:
+        assert path.read_text() == xml
 
 
 @pytest.mark.parametrize(
@@ -872,11 +904,24 @@ def test_area_setup_accepts_unset_cuda_visibility(area, release):
 
 @pytest.mark.parametrize("area", ["lora", "spec_decode"])
 @pytest.mark.parametrize("shards", [1, 2])
-def test_nightly_runner_rejects_unexpected_empty_steps(tmp_path, area, shards):
+@pytest.mark.parametrize("case", ["unexpected", "known", "diagnostic"])
+def test_nightly_runner_handles_empty_steps(tmp_path, area, shards, case):
     text = (ROOT / f"scripts/ppu/test-area-ppu-{area}.sh").read_text()
     function = (
         "_run_step() {" + text.split("_run_step() {", 1)[1].split("\n}", 1)[0] + "\n}"
     )
+    label = (
+        ("test_qwen3_with_multi_loras" if area == "lora" else "spec_decode_draft_model")
+        if case != "unexpected"
+        else "unexpected_step"
+    )
+    selection = (
+        nightly.EXPECTED_EMPTY_SELECTIONS[("v0.28.0", label)]
+        if case != "unexpected"
+        else ("tests/mock.py",)
+    )
+    path = tmp_path / f"{label}.xml"
+    path.write_text('<testsuite tests="0"/>')
     script = f'''
 set -euo pipefail
 TOTAL_RC=0
@@ -887,7 +932,7 @@ PYTEST_EXTRA=()
 pytest() {{ return 5; }}
 python3() {{ "{sys.executable}" "$@"; }}
 {function}
-_run_step unexpected_step {shards} tests/mock.py
+_run_step {label} {shards} {shlex.join(selection)}
 exit "$TOTAL_RC"
 '''
     result = subprocess.run(
@@ -896,9 +941,16 @@ exit "$TOTAL_RC"
         text=True,
         capture_output=True,
         cwd=ROOT,
-        env={**os.environ, "TEST_TMP": str(tmp_path)},
+        env={
+            **os.environ,
+            "TEST_TMP": str(tmp_path),
+            "PYTEST_EXTRA_ARGS": "-k missing" if case == "diagnostic" else "",
+            "PYTEST_ADDOPTS": "",
+        },
     )
-    assert result.returncode == 1, result.stdout + result.stderr
+    skipped = case == "known" and shards == 1
+    assert result.returncode == int(not skipped), result.stdout + result.stderr
+    assert (ET.parse(path).find("testcase/skipped") is not None) == skipped
 
 
 @pytest.mark.parametrize(
@@ -973,6 +1025,51 @@ cp() {{
     assert int((nas / "exit-code.txt").read_text()) == int(bool(area_rc or install_rc))
 
 
+def test_nightly_build_keeps_rust_required():
+    text = (nightly.SCRIPT_DIR / "ppu_ci_nightly_build_wheel.sh").read_text()
+    assert text.count("VLLM_REQUIRE_RUST_FRONTEND=") == 1
+    assert text.index("export VLLM_REQUIRE_RUST_FRONTEND=1") < text.index(
+        "python3 setup.py bdist_wheel"
+    )
+
+
+@pytest.mark.parametrize(
+    "binary,parsers",
+    [
+        (b"binary", [b"parser"]),
+        (None, [b"parser"]),
+        (b"", [b"parser"]),
+        (b"binary", []),
+        (b"binary", [b""]),
+        (b"binary", [b"one", b"two"]),
+    ],
+)
+def test_nightly_wheel_requires_complete_unique_rust_artifacts(
+    tmp_path, monkeypatch, binary, parsers
+):
+    steps = workflow("ppu-build-nightly.yml")["jobs"]["build-wheel"]["steps"]
+    build = next(s for s in steps if s.get("id") == "build")
+    code = build["run"].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    dist = tmp_path / "source/dist"
+    dist.mkdir(parents=True)
+    with zipfile.ZipFile(dist / "vllm.whl", "w") as archive:
+        archive.writestr("vllm.dist-info/METADATA", "Name: vllm\nVersion: 0.28.0\n")
+        archive.writestr("vllm/_version.py", "")
+        if binary is not None:
+            archive.writestr("vllm/vllm-rs", binary)
+        for i, parser in enumerate(parsers):
+            archive.writestr(f"vllm/_rust_tool_parser.{i}.so", parser)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["-", "v0.28.0", "a" * 40, "b" * 40, "0.28.0"])
+    valid = bool(binary and len(parsers) == 1 and parsers[0])
+    if valid:
+        exec(code, {})
+    else:
+        with pytest.raises(AssertionError, match="Rust"):
+            exec(code, {})
+    assert (dist / "manifest.json").exists() == valid
+
+
 def test_nightly_smoke_and_artifacts_are_device_scoped():
     config = workflow("ppu-nightly-ci.yml")
     dispatch_inputs = config[True]["workflow_dispatch"]["inputs"]
@@ -983,6 +1080,7 @@ def test_nightly_smoke_and_artifacts_are_device_scoped():
     assert config["concurrency"] == {
         "group": "nightly-ppu-releases",
         "cancel-in-progress": False,
+        "queue": "max",
     }
     for release in nightly.SUPPORTED_RELEASES:
         job = config["jobs"]["release-" + release.replace(".", "-")]
