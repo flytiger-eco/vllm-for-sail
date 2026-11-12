@@ -1,0 +1,94 @@
+name: Release Docker Images Nightly (PPU)
+
+# Scheduled runs take effect on the default branch; builds use v0.33.0.
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push images to GitHub Packages (ghcr.io); disable for a build-only run'
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    # Every day at 00:00 Beijing Time (16:00 UTC).
+    - cron: '0 16 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-v0.33.0
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'flytiger-eco/vllm-for-sail' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/v0.33.0')
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout v0.33.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Use the full branch ref to avoid ambiguity with a tag of the same name.
+          ref: refs/heads/v0.33.0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          owner_lc=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          date_tag=$(date -u +%Y%m%d)
+          # Record the checked-out commit, not GITHUB_SHA from the triggering branch.
+          commit=$(git rev-parse HEAD)
+          short_sha="${commit:0:7}"
+          {
+            echo "image=ghcr.io/${owner_lc}/vllm-ppu-nightly"
+            echo "tag=v0.33.0-${date_tag}-cuda13.0.0-sdk2.2.0-${short_sha}"
+            echo "rolling=nightly"
+            echo "commit=${commit}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Packages
+        if: github.event_name != 'workflow_dispatch' || inputs.push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.ppu
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+          provenance: false
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.rolling }}
+          build-args: |
+            VLLM_BUILD_COMMIT=${{ steps.meta.outputs.commit }}
+
+      - name: Write image address to job summary
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ROLLING: ${{ steps.meta.outputs.rolling }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          PUSH: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+        run: |
+          {
+            printf 'PPU image: `%s:%s` (rolling tag `%s:%s`)\n' \
+              "$IMAGE" "$TAG" "$IMAGE" "$ROLLING"
+            printf 'Build branch: `v0.33.0`; commit: `%s`; push: `%s`\n' "$COMMIT" "$PUSH"
+          } >> "$GITHUB_STEP_SUMMARY"
