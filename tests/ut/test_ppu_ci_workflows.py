@@ -881,6 +881,17 @@ _pip_retry {upgrade} scipy scikit-learn
     assert ("https://example.invalid/simple" in result.stdout) == bool(upgrade)
 
 
+def test_models_language_v028_uses_compatible_stack_on_all_devices():
+    text = (nightly.SCRIPT_DIR / "test-area-ppu-models_language.sh").read_text()
+    start = text.index('if [ "${PPU_RELEASE:-}" = "v0.28.0" ]; then')
+    block = text[start : text.index("\nfi\n", start)]
+    assert text.index("${PIP_INSTALL} mamba-ssm causal-conv1d") < start
+    assert start < text.index("ML_STANDARD_ARGS=")
+    assert "apache-tvm-ffi==0.1.9" in block
+    assert "xgrammar==0.2.3" in block
+    assert "PPU_DEVICE_LABEL" not in block
+
+
 @pytest.mark.parametrize("assigned", ["3", "6,7", "8,10,12,14", "", None])
 @pytest.mark.parametrize("visible", [None, "", "0,1,2,3"])
 def test_nightly_payload_preserves_runtime_device_visibility(assigned, visible):

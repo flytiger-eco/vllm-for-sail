@@ -114,6 +114,14 @@ if [ "${HYBRID_READY}" = "0" ]; then
 fi
 echo "[deps] HYBRID_READY=${HYBRID_READY}"
 
+# v0.28.0 raised xgrammar/apache-tvm-ffi, but the PPU mamba/tilelang stack on both
+# board types still requires apache-tvm-ffi<=0.1.9. Restore the last verified pair
+# after all area-specific installs until the shared image supports the new stack.
+if [ "${PPU_RELEASE:-}" = "v0.28.0" ]; then
+  echo "[deps] v0.28.0 compatibility: apache-tvm-ffi==0.1.9 xgrammar==0.2.3"
+  ${PIP_INSTALL} apache-tvm-ffi==0.1.9 xgrammar==0.2.3 -i "${PPU_PIP_INDEX}"
+fi
+
 # ------------------------------------------------------------------------------
 # [tests] case selection
 # ------------------------------------------------------------------------------
