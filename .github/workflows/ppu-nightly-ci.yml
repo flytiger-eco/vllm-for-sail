@@ -23,10 +23,10 @@ on:
           - OAM-810E
           - ZW-M890P
 
-# A full regression can exceed one day. Queue a new trigger rather than
-# cancelling the previous one and losing its results.
+# A full regression can exceed one day. Queue repeated triggers for the same
+# device rather than cancelling them; different devices run independently.
 concurrency:
-  group: nightly-ppu-releases
+  group: nightly-ppu-releases-${{ inputs.device || 'OAM-810E' }}
   cancel-in-progress: false
   queue: max
 

@@ -1213,7 +1213,7 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
     assert dispatch_inputs["device"]["default"] == "OAM-810E"
     assert dispatch_inputs["device"]["options"] == ["OAM-810E", "ZW-M890P"]
     assert config["concurrency"] == {
-        "group": "nightly-ppu-releases",
+        "group": "nightly-ppu-releases-${{ inputs.device || 'OAM-810E' }}",
         "cancel-in-progress": False,
         "queue": "max",
     }
