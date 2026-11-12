@@ -32,7 +32,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 # Run 42943857861: the 128 FP8 activation cases use generated IDs 528-655.
 # The PPU wheel does not build the corresponding Marlin kernels.
@@ -436,12 +435,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -470,20 +469,20 @@ _run_step() {
 
 if [ "${MODE}" = "single" ]; then
 # The Legacy single job is a 1-PPU pod: 1 card per step (multi_gpu_test self-skips)
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   echo "[mode] ERROR: area kernels has no multi-mode steps configured" >&2
   exit 2
 else  # all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

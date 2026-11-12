@@ -29,8 +29,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-PPU_DEVICES=(0)
-if [[ -n "${PPU_RELEASE:-}" ]]; then IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"; fi
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-samplers-junit"
@@ -279,12 +277,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -312,12 +310,12 @@ _run_step() {
 }
 
 if [ "${MODE}" = "single" ]; then
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "samplers_default" 1 "${SAMPLERS_SINGLE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "samplers_default" 1 "${SAMPLERS_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   echo "[mode] ERROR: area samplers has no multi-mode steps configured" >&2
   exit 2
 else  # all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "samplers_default" 1 "${SAMPLERS_SINGLE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "samplers_default" 1 "${SAMPLERS_SINGLE_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

@@ -765,36 +765,35 @@ _pip_retry {upgrade} scipy scikit-learn
 
 
 @pytest.mark.parametrize("assigned", ["3", "6,7", "8,10,12,14", "", None])
-def test_nightly_payload_binds_assigned_devices_before_setup(assigned):
+@pytest.mark.parametrize("visible", [None, "", "0,1,2,3"])
+def test_nightly_payload_preserves_runtime_device_visibility(assigned, visible):
     steps = workflow("ppu-build-nightly.yml")["jobs"]["test"]["steps"]
     command = next(s["run"] for s in steps if s.get("id") == "payload")
     prefix = command.split("<<'RUNEOF'\n", 1)[1].split("\ncd /workspace/source", 1)[0]
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": "0,1,2,3"}
-    env.pop("NVIDIA_VISIBLE_DEVICES", None)
+    env = dict(os.environ)
+    for name in ("NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        env.pop(name, None)
     if assigned is not None:
         env["NVIDIA_VISIBLE_DEVICES"] = assigned
+    if visible is not None:
+        env["CUDA_VISIBLE_DEVICES"] = visible
     result = subprocess.run(
         ["bash"],
-        input=prefix + '\nprintf "%s" "$CUDA_VISIBLE_DEVICES"\n',
+        input=prefix + '\nprintf "%s" "${CUDA_VISIBLE_DEVICES-unset}"\n',
         env=env,
         text=True,
         capture_output=True,
         timeout=5,
     )
-    if assigned:
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == assigned
-    else:
-        assert result.returncode != 0
-        assert "Assigned devices are unavailable" in result.stderr
-        assert not result.stdout
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (visible if visible is not None else "unset")
 
 
 @pytest.mark.parametrize("area", nightly.AREAS, ids=lambda area: area.name)
-def test_area_steps_use_assigned_devices_without_renumbering(tmp_path, area):
+@pytest.mark.parametrize("visible", [None, "0,1,2,3"])
+def test_area_steps_use_container_logical_devices(tmp_path, area, visible):
     text = (nightly.SCRIPT_DIR / area.script).read_text()
     lines = text.splitlines()
-    devices = next(line for line in lines if "read -ra PPU_DEVICES" in line)
     function = (
         "_run_step() {" + text.split("_run_step() {", 1)[1].split("\n}", 1)[0] + "\n}"
     )
@@ -803,6 +802,15 @@ def test_area_steps_use_assigned_devices_without_renumbering(tmp_path, area):
         for line in lines
         if line.strip().startswith("CUDA_VISIBLE_DEVICES=") and " _run_step" in line
     ]
+    env = {
+        **os.environ,
+        "TEST_TMP": str(tmp_path),
+        "NVIDIA_VISIBLE_DEVICES": "8,10,12,14",
+        "PPU_RELEASE": "v0.28.0",
+    }
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    if visible is not None:
+        env["CUDA_VISIBLE_DEVICES"] = visible
     result = subprocess.run(
         ["bash"],
         input=f"""
@@ -811,20 +819,14 @@ TOTAL_RC=0
 STEP_LABELS_LIST=""
 TMP_JUNIT="$TEST_TMP"
 PYTEST_EXTRA=()
-{devices}
-pytest() {{ printf 'devices=%s\\n' "$CUDA_VISIBLE_DEVICES"; }}
+pytest() {{ printf 'devices=%s\\n' "${{CUDA_VISIBLE_DEVICES-unset}}"; }}
 {function}
 {chr(10).join(singles)}
 _run_step multi 1 tests/mock.py
 _run_step sharded 4 tests/mock.py
 exit "$TOTAL_RC"
 """,
-        env={
-            **os.environ,
-            "TEST_TMP": str(tmp_path),
-            "CUDA_VISIBLE_DEVICES": "8,10,12,14",
-            "PPU_RELEASE": "v0.28.0",
-        },
+        env=env,
         text=True,
         capture_output=True,
         timeout=5,
@@ -833,40 +835,39 @@ exit "$TOTAL_RC"
     observed = [
         line for line in result.stdout.splitlines() if line.startswith("devices=")
     ]
-    assert observed[: len(singles) + 1] == ["devices=8"] * len(singles) + [
-        "devices=8,10,12,14"
+    assert observed[: len(singles) + 1] == ["devices=0"] * len(singles) + [
+        f"devices={visible if visible is not None else 'unset'}"
     ]
-    for shard, device in enumerate(["8", "10", "12", "14"]):
+    for shard in range(4):
         assert (
             tmp_path / f"sharded-shard{shard}.log"
-        ).read_text() == f"devices={device}\n"
+        ).read_text() == f"devices={shard}\n"
 
 
-@pytest.mark.parametrize("area", ["attention", "samplers", "benchmarks"])
-@pytest.mark.parametrize("visible", [None, "6,7"])
-def test_pr_shared_area_setup_keeps_legacy_devices_without_nightly_binding(
-    area, visible
-):
-    env = dict(os.environ)
-    for name in ("PPU_RELEASE", "NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+@pytest.mark.parametrize("area", nightly.AREAS, ids=lambda area: area.name)
+@pytest.mark.parametrize("release", [None, "v0.28.0"])
+def test_area_setup_accepts_unset_cuda_visibility(area, release):
+    env = {**os.environ, "NVIDIA_VISIBLE_DEVICES": "8,10,12,14"}
+    for name in ("PPU_RELEASE", "CUDA_VISIBLE_DEVICES"):
         env.pop(name, None)
-    if visible is not None:
-        env["CUDA_VISIBLE_DEVICES"] = visible
+    if release is not None:
+        env["PPU_RELEASE"] = release
     result = subprocess.run(
         [
             "bash",
             "-c",
-            'mkdir() { printf "%s" "${PPU_DEVICES[*]}"; exit 97; }; source "$1"',
+            'mkdir() { printf "%s" "${CUDA_VISIBLE_DEVICES-unset}"; exit 97; }; '
+            'source "$1"',
             "bash",
-            str(ROOT / f"scripts/ppu/test-area-ppu-{area}.sh"),
+            str(nightly.SCRIPT_DIR / area.script),
         ],
-        env={**env, "TEST_MODE": "single"},
+        env={**env, "TEST_MODE": "all"},
         text=True,
         capture_output=True,
         timeout=5,
     )
     assert result.returncode == 97, result.stdout + result.stderr
-    assert result.stdout == "0"
+    assert result.stdout == "unset"
 
 
 @pytest.mark.parametrize("area", ["lora", "spec_decode"])
@@ -883,7 +884,6 @@ STEP_LABELS_LIST=""
 PPU_RELEASE=v0.28.0
 TMP_JUNIT="$TEST_TMP"
 PYTEST_EXTRA=()
-PPU_DEVICES=(6 7)
 pytest() {{ return 5; }}
 python3() {{ "{sys.executable}" "$@"; }}
 {function}
@@ -917,7 +917,7 @@ def test_nightly_payload_recovers_results_and_propagates_failures(
     mocks = f'''
 python3() {{ "{sys.executable}" "{ROOT}/$1" "${{@:2}}"; }}
 bash() {{
-  [[ "$CUDA_VISIBLE_DEVICES" == "6,7" ]] || return 96
+  [[ "$CUDA_VISIBLE_DEVICES" == "0,1" ]] || return 96
   if [[ "$1" == *install_dependency.sh ]]; then
     echo installer-output
     return {install_rc}
@@ -1005,6 +1005,8 @@ def test_nightly_smoke_and_artifacts_are_device_scoped():
     }
     jobs = release_config["jobs"]
     action = next(s["with"] for s in jobs["test"]["steps"] if s.get("id") == "ppu")
+    options = yaml.safe_load(action["container_options"])
+    assert options.get("privileged", False) is False
     expected_devices = f"PPU_EXPECTED_DEVICES={action['nproc_per_node']}"
     assert expected_devices in action["extra_env"].split(",")
     assert jobs["build-wheel"]["needs"] == "select-areas"

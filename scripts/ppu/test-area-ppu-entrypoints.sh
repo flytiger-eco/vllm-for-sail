@@ -25,7 +25,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
   # Run 41379000962: collection fails on v0.26/v0.27 PPU (No module named 'rapidfuzz').
@@ -343,12 +342,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -382,7 +381,7 @@ else
 # single / all: Step 1 is mostly pure CPU unit tests (tool_parsers + light entrypoints);
 # the anthropic cases bring up one Qwen3-0.6B server. 1 card everywhere, matching the
 # Legacy 1-PPU pod.
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "entrypoints_unit" 1 "${EP_SINGLE_UNIT_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "entrypoints_unit" 1 "${EP_SINGLE_UNIT_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

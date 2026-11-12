@@ -24,7 +24,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
   # Run 41379000962: shared v0.26/v0.27 PPU failures; keep other releases unchanged.
@@ -392,12 +391,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -426,16 +425,16 @@ _run_step() {
 
 if [ "${MODE}" = "single" ]; then
 # The Legacy single job is a 1-PPU pod: 1 card makes multi_gpu_test skip itself, matching
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "engine_basic" 1 "${ENGINE_SINGLE_BASIC_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_engine" 1 "${ENGINE_SINGLE_V1_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_e2e_general" 1 "${ENGINE_SINGLE_E2E_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "engine_basic" 1 "${ENGINE_SINGLE_BASIC_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_engine" 1 "${ENGINE_SINGLE_V1_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_e2e_general" 1 "${ENGINE_SINGLE_E2E_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
   echo "[mode] ERROR: area engine has no multi-mode steps configured" >&2
   exit 2
 else  # all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "engine_basic" 1 "${ENGINE_SINGLE_BASIC_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_engine" 1 "${ENGINE_SINGLE_V1_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_e2e_general" 1 "${ENGINE_SINGLE_E2E_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "engine_basic" 1 "${ENGINE_SINGLE_BASIC_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_engine" 1 "${ENGINE_SINGLE_V1_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_e2e_general" 1 "${ENGINE_SINGLE_E2E_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

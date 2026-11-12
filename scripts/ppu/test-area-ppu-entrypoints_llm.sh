@@ -26,7 +26,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-ep-llm-junit"
@@ -297,12 +296,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -331,9 +330,9 @@ _run_step() {
 
 if [ "${MODE}" = "single" ]; then
 # The Legacy single job is a 1-PPU pod: 1 card makes tp=2 cases skip, matching
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_chat" 1 "${EP_LLM_SINGLE_CHAT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_collective_rpc" 1 "${EP_LLM_SINGLE_RPC_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_gpu_utilization" 1 "${EP_LLM_SINGLE_GPU_UTIL_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_chat" 1 "${EP_LLM_SINGLE_CHAT_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_collective_rpc" 1 "${EP_LLM_SINGLE_RPC_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_gpu_utilization" 1 "${EP_LLM_SINGLE_GPU_UTIL_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
 # The Legacy multi job is a 2-PPU pod: no card limit, tp=2 cases use 2 cards
 # 2026-08-27: the multi step is disabled (mp-2/ray-2 all fail on FlexAttention OOM,
@@ -341,9 +340,9 @@ elif [ "${MODE}" = "multi" ]; then
 echo "[mode] multi steps are disabled (2026-08-27 FlexAttention OOM), nothing to run"
   # _run_step "test_collective_rpc_multi" 1 "${EP_LLM_MULTI_RPC_ARGS[@]}"
 else  # all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_chat" 1 "${EP_LLM_SINGLE_CHAT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_collective_rpc" 1 "${EP_LLM_SINGLE_RPC_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "test_gpu_utilization" 1 "${EP_LLM_SINGLE_GPU_UTIL_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_chat" 1 "${EP_LLM_SINGLE_CHAT_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_collective_rpc" 1 "${EP_LLM_SINGLE_RPC_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "test_gpu_utilization" 1 "${EP_LLM_SINGLE_GPU_UTIL_ARGS[@]}"
 # 2026-08-27: the multi step is disabled (mp-2/ray-2 all fail on FlexAttention OOM, see above)
   # _run_step "test_collective_rpc_multi" 1 "${EP_LLM_MULTI_RPC_ARGS[@]}"
 fi

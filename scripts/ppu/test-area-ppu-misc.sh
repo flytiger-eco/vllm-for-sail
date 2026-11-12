@@ -20,7 +20,6 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
-IFS=, read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
@@ -592,12 +591,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -626,11 +625,11 @@ _run_step() {
 
 # misc is single-only (5 independent steps, each limited to 1 card); there is no multi section.
 _run_single_steps() {
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_core_gpu" 1 "${MISC_V1_CORE_GPU_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_inference" 1 "${MISC_V1_INFERENCE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_spec_decode" 1 "${MISC_V1_SPEC_DECODE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "v1_connectors_metrics" 1 "${MISC_V1_CONNECTORS_METRICS_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "async_engine_utils" 1 "${MISC_ASYNC_ENGINE_UTILS_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_core_gpu" 1 "${MISC_V1_CORE_GPU_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_inference" 1 "${MISC_V1_INFERENCE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_spec_decode" 1 "${MISC_V1_SPEC_DECODE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "v1_connectors_metrics" 1 "${MISC_V1_CONNECTORS_METRICS_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "async_engine_utils" 1 "${MISC_ASYNC_ENGINE_UTILS_ARGS[@]}"
 }
 
 if [ "${MODE}" = "single" ]; then

@@ -35,7 +35,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" ]]; then
   # Run 41379000962: v0.26 PPU failures (pre-split test_spec_decode.py layout).
@@ -477,12 +476,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -516,10 +515,10 @@ _run_step() {
 if [ "${MODE}" = "multi" ]; then
   echo "[run] spec_decode area has no multi-mode steps configured — nothing to run" >&2
 else  # single | all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "spec_decode_eagle" 1 "${SD_EAGLE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "spec_decode_speculators_mtp" 1 "${SD_SPECULATORS_MTP_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "spec_decode_ngram_suffix" 1 "${SD_NGRAM_SUFFIX_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "spec_decode_draft_model" 1 "${SD_DRAFT_MODEL_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "spec_decode_eagle" 1 "${SD_EAGLE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "spec_decode_speculators_mtp" 1 "${SD_SPECULATORS_MTP_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "spec_decode_ngram_suffix" 1 "${SD_NGRAM_SUFFIX_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "spec_decode_draft_model" 1 "${SD_DRAFT_MODEL_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

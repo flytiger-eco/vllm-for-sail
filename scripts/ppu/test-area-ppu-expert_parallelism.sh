@@ -28,7 +28,6 @@ PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
-IFS=',' read -ra PPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-expert-parallelism-junit"
@@ -264,12 +263,12 @@ _run_step() {
     local pids=()
     for shard in $(seq 0 $((shards - 1))); do
       local out_xml="${TMP_JUNIT}/${label}-shard${shard}.xml"
-      CUDA_VISIBLE_DEVICES="${PPU_DEVICES[shard]}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
+      CUDA_VISIBLE_DEVICES="${shard}" pytest -v -s "${args[@]}" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"} \
         --shard-id="${shard}" --num-shards="${shards}" \
         --junit-xml="${out_xml}" \
         > "${TMP_JUNIT}/${label}-shard${shard}.log" 2>&1 &
       pids+=($!)
-      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${PPU_DEVICES[shard]}"
+      echo "[shard] launched shard ${shard} pid=${!} CUDA_VISIBLE_DEVICES=${shard}"
     done
     local rc_total=0 i=0
     for pid in "${pids[@]}"; do
@@ -298,12 +297,12 @@ _run_step() {
 
 if [ "${MODE}" = "single" ]; then
 # The Legacy single job is a 1-PPU pod: limit to 1 card to match
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "eplb_algorithm" 1 "${EP_SINGLE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "eplb_algorithm" 1 "${EP_SINGLE_ARGS[@]}"
 elif [ "${MODE}" = "multi" ]; then
 # multi: no card limit, test_eplb_execute.py spawns world_size=2 via distributed_run (2 cards)
   _run_step "eplb_execution" 1 "${EP_MULTI_ARGS[@]}"
 else  # all
-  CUDA_VISIBLE_DEVICES="${PPU_DEVICES[0]}" _run_step "eplb_algorithm" 1 "${EP_SINGLE_ARGS[@]}"
+  CUDA_VISIBLE_DEVICES=0 _run_step "eplb_algorithm" 1 "${EP_SINGLE_ARGS[@]}"
   _run_step "eplb_execution" 1 "${EP_MULTI_ARGS[@]}"
 fi
 
