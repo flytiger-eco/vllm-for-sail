@@ -15,6 +15,9 @@ ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-
 ARG VLLM_WHEEL_SHA256=62f367d16b6b355bd3717699751a54247b63574b03ad45944a0fc2f3717804da
 ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-1642/vllm_sail-0.33.0rc2.dev3+g4ac8b9c-cp312-cp312-linux_x86_64.whl
 ARG VLLM_SAIL_WHEEL_SHA256=8f63e1666fe31e697dfe349abe481c9a52ed3cacff67fd019b77a21d10eef5ac
+# The torchcodec wrapper index omits this existing wheel for the pinned base.
+ARG TORCHCODEC_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_generic/torchcodec/0.15.0+v0.1.0.ppu2.2.0/torchcodec-0.15.0+cu130torch2.13.0ubuntu2404ce-cp312-cp312-linux_x86_64.whl
+ARG TORCHCODEC_WHEEL_SHA256=6cacb4ece165e2eaf157f549526a315845b047c4d2c5a70895b8a0e0abe1d938
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -27,7 +30,6 @@ ARG PPU_PACKAGES="\
     tilelang==0.1.12+v0.1.0.ppu2.2.1 \
     torchaudio==2.11.0+v0.1.0.ppu2.2.0 \
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
-    torchcodec==0.15.0+v0.1.0.ppu2.2.0 \
     triton==3.7.0+v0.1.0.ppu2.2.0"
 ARG PPU_WHEEL_URLS="\
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-2039/deep_gemm-1.1.0.dev305+v1.1.0.ppu2.2.0.gf5f31463-cp312-cp312-linux_x86_64.whl \
@@ -123,6 +125,8 @@ ARG PPU_PIP_INDEX
 ARG MAX_JOBS
 ARG SAILIFY_WHEEL_URL
 ARG SAILIFY_WHEEL_SHA256
+ARG TORCHCODEC_WHEEL_URL
+ARG TORCHCODEC_WHEEL_SHA256
 ARG PPU_PACKAGES
 ARG PPU_WHEEL_URLS
 
@@ -133,6 +137,9 @@ RUN source "${PPU_SDK}/envsetup.sh" ppu \
     && curl --fail --location --retry 3 --connect-timeout 30 \
         "${SAILIFY_WHEEL_URL}" -o /wheels/sailify-1.0.0-py3-none-any.whl \
     && echo "${SAILIFY_WHEEL_SHA256}  /wheels/sailify-1.0.0-py3-none-any.whl" | sha256sum -c - \
+    && curl --fail --location --retry 3 --connect-timeout 30 \
+        "${TORCHCODEC_WHEEL_URL}" -o /wheels/torchcodec-0.15.0+v0.1.0.ppu2.2.0-cp312-cp312-linux_x86_64.whl \
+    && echo "${TORCHCODEC_WHEEL_SHA256}  /wheels/torchcodec-0.15.0+v0.1.0.ppu2.2.0-cp312-cp312-linux_x86_64.whl" | sha256sum -c - \
     && for spec in ${PPU_PACKAGES} ${PPU_WHEEL_URLS}; do \
         echo "==> Building ${spec}" \
         && MAX_JOBS="${MAX_JOBS}" .venv/bin/python -m pip wheel \
