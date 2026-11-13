@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: x86-ubuntu2404-8-32
     timeout-minutes: 300
     steps:
       - name: Checkout v0.33.0
