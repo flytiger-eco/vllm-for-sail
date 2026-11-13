@@ -28,7 +28,7 @@ ARG PPU_PACKAGES="\
 ARG PPU_WHEEL_URLS="\
     https://art-pub.eng.t-head.cn/artifactory/test-package/public/flytiger/LibCompute/whls/custom/deep-select/deep_select-1.0.0-cp312-cp312-linux_x86_64.whl#sha256=9543f93af2fdb5b25f5334a06e0f6e7e714668296b48edb1dc864cd116f6cbca \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2240/deep_gemm-1.1.0.dev294+v1.1.0.ppu2.2.0.g4869f1e3-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2133/flash_mla-2.1.0.dev5+v1.0.0.ppu2.2.0.ga85e3e5-cp312-cp312-linux_x86_64.whl \
+    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-12-1754/flash_mla-2.1.0.dev6+v1.0.0.ppu2.2.0.gdc31ebe-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2252/pla-1.1.0-cp312-cp312-linux_x86_64.whl \
