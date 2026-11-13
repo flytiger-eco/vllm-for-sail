@@ -71,6 +71,16 @@ if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
   )
 fi
 
+if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" &&
+      ( "${PPU_RELEASE:-}" == "v0.27.0" || "${PPU_RELEASE:-}" == "v0.28.0" ) ]]; then
+  # Run 43211125476: this case exits with SIGSEGV only on ZW for these releases.
+  # https://github.com/flytiger-eco/vllm-for-sail/issues/72
+  # Keep v0.26 and OAM-810E coverage unchanged; remove after the native crash is fixed.
+  PYTEST_EXTRA+=(
+    --deselect "tests/models/language/generation/test_hybrid.py::test_fp32_cache_state[mamba_ssm_cache_dtype-5-64-state-spaces/mamba-130m-hf]"
+  )
+fi
+
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-models-language-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"

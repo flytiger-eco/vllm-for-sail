@@ -881,6 +881,33 @@ _pip_retry {upgrade} scipy scikit-learn
     assert ("https://example.invalid/simple" in result.stdout) == bool(upgrade)
 
 
+@pytest.mark.parametrize("release", nightly.SUPPORTED_RELEASES)
+@pytest.mark.parametrize("device", ["OAM-810E", "ZW-M890P"])
+def test_models_language_zw_mamba_sigsegv_deselect_is_scoped(release, device):
+    text = (nightly.SCRIPT_DIR / "test-area-ppu-models_language.sh").read_text()
+    selection = text[text.index("PYTEST_EXTRA=()") : text.index("RESULTS_DIR=")]
+    result = subprocess.run(
+        ["bash"],
+        input=(
+            "set -euo pipefail\n"
+            + selection
+            + "\nprintf '%s\\n' ${PYTEST_EXTRA[@]+\"${PYTEST_EXTRA[@]}\"}\n"
+        ),
+        env={**os.environ, "PPU_RELEASE": release, "PPU_DEVICE_LABEL": device},
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    nodeid = (
+        "tests/models/language/generation/test_hybrid.py::test_fp32_cache_state"
+        "[mamba_ssm_cache_dtype-5-64-state-spaces/mamba-130m-hf]"
+    )
+    expected = device == "ZW-M890P" and release in ("v0.27.0", "v0.28.0")
+    assert (nodeid in result.stdout.splitlines()) == expected
+    assert "https://github.com/flytiger-eco/vllm-for-sail/issues/72" in text
+
+
 def test_models_language_v028_uses_compatible_stack_on_all_devices():
     text = (nightly.SCRIPT_DIR / "test-area-ppu-models_language.sh").read_text()
     start = text.index('if [ "${PPU_RELEASE:-}" = "v0.28.0" ]; then')
