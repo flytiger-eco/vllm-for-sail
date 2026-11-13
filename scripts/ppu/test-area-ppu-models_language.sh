@@ -62,7 +62,8 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
   )
 fi
 
-if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
+if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" && "${PPU_RELEASE:-}" != "v0.26.0" ]]; then
+  # v0.26 验证分支恢复两个 tiny-mixtral 用例，其余版本保留现有隔离。
   # Run 42943857861: ZW-M890P-only generation mismatches in all maintained releases.
   # Keep OAM-810E coverage unchanged.
   PYTEST_EXTRA+=(
@@ -84,6 +85,7 @@ fi
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-models-language-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
+python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" prepare-model-tests models-language
 
 # ------------------------------------------------------------------------------
 # [deps] area-specific pip dependencies
@@ -130,6 +132,35 @@ echo "[deps] HYBRID_READY=${HYBRID_READY}"
 if [ "${PPU_RELEASE:-}" = "v0.28.0" ]; then
   echo "[deps] v0.28.0 compatibility: apache-tvm-ffi==0.1.9 xgrammar==0.2.3"
   ${PIP_INSTALL} apache-tvm-ffi==0.1.9 xgrammar==0.2.3 -i "${PPU_PIP_INDEX}"
+fi
+
+# NumPy 2.3.5 与镜像中 numba 的 ABI 不兼容；不降回 NumPy 1.x。
+# 固定支持 NumPy 2.3/Python 3.12 的 wheel，并在所有 area 安装完成后验证 CPU JIT。
+if [[ "${PPU_RELEASE:-}" == "v0.26.0" && "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
+  ${PIP_INSTALL} --upgrade --only-binary=:all: \
+    numpy==2.3.5 numba==0.62.1 llvmlite==0.45.1 coverage==7.10.6 -i "${PPU_PIP_INDEX}"
+  python3 - "${RESULTS_DIR}/numba-compat.json" <<'PY'
+import json
+import sys
+from importlib.metadata import version
+from pathlib import Path
+
+import numpy as np
+from numba import njit
+
+@njit
+def add_one(values):
+    return values + 1
+
+values = np.arange(4, dtype=np.float64)
+np.testing.assert_array_equal(add_one(values), values + 1)
+assert add_one.nopython_signatures
+packages = {name: version(name) for name in (
+    "numpy", "numba", "llvmlite", "coverage", "torch", "triton", "vllm"
+)}
+Path(sys.argv[1]).write_text(json.dumps(packages, indent=2) + "\n")
+print(f"[deps] NumPy/numba import 与 CPU JIT 验证通过: {packages}")
+PY
 fi
 
 # ------------------------------------------------------------------------------

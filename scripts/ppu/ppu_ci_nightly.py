@@ -10,6 +10,7 @@ pods so a release layout change cannot turn into an empty successful test.
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import shlex
@@ -330,6 +331,157 @@ def command_pytest(args):
     os.execvp(command[0], command)
 
 
+MODEL_TEST_PATHS = {
+    "models-language": "tests/models/language/generation/test_common.py",
+    "models-distributed": (
+        "tests/model_executor/model_loader/test_sharded_state_loader.py"
+    ),
+}
+MODEL_TEST_PROFILES = ("original", "stable")
+MODEL_TEST_DTYPES = ("auto", "half", "bfloat16")
+
+
+def model_test_edits(area):
+    if area == "models-distributed":
+        original = (
+            "    platform_args = {}\n"
+            "    if current_platform.is_rocm() or current_platform.is_xpu():\n"
+            '        platform_args["max_num_seqs"] = 1\n'
+        )
+        return [
+            (
+                original,
+                original
+                + (
+                    "    # 对照 cb30f6f8dd：独立引擎的严格 greedy 比较需固定 batch。\n"
+                    "    if (\n"
+                    '        os.environ.get("PPU_RELEASE") == "v0.26.0"\n'
+                    '        and os.environ.get("PPU_DEVICE_LABEL") == "ZW-M890P"\n'
+                    '        and os.environ.get("PPU_MODEL_TEST_PROFILE", "stable")\n'
+                    '        == "stable"\n'
+                    "    ):\n"
+                    '        platform_args = {"max_num_seqs": 1}\n'
+                ),
+            )
+        ]
+    return [
+        ("import pytest\n", "import os\n\nimport pytest\n"),
+        (
+            "    with hf_runner(\n        model,\n",
+            (
+                "    # 单 batch/eager 是待 PPU 验证的稳定性方案，默认保留原 dtype。\n"
+                "    ppu_tiny = (\n"
+                '        model == "TitanML/tiny-mixtral"\n'
+                '        and os.environ.get("PPU_RELEASE") == "v0.26.0"\n'
+                '        and os.environ.get("PPU_DEVICE_LABEL") == "ZW-M890P"\n'
+                '        and os.environ.get("PPU_MODEL_TEST_PROFILE", "stable")\n'
+                '        == "stable"\n'
+                "    )\n"
+                "    hf_kwargs = (\n"
+                '        {"dtype": os.environ.get("PPU_TINY_MIXTRAL_DTYPE", "auto")}\n'
+                "        if ppu_tiny else {}\n"
+                "    )\n"
+                "    with hf_runner(\n        model,\n        **hf_kwargs,\n"
+            ),
+        ),
+        (
+            "    vllm_kwargs = {}\n",
+            (
+                "    vllm_kwargs = {}\n"
+                "    if ppu_tiny:\n"
+                "        vllm_kwargs.update(hf_kwargs, enforce_eager=True)\n"
+            ),
+        ),
+        (
+            "        max_num_seqs=1 if current_platform.is_rocm() else 2,\n",
+            (
+                "        max_num_seqs=1 if ppu_tiny or "
+                "current_platform.is_rocm() else 2,\n"
+            ),
+        ),
+    ]
+
+
+def prepare_model_tests(source_root, area, env=None):
+    """对发布测试做可审计的覆盖；不修改 wheel 或比较断言。"""
+    env = os.environ if env is None else env
+    if (env.get("PPU_RELEASE"), env.get("PPU_DEVICE_LABEL")) != ("v0.26.0", "ZW-M890P"):
+        return None
+    profile = env.get("PPU_MODEL_TEST_PROFILE", "stable")
+    dtype = env.get("PPU_TINY_MIXTRAL_DTYPE", "auto")
+    if profile not in MODEL_TEST_PROFILES or dtype not in MODEL_TEST_DTYPES:
+        raise SelectionError("invalid PPU_MODEL_TEST_PROFILE or PPU_TINY_MIXTRAL_DTYPE")
+    for name, length in (
+        ("PPU_SOURCE_SHA", 40),
+        ("PPU_CI_SHA", 40),
+        ("PPU_WHEEL_SHA256", 64),
+    ):
+        if not re.fullmatch(rf"[0-9a-f]{{{length}}}", env.get(name, "")):
+            raise SelectionError(f"{name} is required for model test provenance")
+    path = Path(source_root) / MODEL_TEST_PATHS[area]
+    content = path.read_text(encoding="utf-8")
+    baseline = prepared = content
+    states = []
+    # 先验证全部修改点；源码结构不符时不做部分覆盖。
+    for old, new in model_test_edits(area):
+        if new in content:
+            if content.count(new) != 1 or content.count(old) != new.count(old):
+                raise SelectionError(f"ambiguous prepared model test: {path}")
+            baseline = baseline.replace(new, old, 1)
+            states.append("prepared")
+        elif content.count(old) == 1:
+            prepared = prepared.replace(old, new, 1)
+            states.append("original")
+        else:
+            raise SelectionError(f"unrecognized model test source: {path}")
+    if len(set(states)) != 1 or (
+        states[0] == "original" and "PPU_MODEL_TEST_PROFILE" in content
+    ):
+        raise SelectionError(f"partially modified model test: {path}")
+    compile(prepared, str(path), "exec")
+    digest = lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest()
+    record = {
+        "area": area,
+        "release": env["PPU_RELEASE"],
+        "device": env["PPU_DEVICE_LABEL"],
+        "source_sha": env["PPU_SOURCE_SHA"],
+        "ci_sha": env["PPU_CI_SHA"],
+        "wheel_sha256": env["PPU_WHEEL_SHA256"],
+        "ci_script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "profile": profile,
+        "tiny_mixtral_dtype": (
+            (dtype if profile == "stable" else "auto")
+            if area == "models-language"
+            else None
+        ),
+        "precision_diagnostic": (
+            area == "models-language" and profile == "stable" and dtype != "auto"
+        ),
+        "test_path": MODEL_TEST_PATHS[area],
+        "original_test_sha256": digest(baseline),
+        "prepared_test_sha256": digest(prepared),
+        "ppu_verified": False,
+    }
+    if content != prepared:
+        path.write_text(prepared, encoding="utf-8")
+    results = Path(source_root) / "test-results"
+    results.mkdir(parents=True, exist_ok=True)
+    (results / f"model-test-overrides-{area}.json").write_text(
+        json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[model-tests] {area}: profile={profile}, dtype={dtype}; "
+        "测试已覆盖，wheel 未修改；仍需 PPU 验证",
+        flush=True,
+    )
+    return record
+
+
+def command_model_tests(args):
+    prepare_model_tests(args.source_root, args.area)
+    return 0
+
+
 def prepare_cache(source, destination):
     """Isolate writable HF refs while reusing model snapshots on NAS."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
@@ -358,8 +510,10 @@ EXPECTED_EMPTY_SELECTIONS = {
     ("v0.26.0", "spec_decode_ngram_suffix"): (
         "tests/v1/e2e/spec_decode/test_spec_decode.py",
         "-k",
-        "(ngram or suffix) and not suffix_decoding_acceptance "
-        "and not speculative_config1",
+        (
+            "(ngram or suffix) and not suffix_decoding_acceptance "
+            "and not speculative_config1"
+        ),
         *_deselects(
             "tests/v1/e2e/spec_decode/test_lora_with_spec_decode.py",
             "test_batch_inference_correctness[model_setup0]",
@@ -633,6 +787,13 @@ def parse_args(argv):
     pytest_parser = sub.add_parser("run-pytest", help="intersect diagnostic keywords")
     pytest_parser.add_argument("arguments", nargs=argparse.REMAINDER)
     pytest_parser.set_defaults(func=command_pytest)
+
+    models_parser = sub.add_parser(
+        "prepare-model-tests", help="应用可审计的模型测试修正"
+    )
+    models_parser.add_argument("area", choices=tuple(MODEL_TEST_PATHS))
+    models_parser.add_argument("--source-root", type=Path, default=REPO_ROOT)
+    models_parser.set_defaults(func=command_model_tests)
 
     cache_parser = sub.add_parser("prepare-cache", help="isolate HF cache metadata")
     cache_parser.add_argument("source", type=Path)

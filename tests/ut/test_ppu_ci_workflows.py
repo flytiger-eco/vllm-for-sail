@@ -3,6 +3,8 @@
 # mypy: ignore-errors
 """CPU-only contracts for the on-demand PPU CI workflows."""
 
+import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -799,8 +801,10 @@ def test_nightly_handoff_errors_are_explicit_before_install(
         [
             "bash",
             "-c",
-            'sha256sum() { return "${DIGEST_RC:-0}"; }; '
-            'python3() { exit 97; }; source "$1"',
+            (
+                'sha256sum() { return "${DIGEST_RC:-0}"; }; '
+                'python3() { exit 97; }; source "$1"'
+            ),
             "bash",
             str(nightly.SCRIPT_DIR / "ppu_ci_nightly_install_dependency.sh"),
         ],
@@ -908,6 +912,289 @@ def test_models_language_zw_mamba_sigsegv_deselect_is_scoped(release, device):
     assert "https://github.com/flytiger-eco/vllm-for-sail/issues/72" in text
 
 
+@pytest.fixture
+def model_override_source(tmp_path):
+    # 最低成本验证层：可执行的 runner 参数契约，不加载模型或 PPU。
+    sources = {
+        "models-language": """import pytest
+
+def test_models(model, hf_runner, vllm_runner, current_platform):
+    with hf_runner(
+        model,
+        revision="revision",
+    ) as hf_model:
+        hf_outputs = hf_model.outputs
+    vllm_kwargs = {}
+    with vllm_runner(
+        model,
+        max_num_seqs=1 if current_platform.is_rocm() else 2,
+        **vllm_kwargs,
+    ) as vllm_model:
+        assert hf_outputs == vllm_model.outputs
+""",
+        "models-distributed": """import os
+
+def test_sharded_state_loader(current_platform):
+    platform_args = {}
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        platform_args["max_num_seqs"] = 1
+    out_before = out_after = ["same"]
+    assert out_before == out_after
+    return platform_args
+""",
+    }
+    for area, source in sources.items():
+        path = tmp_path / nightly.MODEL_TEST_PATHS[area]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    return tmp_path, sources
+
+
+@pytest.fixture
+def model_override_env(monkeypatch):
+    env = {
+        "PPU_RELEASE": "v0.26.0",
+        "PPU_DEVICE_LABEL": "ZW-M890P",
+        "PPU_SOURCE_SHA": "a" * 40,
+        "PPU_CI_SHA": "b" * 40,
+        "PPU_WHEEL_SHA256": "c" * 64,
+        "PPU_MODEL_TEST_PROFILE": "stable",
+        "PPU_TINY_MIXTRAL_DTYPE": "auto",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return env
+
+
+@pytest.mark.parametrize("area", nightly.MODEL_TEST_PATHS)
+@pytest.mark.parametrize("profile", nightly.MODEL_TEST_PROFILES)
+def test_model_overrides_are_idempotent_and_preserve_provenance(
+    model_override_source, model_override_env, area, profile
+):
+    root, sources = model_override_source
+    env = {**model_override_env, "PPU_MODEL_TEST_PROFILE": profile}
+    first = nightly.prepare_model_tests(root, area, env)
+    second = nightly.prepare_model_tests(root, area, env)
+    assert first == second
+    assert (
+        first["original_test_sha256"]
+        == hashlib.sha256(sources[area].encode()).hexdigest()
+    )
+    assert (
+        first["prepared_test_sha256"]
+        == hashlib.sha256(
+            (root / nightly.MODEL_TEST_PATHS[area]).read_bytes()
+        ).hexdigest()
+    )
+    assert first["original_test_sha256"] != first["prepared_test_sha256"]
+    assert first["wheel_sha256"] == env["PPU_WHEEL_SHA256"]
+    assert not first["ppu_verified"]
+    report = root / f"test-results/model-test-overrides-{area}.json"
+    assert json.loads(report.read_text()) == first
+
+
+@pytest.mark.parametrize("area", nightly.MODEL_TEST_PATHS)
+@pytest.mark.parametrize("corruption", ["missing", "duplicate", "partial"])
+def test_model_overrides_fail_closed_without_partial_writes(
+    model_override_source, model_override_env, area, corruption
+):
+    root, _ = model_override_source
+    path = root / nightly.MODEL_TEST_PATHS[area]
+    old, new = nightly.model_test_edits(area)[0]
+    source = path.read_text()
+    if corruption == "partial" and area == "models-distributed":
+        source = source.replace(
+            old, new.replace('"max_num_seqs": 1', '"max_num_seqs": 2')
+        )
+    else:
+        source = source.replace(
+            old, {"missing": "", "duplicate": old * 2, "partial": new}[corruption]
+        )
+    path.write_text(source)
+    with pytest.raises(nightly.SelectionError):
+        nightly.prepare_model_tests(root, area, model_override_env)
+    assert path.read_text() == source
+    assert not (root / "test-results").exists()
+
+
+@pytest.mark.parametrize("area", nightly.MODEL_TEST_PATHS)
+@pytest.mark.parametrize(
+    "release,device",
+    [
+        ("v0.27.0", "ZW-M890P"),
+        ("v0.28.0", "ZW-M890P"),
+        ("v0.26.0", "OAM-810E"),
+        (None, None),
+    ],
+)
+def test_model_overrides_leave_other_release_device_pairs_untouched(
+    model_override_source, area, release, device
+):
+    root, sources = model_override_source
+    assert (
+        nightly.prepare_model_tests(
+            root,
+            area,
+            {
+                "PPU_RELEASE": release,
+                "PPU_DEVICE_LABEL": device,
+            },
+        )
+        is None
+    )
+    assert (root / nightly.MODEL_TEST_PATHS[area]).read_text() == sources[area]
+    assert not (root / "test-results").exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("PPU_SOURCE_SHA", ""),
+        ("PPU_CI_SHA", "bad"),
+        ("PPU_WHEEL_SHA256", ""),
+        ("PPU_MODEL_TEST_PROFILE", "skip"),
+        ("PPU_TINY_MIXTRAL_DTYPE", "float32"),
+    ],
+)
+def test_model_overrides_reject_invalid_provenance_or_profiles(
+    model_override_source, model_override_env, field, value
+):
+    root, sources = model_override_source
+    with pytest.raises(nightly.SelectionError):
+        nightly.prepare_model_tests(
+            root,
+            "models-language",
+            {
+                **model_override_env,
+                field: value,
+            },
+        )
+    assert (root / nightly.MODEL_TEST_PATHS["models-language"]).read_text() == (
+        sources["models-language"]
+    )
+
+
+@pytest.mark.parametrize("model", ["TitanML/tiny-mixtral", "other/model"])
+@pytest.mark.parametrize("profile", nightly.MODEL_TEST_PROFILES)
+@pytest.mark.parametrize("dtype", nightly.MODEL_TEST_DTYPES)
+@pytest.mark.parametrize("device", ["ZW-M890P", "OAM-810E"])
+def test_tiny_mixtral_profile_changes_only_engine_controls_and_matches_hf_dtype(
+    model_override_source,
+    model_override_env,
+    monkeypatch,
+    model,
+    profile,
+    dtype,
+    device,
+):
+    root, _ = model_override_source
+    monkeypatch.setenv("PPU_MODEL_TEST_PROFILE", profile)
+    monkeypatch.setenv("PPU_TINY_MIXTRAL_DTYPE", dtype)
+    nightly.prepare_model_tests(root, "models-language")
+    monkeypatch.setenv("PPU_DEVICE_LABEL", device)
+    calls = []
+
+    class Runner:
+        outputs = ["same"]
+
+        def __init__(self, model, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    scope = {}
+    exec((root / nightly.MODEL_TEST_PATHS["models-language"]).read_text(), scope)
+    platform = SimpleNamespace(is_rocm=lambda: False)
+    scope["test_models"](model, Runner, Runner, platform)
+    stable = (
+        model == "TitanML/tiny-mixtral" and profile == "stable" and device == "ZW-M890P"
+    )
+    assert calls[0] == {"revision": "revision", **({"dtype": dtype} if stable else {})}
+    assert calls[1] == (
+        {"max_num_seqs": 1, "dtype": dtype, "enforce_eager": True}
+        if stable
+        else {"max_num_seqs": 2}
+    )
+
+
+@pytest.mark.parametrize("profile", nightly.MODEL_TEST_PROFILES)
+@pytest.mark.parametrize("device", ["ZW-M890P", "OAM-810E"])
+def test_sharded_loader_profile_retains_strict_comparison(
+    model_override_source, model_override_env, monkeypatch, profile, device
+):
+    root, _ = model_override_source
+    monkeypatch.setenv("PPU_MODEL_TEST_PROFILE", profile)
+    nightly.prepare_model_tests(root, "models-distributed")
+    monkeypatch.setenv("PPU_DEVICE_LABEL", device)
+    code = (root / nightly.MODEL_TEST_PATHS["models-distributed"]).read_text()
+    assert "assert out_before == out_after" in code
+    scope = {}
+    exec(code, scope)
+    platform = SimpleNamespace(is_rocm=lambda: False, is_xpu=lambda: False)
+    assert scope["test_sharded_state_loader"](platform) == (
+        {"max_num_seqs": 1} if profile == "stable" and device == "ZW-M890P" else {}
+    )
+
+
+@pytest.mark.parametrize("release", nightly.SUPPORTED_RELEASES)
+@pytest.mark.parametrize("area", nightly.MODEL_TEST_PATHS)
+def test_target_failures_are_not_deselected_on_v026_validation_branch(area, release):
+    text = (nightly.SCRIPT_DIR / nightly.by_name(area).script).read_text()
+    selection = text[text.index("PYTEST_EXTRA=()") : text.index("RESULTS_DIR=")]
+    result = subprocess.run(
+        ["bash"],
+        input=selection + '\nprintf "%s\\n" ${PYTEST_EXTRA[@]+"${PYTEST_EXTRA[@]}"}\n',
+        env={**os.environ, "PPU_RELEASE": release, "PPU_DEVICE_LABEL": "ZW-M890P"},
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    target = (
+        "tiny-mixtral" if area == "models-language" else "test_sharded_state_loader[2-"
+    )
+    quarantined = (
+        release != "v0.26.0" if area == "models-language" else release == "v0.27.0"
+    )
+    assert (target in result.stdout) == quarantined
+
+
+@pytest.mark.parametrize("release", nightly.SUPPORTED_RELEASES)
+@pytest.mark.parametrize("device", ["ZW-M890P", "OAM-810E"])
+def test_numba_compatibility_install_is_scoped_and_binary_only(release, device):
+    text = (nightly.SCRIPT_DIR / "test-area-ppu-models_language.sh").read_text()
+    start = text.index("# NumPy 2.3.5 与镜像中 numba")
+    block = text[start : text.index("# [tests] case selection", start)]
+    mock = """
+PIP_INSTALL=mock_pip
+PPU_PIP_INDEX=https://example.invalid/simple
+RESULTS_DIR=unused
+mock_pip() { printf '%s\\n' "$@"; }
+python3() { return 0; }
+"""
+    result = subprocess.run(
+        ["bash"],
+        input=mock + block,
+        env={**os.environ, "PPU_RELEASE": release, "PPU_DEVICE_LABEL": device},
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    target = release == "v0.26.0" and device == "ZW-M890P"
+    assert ("numba==0.62.1" in result.stdout) == target
+    if target:
+        assert "--only-binary=:all:" in result.stdout
+        assert "numpy==2.3.5" in result.stdout
+        assert "llvmlite==0.45.1" in result.stdout
+    assert "np.testing.assert_array_equal" in block
+    assert "add_one.nopython_signatures" in block
+
+
 def test_models_language_v028_uses_compatible_stack_on_all_devices():
     text = (nightly.SCRIPT_DIR / "test-area-ppu-models_language.sh").read_text()
     start = text.index('if [ "${PPU_RELEASE:-}" = "v0.28.0" ]; then')
@@ -1011,8 +1298,10 @@ def test_area_setup_accepts_unset_cuda_visibility(area, release):
         [
             "bash",
             "-c",
-            'mkdir() { printf "%s" "${CUDA_VISIBLE_DEVICES-unset}"; exit 97; }; '
-            'source "$1"',
+            (
+                'mkdir() { printf "%s" "${CUDA_VISIBLE_DEVICES-unset}"; exit 97; }; '
+                'source "$1"'
+            ),
             "bash",
             str(nightly.SCRIPT_DIR / area.script),
         ],
@@ -1157,8 +1446,10 @@ def test_nightly_build_accepts_only_target_version(args, arch):
         [
             "bash",
             "-c",
-            'uname() { printf "%s\\n" "$TEST_ARCH"; }; mkdir() { exit 97; }; '
-            'script="$1"; shift; source "$script" "$@"',
+            (
+                'uname() { printf "%s\\n" "$TEST_ARCH"; }; mkdir() { exit 97; }; '
+                'script="$1"; shift; source "$script" "$@"'
+            ),
             "bash",
             str(nightly.SCRIPT_DIR / "ppu_ci_nightly_build_wheel.sh"),
             *args,

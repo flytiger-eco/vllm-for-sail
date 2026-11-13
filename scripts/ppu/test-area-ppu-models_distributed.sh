@@ -24,8 +24,8 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
-if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" && \
-      ( "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ) ]]; then
+if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" && "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
+  # v0.26 验证分支恢复 TP=2，用原严格输出断言检验 batching 修正。
   # Run 42943857861: TP=2 output differs after sharded_state reload on ZW-M890P.
   # Keep OAM-810E and TP=1 coverage unchanged.
   PYTEST_EXTRA+=(
@@ -37,6 +37,7 @@ fi
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-models-distributed-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
+python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" prepare-model-tests models-distributed
 
 # [deps] area-specific dependencies: none.
 
