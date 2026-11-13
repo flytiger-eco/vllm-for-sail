@@ -166,9 +166,11 @@ def test_area_jobs_have_read_only_tokens_and_exact_sha_checkout():
         action = next(
             step["uses"]
             for step in job["steps"]
-            if step.get("uses", "").startswith("flytiger-eco/ppu-distributed-action@")
+            if step.get("uses", "").startswith(
+                "flytiger-eco/shared-workflows/cluster-task@"
+            )
         )
-        assert action.endswith("@06c8ee7cadaae2086db4977e571b19f461653f16")
+        assert action.endswith("@77eb1259ffe946cd18f86e3afa640ebfffa01d70")
 
 
 def test_lightweight_checks_read_live_pr_and_treat_content_as_data_only():
