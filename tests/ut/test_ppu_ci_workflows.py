@@ -1232,7 +1232,11 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
         "PPU_ARTIFACTORY_PASSWORD": {"required": True},
     }
     jobs = release_config["jobs"]
+    assert jobs["test"]["strategy"]["max-parallel"] == 3
+    lora = next(area for area in nightly.AREAS if area.name == "lora")
+    assert (lora.run_timeout, lora.timeout) == (120, 145)
     action = next(s["with"] for s in jobs["test"]["steps"] if s.get("id") == "ppu")
+    assert action["timeout_minutes"] == "${{ matrix.run_timeout }}"
     options = yaml.safe_load(action["container_options"])
     assert options.get("privileged", False) is False
     expected_devices = f"PPU_EXPECTED_DEVICES={action['nproc_per_node']}"

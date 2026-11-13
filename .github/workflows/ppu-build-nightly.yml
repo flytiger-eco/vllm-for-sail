@@ -260,7 +260,7 @@ jobs:
       image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
         include: ${{ fromJson(needs.select-areas.outputs.matrix) }}
     timeout-minutes: ${{ matrix.timeout }}

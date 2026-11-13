@@ -64,7 +64,7 @@ AREAS = (
     Area("basic-correctness", nproc=2, run_timeout=90),
     Area("entrypoints", nproc=1, run_timeout=35),
     Area("entrypoints-llm", nproc=1, run_timeout=50),
-    Area("lora", nproc=4, run_timeout=90),
+    Area("lora", nproc=4, run_timeout=120),
     Area("model-executor", nproc=1, run_timeout=35),
     Area("models-basic", nproc=1, run_timeout=110),
     Area("samplers", nproc=1, run_timeout=35),
