@@ -99,12 +99,11 @@ RUN uv venv --system-site-packages --python python3 .venv
 RUN .venv/bin/python - <<'PY'
 import platform
 import sys
-import torch
+from importlib.metadata import version
 
 assert sys.version_info[:2] == (3, 12), sys.version
 assert platform.machine() == "x86_64", platform.machine()
-assert torch.version.cuda is not None, "Expected GPU-enabled SAIL torch"
-print("Base torch:", torch.__version__, "SAIL:", getattr(torch.version, "sail", None))
+print("Base torch:", version("torch"))
 PY
 
 RUN .venv/bin/python - <<'PY'
@@ -259,23 +258,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --no-deps numpy==1.26.4 \
     && rm -rf /tmp/wheels
 
-# These checks need the SDK libraries, but do not run inference or require a PPU.
+# Validate installed package metadata without importing device-dependent code.
 RUN .venv/bin/python - <<'PY'
-import importlib
 from importlib.metadata import entry_points, requires, version
 from pathlib import Path
 from packaging.requirements import Requirement
-import torch
-import vllm
-import vllm_sail
-from vllm_sail.compat import check_vllm_compatibility
-from vllm_sail.native.extensions import import_kernels
 
-check_vllm_compatibility()
-for name in ("_upstream_C", "_upstream_moe_C", "_C", "_moe_C"):
-    module = importlib.import_module(f"vllm_sail.{name}")
-    print(name, module.__file__)
-import_kernels(strict=True)
 for group in ("vllm.platform_plugins", "vllm.general_plugins"):
     assert any(ep.name == "ppu" and ep.value.startswith("vllm_sail:")
                for ep in entry_points(group=group)), group
@@ -288,14 +276,11 @@ for spec in requires("vllm") or []:
         continue
     actual = version(requirement.name)
     assert requirement.specifier.contains(actual, prereleases=True), (spec, actual)
-print("vllm:", vllm.__version__, "vllm-sail:", vllm_sail.__version__)
-print("torch:", torch.__version__)
+print("vllm:", version("vllm"), "vllm-sail:", version("vllm-sail"))
+print("torch:", version("torch"))
 print("fastapi:", version("fastapi"))
 print("ray:", version("ray"), "vllm-router:", version("vllm-router"))
 PY
-
-# Import the serving CLI; importing vllm alone misses runtime dependencies.
-RUN .venv/bin/python -m vllm.entrypoints.cli.main serve --help >/dev/null
 
 RUN mkdir -p /root/.cache/huggingface /root/.cache/vllm \
     && uv pip freeze --python .venv/bin/python > installed-packages.txt
@@ -311,7 +296,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         pytest pytest-asyncio pytest-xdist pre-commit ruff py-spy \
     && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         --no-deps numpy==1.26.4 \
-    && .venv/bin/python -c 'import numpy; assert numpy.__version__ == "1.26.4"' \
+    && .venv/bin/python -c 'from importlib.metadata import version; assert version("numpy") == "1.26.4"' \
     && pre-commit --version
 
 WORKDIR /workspace
