@@ -23,11 +23,6 @@ permissions:
 
 jobs:
   build:
-    if: >-
-      github.repository == 'flytiger-eco/vllm-for-sail' &&
-      (github.ref == 'refs/heads/main' ||
-       (github.event_name == 'push' &&
-        github.ref == 'refs/heads/feat/Add_docker_nightly_build'))
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
