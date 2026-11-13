@@ -26,7 +26,6 @@ ARG PPU_PACKAGES="\
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
     triton==3.7.0+v0.1.0.ppu2.2.0"
 ARG PPU_WHEEL_URLS="\
-    https://art-pub.eng.t-head.cn/artifactory/test-package/public/flytiger/LibCompute/whls/custom/deep-select/deep_select-1.0.0-cp312-cp312-linux_x86_64.whl#sha256=9543f93af2fdb5b25f5334a06e0f6e7e714668296b48edb1dc864cd116f6cbca \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2240/deep_gemm-1.1.0.dev294+v1.1.0.ppu2.2.0.g4869f1e3-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-12-1754/flash_mla-2.1.0.dev6+v1.0.0.ppu2.2.0.gdc31ebe-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl \
@@ -209,13 +208,16 @@ PY
 
 # Resolve generic requirements from the wheel metadata while retaining all PPU
 # wheels, including dev/beta versions absent from the stable package index.
+# Install the plugin separately without resolving its dependency metadata.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python \
         --index-url "${PPU_PIP_INDEX}" --extra-index-url "${PIP_DEFAULT_INDEX}" \
         --index-strategy unsafe-best-match --no-build-isolation \
         --overrides runtime-overrides.txt \
         -c ppu-constraints.txt -r ppu-requirements.txt \
-        /tmp/wheels/vllm/*.whl \
+        /tmp/wheels/vllm/vllm-*.whl \
+    && uv pip install --python .venv/bin/python --no-deps \
+        /tmp/wheels/vllm/vllm_sail-*.whl \
     && rm -rf /tmp/wheels
 
 # These checks need the SDK libraries, but do not run inference or require a PPU.
