@@ -11,10 +11,10 @@ ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
 ARG SAILIFY_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-03-0938/sailify-1.0.0-py3-none-any.whl
 ARG SAILIFY_WHEEL_SHA256=a9ad401a0319b7c95d112b3e69682427955fd7cfacec76255d3b4447e84c92a1
-ARG VLLM_WHEEL_URL=https://github.com/vllm-project/vllm-sail/releases/download/v0.33.0rc1/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261112.empty-cp312-cp312-linux_x86_64.whl
-ARG VLLM_WHEEL_SHA256=b1fbacdf35f9e4403b93514b4728e0c7e2e3553e72ec9ef981c8dbec23543b25
-ARG VLLM_SAIL_WHEEL_URL=https://github.com/vllm-project/vllm-sail/releases/download/v0.33.0rc1/vllm_sail-0.33.0rc1-cp312-cp312-linux_x86_64.whl
-ARG VLLM_SAIL_WHEEL_SHA256=9510d447633037456aeda02754575a4dc368312b929d50f6c61c36f4fb6d8288
+ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-1642/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261113.empty-cp312-cp312-linux_x86_64.whl
+ARG VLLM_WHEEL_SHA256=62f367d16b6b355bd3717699751a54247b63574b03ad45944a0fc2f3717804da
+ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-1642/vllm_sail-0.33.0rc2.dev3+g4ac8b9c-cp312-cp312-linux_x86_64.whl
+ARG VLLM_SAIL_WHEEL_SHA256=8f63e1666fe31e697dfe349abe481c9a52ed3cacff67fd019b77a21d10eef5ac
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -265,7 +265,7 @@ CMD ["/bin/bash"]
 FROM vllm_install AS runtime
 
 ARG VLLM_BUILD_COMMIT=4ba787ec9959e566d3b587a796dff07673324da5
-ARG VLLM_SAIL_BUILD_COMMIT=64f0ce6d121e7e730bfe49086b8f11b011638e73
+ARG VLLM_SAIL_BUILD_COMMIT=4ac8b9ccc4c68642746926a4c76e85c5db2cb8b9
 LABEL org.opencontainers.image.source="https://github.com/flytiger-eco/vllm-for-sail" \
       org.opencontainers.image.version="0.33.0" \
       org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
