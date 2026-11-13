@@ -1,6 +1,6 @@
 name: Release Docker Images Nightly (PPU)
 
-# Scheduled runs take effect on the default branch; builds use v0.33.0.
+# Scheduled runs build v0.33.0; manual runs build their selected branch or tag.
 on:
   workflow_dispatch:
     inputs:
@@ -26,11 +26,10 @@ jobs:
     runs-on: x86-ubuntu2404-8-32
     timeout-minutes: 300
     steps:
-      - name: Checkout v0.33.0
+      - name: Checkout build ref
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          # Use the full branch ref to avoid ambiguity with a tag of the same name.
-          ref: refs/heads/v0.33.0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'refs/heads/v0.33.0' }}
           submodules: recursive
           persist-credentials: false
 
@@ -86,5 +85,5 @@ jobs:
           {
             printf 'PPU image: `%s:%s` (rolling tag `%s:%s`)\n' \
               "$IMAGE" "$TAG" "$IMAGE" "$ROLLING"
-            printf 'Build branch: `v0.33.0`; commit: `%s`; push: `%s`\n' "$COMMIT" "$PUSH"
+            printf 'Build commit: `%s`; push: `%s`\n' "$COMMIT" "$PUSH"
           } >> "$GITHUB_STEP_SUMMARY"
