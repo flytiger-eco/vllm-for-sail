@@ -11,10 +11,10 @@ ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
 ARG SAILIFY_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-03-0938/sailify-1.0.0-py3-none-any.whl
 ARG SAILIFY_WHEEL_SHA256=a9ad401a0319b7c95d112b3e69682427955fd7cfacec76255d3b4447e84c92a1
-ARG VLLM_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-12-0016/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261111.empty-cp312-cp312-linux_x86_64.whl
-ARG VLLM_WHEEL_SHA256=824f195f349c1e24dba0e468f4c74d8cec2c2f4e08b8305215052ce4d7c54386
-ARG VLLM_SAIL_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-12-0016/vllm_sail-0.1.dev1+g007743f-cp312-cp312-linux_x86_64.whl
-ARG VLLM_SAIL_WHEEL_SHA256=409c97778fea7cfecb3809f0c752bf1a0613b739de094263131358ba58baa0de
+ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-1642/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261113.empty-cp312-cp312-linux_x86_64.whl
+ARG VLLM_WHEEL_SHA256=62f367d16b6b355bd3717699751a54247b63574b03ad45944a0fc2f3717804da
+ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-1642/vllm_sail-0.33.0rc2.dev3+g4ac8b9c-cp312-cp312-linux_x86_64.whl
+ARG VLLM_SAIL_WHEEL_SHA256=8f63e1666fe31e697dfe349abe481c9a52ed3cacff67fd019b77a21d10eef5ac
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -27,7 +27,7 @@ ARG PPU_PACKAGES="\
     triton==3.7.0+v0.1.0.ppu2.2.0"
 ARG PPU_WHEEL_URLS="\
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2240/deep_gemm-1.1.0.dev294+v1.1.0.ppu2.2.0.g4869f1e3-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2133/flash_mla-2.1.0.dev5+v1.0.0.ppu2.2.0.ga85e3e5-cp312-cp312-linux_x86_64.whl \
+    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-12-1754/flash_mla-2.1.0.dev6+v1.0.0.ppu2.2.0.gdc31ebe-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2252/pla-1.1.0-cp312-cp312-linux_x86_64.whl \
@@ -199,8 +199,11 @@ pins.update({
 })
 Path("ppu-constraints.txt").write_text("".join(f"{n}=={v}\n" for n, v in sorted(pins.items())))
 Path("ppu-requirements.txt").write_text("\n".join(sorted(pins)) + "\n")
-# The supplied plugin wheel declares 0.1.9; use the requested TileLang FFI version.
-Path("runtime-overrides.txt").write_text("apache-tvm-ffi==0.1.11\n")
+# Retain the requested TileLang FFI version and the supplied PPU DeepGEMM wheel.
+Path("runtime-overrides.txt").write_text(
+    "apache-tvm-ffi==0.1.11\n"
+    f"deep-gemm=={version('deep-gemm')}\n"
+)
 PY
 
 # Resolve generic requirements from the wheel metadata while retaining all PPU
@@ -261,7 +264,7 @@ CMD ["/bin/bash"]
 FROM vllm_install AS runtime
 
 ARG VLLM_BUILD_COMMIT=4ba787ec9959e566d3b587a796dff07673324da5
-ARG VLLM_SAIL_BUILD_COMMIT=007743f
+ARG VLLM_SAIL_BUILD_COMMIT=4ac8b9ccc4c68642746926a4c76e85c5db2cb8b9
 LABEL org.opencontainers.image.source="https://github.com/flytiger-eco/vllm-for-sail" \
       org.opencontainers.image.version="0.33.0" \
       org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \

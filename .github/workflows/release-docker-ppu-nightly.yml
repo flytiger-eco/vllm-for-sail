@@ -23,10 +23,6 @@ permissions:
 
 jobs:
   build:
-    if: >-
-      github.repository == 'flytiger-eco/vllm-for-sail' &&
-      (github.ref == 'refs/heads/main' ||
-       github.ref == 'refs/heads/v0.33.0')
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
