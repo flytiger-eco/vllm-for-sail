@@ -22,8 +22,12 @@ ARG PPU_PACKAGES="\
     cuda-bindings==13.0.0+v0.1.0.ppu2.2.0 \
     cuda-python==13.0.0+v0.1.0.ppu2.2.0 \
     deep_ep==2.2.0+v0.1.0.ppu2.2.0 \
+    flashinfer_python==0.6.18+v0.2.0.ppu2.2.0 \
+    mooncake==0.3.12.post1+v0.1.0.ppu2.2.0 \
     tilelang==0.1.12+v0.1.0.ppu2.2.1 \
+    torchaudio==2.11.0+v0.1.0.ppu2.2.0 \
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
+    torchcodec==0.15.0+v0.1.0.ppu2.2.0 \
     triton==3.7.0+v0.1.0.ppu2.2.0"
 ARG PPU_WHEEL_URLS="\
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-13-2039/deep_gemm-1.1.0.dev305+v1.1.0.ppu2.2.0.gf5f31463-cp312-cp312-linux_x86_64.whl \
@@ -196,28 +200,31 @@ pins.update({
     "z3-solver": "4.15.4.0",
     "apache-tvm-ffi": "0.1.11",
     "transformers": "5.16.1",
+    "numpy": "1.26.4",
 })
 Path("ppu-constraints.txt").write_text("".join(f"{n}=={v}\n" for n, v in sorted(pins.items())))
 Path("ppu-requirements.txt").write_text("\n".join(sorted(pins)) + "\n")
-# Retain the requested TileLang FFI version and the supplied PPU DeepGEMM wheel.
+# Retain the requested NumPy/TileLang FFI versions and the PPU DeepGEMM wheel.
 Path("runtime-overrides.txt").write_text(
+    "numpy==1.26.4\n"
     "apache-tvm-ffi==0.1.11\n"
     f"deep-gemm=={version('deep-gemm')}\n"
 )
 PY
 
-# Resolve generic requirements from the wheel metadata while retaining all PPU
-# wheels, including dev/beta versions absent from the stable package index.
-# Install the plugin separately without resolving its dependency metadata.
+# Resolve dependencies for the selected PPU packages, Ray and vLLM Router.
+# Install both vLLM wheels without resolving their dependency metadata.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python \
         --index-url "${PPU_PIP_INDEX}" --extra-index-url "${PIP_DEFAULT_INDEX}" \
         --index-strategy unsafe-best-match --no-build-isolation \
         --overrides runtime-overrides.txt \
-        -c ppu-constraints.txt -r ppu-requirements.txt \
-        /tmp/wheels/vllm/vllm-*.whl \
+        -c ppu-constraints.txt -r ppu-requirements.txt ray vllm-router \
     && uv pip install --python .venv/bin/python --no-deps \
+        /tmp/wheels/vllm/vllm-*.whl \
         /tmp/wheels/vllm/vllm_sail-*.whl \
+    && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
+        --no-deps numpy==1.26.4 \
     && rm -rf /tmp/wheels
 
 # These checks need the SDK libraries, but do not run inference or require a PPU.
@@ -244,6 +251,7 @@ for line in Path("ppu-constraints.txt").read_text().splitlines():
     assert version(name) == expected, name
 print("vllm:", vllm.__version__, "vllm-sail:", vllm_sail.__version__)
 print("torch:", torch.__version__)
+print("ray:", version("ray"), "vllm-router:", version("vllm-router"))
 PY
 
 RUN mkdir -p /root/.cache/huggingface /root/.cache/vllm \
@@ -258,6 +266,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python -c ppu-constraints.txt \
         --overrides runtime-overrides.txt \
         pytest pytest-asyncio pytest-xdist pre-commit ruff py-spy \
+    && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
+        --no-deps numpy==1.26.4 \
+    && .venv/bin/python -c 'import numpy; assert numpy.__version__ == "1.26.4"' \
     && pre-commit --version
 
 WORKDIR /workspace
