@@ -217,12 +217,17 @@ pins.update({
     "apache-tvm-ffi": "0.1.11",
     "transformers": "5.16.1",
     "numpy": "1.26.4",
+    "numba": "0.65.0",
+    "llvmlite": "0.47.0",
 })
 Path("ppu-constraints.txt").write_text("".join(f"{n}=={v}\n" for n, v in sorted(pins.items())))
 Path("ppu-requirements.txt").write_text("\n".join(sorted(pins)) + "\n")
 # Retain the requested NumPy/TileLang FFI versions and the PPU DeepGEMM wheel.
 Path("runtime-overrides.txt").write_text(
     "numpy==1.26.4\n"
+    # Exclude SDK-suffixed wrapper versions from these plain release pins.
+    "numba===0.65.0\n"
+    "llvmlite===0.47.0\n"
     "apache-tvm-ffi==0.1.11\n"
     f"deep-gemm=={version('deep-gemm')}\n"
 )
