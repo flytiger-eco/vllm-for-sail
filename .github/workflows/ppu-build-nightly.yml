@@ -383,6 +383,7 @@ jobs:
           command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
       - name: Validate test results
         if: always()
+        shell: bash
         env:
           NAS_DIR: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -395,20 +396,10 @@ jobs:
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
         run: |
-          worker_rc=""
-          if [[ -f "${NAS_DIR}/test.xml" && -f "${NAS_DIR}/exit-code.txt" ]]; then
-            read -r worker_rc < "${NAS_DIR}/exit-code.txt"
-          fi
-          result="CI_FAILED"
-          if [[ "${worker_rc}" =~ ^[0-9]+$ ]]; then
-            if [ "${worker_rc}" -ne 0 ]; then
-              result="TEST_FAILED"
-            elif [ "${OUT_JOB_STATUS}" = "succeeded" ]; then
-              result="PASSED"
-            fi
-          fi
-          if [ ! -f "${NAS_DIR}/summary.md" ]; then
-            result="CI_FAILED"
+          result="FAILED"
+          worker_rc="$(cat "${NAS_DIR}/exit-code.txt" 2>/dev/null || true)"
+          if [ -f "${NAS_DIR}/summary.md" ] && [ "${worker_rc}" = "0" ]; then
+            result="PASSED"
           fi
           {
             echo "Result: ${result}"
@@ -419,30 +410,67 @@ jobs:
             echo "K8s job: ${OUT_JOB_NAME:-<empty>} · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: ${OUT_TASK_PODS:-<empty>} · log: ${OUT_LOG_ARTIFACT:-<empty>}"
           } > "${NAS_DIR}/job-info.txt"
           [ "${result}" = "PASSED" ]
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ppu-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}-${{ inputs.device }}-${{ matrix.area }}
-          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}/
-          if-no-files-found: error
-
   release-finish:
     needs: [build-wheel, select-areas, test]
     if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+    timeout-minutes: 15
     steps:
-      - name: Require successful build and all selected areas
+      - name: Checkout CI scripts
+        if: always()
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ci_sha }}
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Build release result bundle
+        id: bundle
+        if: always()
+        env:
+          AREAS: ${{ inputs.areas }}
+          RELEASE: ${{ inputs.release }}
+          DEVICE: ${{ inputs.device }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          WHEEL_VERSION: ${{ needs.build-wheel.outputs.wheel_version }}
+          WHEEL_SHA256: ${{ needs.build-wheel.outputs.wheel_sha256 }}
+          RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
+        run: |
+          python3 -m pip install --quiet --break-system-packages regex
+          python3 scripts/ppu/ppu_ci_nightly.py summary-release \
+            --results-root "${RESULTS_ROOT}" --release "${RELEASE}" \
+            --areas "${AREAS}" --device "${DEVICE}" \
+            --source-sha "${SOURCE_SHA}" --ci-sha "${CI_SHA}" \
+            --wheel-version "${WHEEL_VERSION}" --wheel-sha256 "${WHEEL_SHA256}" \
+            --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Upload release test results
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ppu-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}-${{ inputs.device }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/
+          if-no-files-found: error
+      - name: Require successful build, areas, and result publication
+        if: always()
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
+          BUNDLE_OUTCOME: ${{ steps.bundle.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
         run: |
           python3 -c '
           import json, os, sys
           needs = json.loads(os.environ["NEEDS_JSON"])
           print(json.dumps(needs, indent=2))
           failed = [name for name, info in needs.items() if info.get("result") != "success"]
+          outcomes = {
+              "release result bundle": os.environ["BUNDLE_OUTCOME"],
+              "release artifact upload": os.environ["UPLOAD_OUTCOME"],
+          }
+          failed.extend(name for name, outcome in outcomes.items() if outcome != "success")
           if failed:
-              print("Unsuccessful jobs: " + ", ".join(failed))
+              print("Unsuccessful jobs or publication steps: " + ", ".join(failed))
               sys.exit(1)
           '

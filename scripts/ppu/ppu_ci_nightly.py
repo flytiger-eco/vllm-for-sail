@@ -665,6 +665,99 @@ def command_nightly_summary(args):
     return 0
 
 
+def _release_area_manifest(area_dir, name):
+    status, totals = _nightly_area_result(area_dir)
+    required = ("summary.md", "test.xml", "exit-code.txt", "run.log", "job-info.txt")
+    issues = [f"missing {path}" for path in required if not (area_dir / path).is_file()]
+    if not list(area_dir.glob("raw/**/*.xml")):
+        issues.append("missing raw JUnit")
+    if not list(area_dir.glob("raw/**/*.log")):
+        issues.append("missing raw logs")
+    if totals is None:
+        issues.append("invalid test.xml")
+    try:
+        int((area_dir / "exit-code.txt").read_text().strip())
+    except (OSError, ValueError):
+        issues.append("invalid exit-code.txt")
+    return {
+        "name": name,
+        "present": area_dir.is_dir(),
+        "result": status,
+        "complete": not issues,
+        "issues": issues,
+        "totals": totals,
+    }
+
+
+def command_release_summary(args):
+    requested = [name for name in args.areas.replace(",", " ").split() if name]
+    if args.areas.strip() and not requested:
+        raise SelectionError("no area in manual selection")
+    selected_areas = select(requested)
+    release_dir = args.results_root / args.release / args.device
+    area_results = [
+        _release_area_manifest(release_dir / area.name, area.name)
+        for area in selected_areas
+    ]
+    complete_count = sum(item["complete"] for item in area_results)
+    passed = bool(area_results) and all(
+        item["complete"] and item["result"] == "PASSED" for item in area_results
+    )
+    release_job = f"release-{args.release.replace('.', '-')}"
+    needs = {
+        "resolve-releases": {
+            "outputs": {
+                "selected": args.release,
+                args.release.replace(".", "_"): args.source_sha,
+            }
+        },
+        release_job: {
+            "outputs": {
+                "wheel_version": args.wheel_version,
+                "wheel_sha256": args.wheel_sha256,
+            }
+        },
+    }
+    content = render_nightly_summary(
+        args.results_root, args.areas, args.device, args.ci_sha, needs
+    )
+    incomplete = [item["name"] for item in area_results if not item["complete"]]
+    content += f"\nEvidence: **{complete_count}/{len(area_results)} complete**.\n"
+    if incomplete:
+        content += "Incomplete areas: " + ", ".join(incomplete) + "\n"
+    manifest = {
+        "schema_version": 1,
+        "run_id": args.run_id,
+        "run_attempt": args.run_attempt,
+        "release": args.release,
+        "device": args.device,
+        "source_sha": args.source_sha,
+        "ci_sha": args.ci_sha,
+        "wheel_version": args.wheel_version,
+        "wheel_sha256": args.wheel_sha256,
+        "result": "PASSED" if passed else "FAILED",
+        "expected_areas": len(area_results),
+        "present_areas": sum(item["present"] for item in area_results),
+        "complete_areas": complete_count,
+        "passed_areas": sum(
+            item["complete"] and item["result"] == "PASSED" for item in area_results
+        ),
+        "missing_areas": [item["name"] for item in area_results if not item["present"]],
+        "incomplete_areas": incomplete,
+        "areas": area_results,
+    }
+    release_dir.mkdir(parents=True, exist_ok=True)
+    (release_dir / "release-summary.md").write_text(content, encoding="utf-8")
+    (release_dir / "release-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[summary-release] {args.release}/{args.device}: {manifest['result']}; "
+        f"evidence={complete_count}/{len(area_results)}"
+    )
+    return int(not passed)
+
+
 def summarize_results(results_dir, exit_code):
     """Combine JUnit and process status; empty collections never pass."""
     results_dir = Path(results_dir)
@@ -779,6 +872,23 @@ def parse_args(argv):
         "--output", type=Path, default=os.environ.get("GITHUB_STEP_SUMMARY")
     )
     nightly_summary_parser.set_defaults(func=command_nightly_summary)
+
+    release_summary_parser = sub.add_parser(
+        "summary-release", help="write one release result bundle and evidence manifest"
+    )
+    release_summary_parser.add_argument("--results-root", required=True, type=Path)
+    release_summary_parser.add_argument(
+        "--release", required=True, choices=SUPPORTED_RELEASES
+    )
+    release_summary_parser.add_argument("--areas", default=os.environ.get("AREAS", ""))
+    release_summary_parser.add_argument("--device", required=True)
+    release_summary_parser.add_argument("--source-sha", required=True)
+    release_summary_parser.add_argument("--ci-sha", required=True)
+    release_summary_parser.add_argument("--wheel-version", required=True)
+    release_summary_parser.add_argument("--wheel-sha256", required=True)
+    release_summary_parser.add_argument("--run-id", required=True)
+    release_summary_parser.add_argument("--run-attempt", required=True)
+    release_summary_parser.set_defaults(func=command_release_summary)
 
     list_parser = sub.add_parser("list", help="print the registry")
     list_parser.set_defaults(func=command_list)
