@@ -3,6 +3,7 @@
 # mypy: ignore-errors
 """CPU-only contracts for the on-demand PPU CI workflows."""
 
+import json
 import os
 import shlex
 import subprocess
@@ -466,6 +467,22 @@ pytest -k "not cpu" --junit-xml="result with spaces.xml"
 
 
 @pytest.mark.parametrize(
+    "release,expected_slot",
+    [("v0.26.0", 4), ("v0.27.0", 12), ("v0.28.0", 23)],
+)
+def test_nightly_staggers_lora_by_release(monkeypatch, capsys, release, expected_slot):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    assert not nightly.main(["select", "--release", release])
+    output = capsys.readouterr().out
+    matrix = json.loads(
+        next(line for line in output.splitlines() if line.startswith("matrix="))[7:]
+    )
+    names = [entry["area"] for entry in matrix]
+    assert names.index("lora") == expected_slot
+    assert len(names) == len(nightly.AREAS)
+
+
+@pytest.mark.parametrize(
     "areas,count",
     [("", 24), (" ", 24), ("attention,distributed", 2), (",,", None), (" , , ", None)],
 )
@@ -482,6 +499,18 @@ def test_nightly_manual_selection_does_not_expand_empty_entries(
     else:
         assert not rc
         assert f"count={count}\n" in output.out
+
+
+def test_nightly_manual_selection_keeps_order_with_release(monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    assert not nightly.main(
+        ["select", "--release", "v0.28.0", "--areas", "lora,attention"]
+    )
+    output = capsys.readouterr().out
+    matrix = json.loads(
+        next(line for line in output.splitlines() if line.startswith("matrix="))[7:]
+    )
+    assert [entry["area"] for entry in matrix] == ["lora", "attention"]
 
 
 @pytest.mark.parametrize("release", nightly.SUPPORTED_RELEASES)
@@ -593,6 +622,118 @@ def test_nightly_private_cache_repairs_an_unpublished_main_ref(tmp_path):
     assert not (source / "models--org--model/refs").exists()
     with pytest.raises(ValueError):
         nightly.prepare_cache(source, source / "private")
+
+
+def test_nightly_summary_groups_areas_into_three_release_tables(tmp_path):
+    needs = {
+        "resolve-releases": {
+            "outputs": {"selected": ",".join(nightly.SUPPORTED_RELEASES)}
+        }
+    }
+    for index, release in enumerate(nightly.SUPPORTED_RELEASES, start=1):
+        key = release.replace(".", "_")
+        needs["resolve-releases"]["outputs"][key] = str(index) * 40
+        needs[f"release-{release.replace('.', '-')}"] = {
+            "outputs": {
+                "wheel_version": f"{release[1:]}.dev{index}",
+                "wheel_sha256": str(index) * 64,
+            }
+        }
+        for area in ("attention", "kernels"):
+            result_dir = tmp_path / release / "OAM-810E" / area
+            result_dir.mkdir(parents=True)
+            failures = int(release == "v0.28.0" and area == "kernels")
+            if area == "attention":
+                xml = (
+                    '<testsuites><testsuite tests="3" skipped="1"/>'
+                    '<testsuite tests="2"/></testsuites>'
+                )
+            else:
+                xml = f'<testsuite tests="4" failures="{failures}" skipped="1"/>'
+            (result_dir / "test.xml").write_text(xml)
+            (result_dir / "exit-code.txt").write_text(f"{failures}\n")
+    summary = nightly.render_nightly_summary(
+        tmp_path, "attention,kernels", "OAM-810E", "c" * 40, needs
+    )
+    assert summary.count("| Area | Tests | Failures | Errors | Skipped | Result |") == 3
+    assert "### Nightly PPU results" not in summary
+    positions = [
+        summary.index(f"## {release} /") for release in nightly.SUPPORTED_RELEASES
+    ]
+    assert positions == sorted(positions)
+    assert "Source SHA: `" + "1" * 40 + "`" in summary
+    assert "CI SHA: `" + "c" * 40 + "`" in summary
+    assert "Wheel version: `0.28.0.dev3`" in summary
+    assert "Wheel SHA256: `" + "3" * 64 + "`" in summary
+    assert "| attention | 5 | 0 | 0 | 1 | PASSED |" in summary
+    assert "| kernels | 4 | 1 | 0 | 1 | FAILED |" in summary
+    assert "| **Total** | **9** | **1** | **0** | **2** | **FAILED** |" in summary
+
+
+def test_nightly_summary_command_fails_closed_for_missing_or_invalid_results(
+    tmp_path, monkeypatch
+):
+    needs = {
+        "resolve-releases": {"outputs": {"selected": "v0.26.0", "v0_26_0": "a" * 40}},
+        "release-v0-26-0": {
+            "outputs": {"wheel_version": "0.26.0.dev1", "wheel_sha256": "b" * 64}
+        },
+    }
+    monkeypatch.setenv("NEEDS_JSON", json.dumps(needs))
+    invalid = tmp_path / "results/v0.26.0/OAM-810E/kernels"
+    invalid.mkdir(parents=True)
+    (invalid / "exit-code.txt").write_text("0\n")
+    output = tmp_path / "github-summary.md"
+    output.write_text("")
+    assert (
+        nightly.main(
+            [
+                "summary-nightly",
+                "--results-root",
+                str(tmp_path / "results"),
+                "--areas",
+                "attention,kernels",
+                "--device",
+                "OAM-810E",
+                "--ci-sha",
+                "c" * 40,
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    summary = output.read_text()
+    assert "| attention | - | - | - | - | FAILED |" in summary
+    assert "| kernels | - | - | - | - | FAILED |" in summary
+    assert "| **Total** | **0** | **0** | **0** | **0** | **FAILED** |" in summary
+
+
+def test_nightly_summary_command_reports_missing_release_resolution(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("NEEDS_JSON", json.dumps({"resolve-releases": {"outputs": {}}}))
+    output = tmp_path / "github-summary.md"
+    output.write_text("")
+    assert (
+        nightly.main(
+            [
+                "summary-nightly",
+                "--results-root",
+                str(tmp_path / "results"),
+                "--areas",
+                "",
+                "--device",
+                "OAM-810E",
+                "--ci-sha",
+                "c" * 40,
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert output.read_text() == ""
 
 
 @pytest.mark.parametrize(
@@ -1222,6 +1363,7 @@ def test_nightly_wheel_requires_complete_unique_rust_artifacts(
         for i, parser in enumerate(parsers):
             archive.writestr(f"vllm/_rust_tool_parser.{i}.so", parser)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
     monkeypatch.setattr(sys, "argv", ["-", "v0.28.0", "a" * 40, "b" * 40, "0.28.0"])
     valid = bool(binary and len(parsers) == 1 and parsers[0])
     if valid:
@@ -1230,6 +1372,10 @@ def test_nightly_wheel_requires_complete_unique_rust_artifacts(
         with pytest.raises(AssertionError, match="Rust"):
             exec(code, {})
     assert (dist / "manifest.json").exists() == valid
+    if valid:
+        output = (tmp_path / "github-output").read_text()
+        assert "wheel_version=0.28.0\n" in output
+        assert "wheel_sha256=" in output
 
 
 def test_nightly_inputs_and_artifacts_are_device_scoped():
@@ -1253,13 +1399,25 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
         inputs = job["with"]
         assert inputs["device"] == "${{ inputs.device || 'OAM-810E' }}"
         assert inputs["areas"] == "${{ inputs.areas }}"
+    summary_job = config["jobs"]["publish-summary"]
+    assert summary_job["runs-on"] == "k8s-runner-group-cpu-flytiger"
+    assert summary_job["if"] == "always()"
+    assert "publish-summary" in config["jobs"]["nightly-finish"]["needs"]
+    assert "summary-nightly" in summary_job["steps"][-1]["run"]
+    assert "/${{ github.job }}/" not in summary_job["steps"][-1]["env"]["RESULTS_ROOT"]
     release_config = workflow("ppu-build-nightly.yml")
     assert release_config[True]["workflow_call"]["secrets"] == {
         "PPU_ARTIFACTORY_USER": {"required": True},
         "PPU_ARTIFACTORY_PASSWORD": {"required": True},
     }
+    assert set(release_config[True]["workflow_call"]["outputs"]) == {
+        "wheel_version",
+        "wheel_sha256",
+    }
     jobs = release_config["jobs"]
     assert jobs["test"]["strategy"]["max-parallel"] == 3
+    select = next(s for s in jobs["select-areas"]["steps"] if s.get("id") == "pick")
+    assert 'ppu_ci_nightly.py select --release "${RELEASE}"' in select["run"]
     lora = next(area for area in nightly.AREAS if area.name == "lora")
     assert (lora.run_timeout, lora.timeout) == (120, 145)
     action = next(s["with"] for s in jobs["test"]["steps"] if s.get("id") == "ppu")
@@ -1269,6 +1427,7 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
     expected_devices = f"PPU_EXPECTED_DEVICES={action['nproc_per_node']}"
     assert expected_devices in action["extra_env"].split(",")
     assert jobs["build-wheel"]["needs"] == "select-areas"
+    assert set(jobs["build-wheel"]["outputs"]) >= {"wheel_version", "wheel_sha256"}
     upload = next(
         s for s in jobs["test"]["steps"] if s.get("name") == "Upload test results"
     )

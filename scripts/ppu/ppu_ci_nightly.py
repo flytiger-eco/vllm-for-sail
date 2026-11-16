@@ -105,6 +105,17 @@ def select(requested):
     return [by_name(name) for name in names] if names else list(AREAS)
 
 
+def stagger_lora(areas, release):
+    """Place the four-card LoRA area at a release-specific matrix slot."""
+    if release not in SUPPORTED_RELEASES or all(area.name != "lora" for area in areas):
+        return areas
+    lora = next(area for area in areas if area.name == "lora")
+    ordered = [area for area in areas if area.name != "lora"]
+    slot = {"v0.26.0": 4, "v0.27.0": 12}.get(release, len(ordered))
+    ordered.insert(min(slot, len(ordered)), lora)
+    return ordered
+
+
 def worst_case_minutes(areas):
     return sum(area.timeout for area in areas)
 
@@ -250,6 +261,8 @@ def command_select(args):
     if args.areas.strip() and not requested:
         raise SelectionError("no area in manual selection")
     areas = select(requested)
+    if not requested:
+        areas = stagger_lora(areas, args.release)
     entries = [area.matrix_entry() for area in areas]
     matrix = json.dumps(entries, separators=(",", ":"))
     emit_github_output({"matrix": matrix, "count": str(len(entries))}, args.stream)
@@ -553,6 +566,105 @@ def command_skip_empty(args):
     return record_empty_skip(args.path, args.release, args.label, selection)
 
 
+def _nightly_area_result(area_dir):
+    try:
+        suites = list(ET.parse(area_dir / "test.xml").iter("testsuite"))
+        if not suites:
+            raise ValueError("JUnit has no testsuite")
+        totals = {
+            key: sum(int(suite.get(key, "0")) for suite in suites)
+            for key in ("tests", "failures", "errors", "skipped")
+        }
+    except (OSError, ValueError, ET.ParseError):
+        return "FAILED", None
+    try:
+        exit_code = int((area_dir / "exit-code.txt").read_text().strip())
+    except (OSError, ValueError):
+        return "FAILED", totals
+    if exit_code or totals["tests"] <= 0 or totals["failures"] or totals["errors"]:
+        return "FAILED", totals
+    return "PASSED", totals
+
+
+def render_nightly_summary(results_root, areas, device, ci_sha, needs):
+    """Render one deterministic table per selected release."""
+    results_root = Path(results_root)
+    requested = [name for name in areas.replace(",", " ").split() if name]
+    if areas.strip() and not requested:
+        raise SelectionError("no area in manual selection")
+    selected_areas = select(requested)
+    selected = (
+        needs.get("resolve-releases", {}).get("outputs", {}).get("selected", "")
+    ).split(",")
+    if any(release not in SUPPORTED_RELEASES for release in selected):
+        raise SelectionError(f"invalid selected releases: {selected}")
+    lines = [
+        "# PPU nightly summary",
+        "",
+        "Detailed per-step results are available in the `ppu-results-*` artifacts.",
+        "",
+    ]
+    for release in SUPPORTED_RELEASES:
+        if release not in selected:
+            continue
+        release_key = release.replace(".", "_")
+        release_job = needs.get(f"release-{release.replace('.', '-')}", {})
+        wheel = release_job.get("outputs", {})
+        source_sha = needs["resolve-releases"]["outputs"].get(release_key, "")
+        lines.extend(
+            [
+                f"## {release} / {device}",
+                "",
+                f"Source SHA: `{source_sha or '<unavailable>'}`",
+                f"CI SHA: `{ci_sha}`",
+                f"Wheel version: `{wheel.get('wheel_version', '') or '<unavailable>'}`",
+                f"Wheel SHA256: `{wheel.get('wheel_sha256', '') or '<unavailable>'}`",
+                "",
+                "| Area | Tests | Failures | Errors | Skipped | Result |",
+                "|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        overall = "PASSED"
+        release_totals = dict(tests=0, failures=0, errors=0, skipped=0)
+        for area in selected_areas:
+            area_dir = results_root / release / device / area.name
+            status, totals = _nightly_area_result(area_dir)
+            if status != "PASSED":
+                overall = "FAILED"
+            values = {key: "-" for key in release_totals}
+            if totals is not None:
+                values = totals
+                for key in release_totals:
+                    release_totals[key] += totals[key]
+            lines.append(
+                f"| {area.name} | {values['tests']} | {values['failures']} | "
+                f"{values['errors']} | {values['skipped']} | {status} |"
+            )
+        if not selected_areas:
+            overall = "NO AREAS"
+        lines.extend(
+            [
+                f"| **Total** | **{release_totals['tests']}** | "
+                f"**{release_totals['failures']}** | **{release_totals['errors']}** | "
+                f"**{release_totals['skipped']}** | **{overall}** |",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def command_nightly_summary(args):
+    if args.output is None:
+        raise SelectionError("summary-nightly requires --output or GITHUB_STEP_SUMMARY")
+    needs = json.loads(os.environ["NEEDS_JSON"])
+    content = render_nightly_summary(
+        args.results_root, args.areas, args.device, args.ci_sha, needs
+    )
+    with args.output.open("a", encoding="utf-8") as stream:
+        stream.write(content)
+    return 0
+
+
 def summarize_results(results_dir, exit_code):
     """Combine JUnit and process status; empty collections never pass."""
     results_dir = Path(results_dir)
@@ -623,6 +735,7 @@ def parse_args(argv):
         default=os.environ.get("AREAS", ""),
         help="comma or space separated names; empty means all daily areas",
     )
+    select_parser.add_argument("--release", choices=SUPPORTED_RELEASES)
     select_parser.set_defaults(func=command_select)
 
     check_parser = sub.add_parser("check", help="validate registry and source layout")
@@ -654,6 +767,18 @@ def parse_args(argv):
     summary_parser.set_defaults(
         func=lambda args: summarize_results(args.results_dir, args.exit_code)
     )
+
+    nightly_summary_parser = sub.add_parser(
+        "summary-nightly", help="render one summary table per release"
+    )
+    nightly_summary_parser.add_argument("--results-root", required=True, type=Path)
+    nightly_summary_parser.add_argument("--areas", default=os.environ.get("AREAS", ""))
+    nightly_summary_parser.add_argument("--device", required=True)
+    nightly_summary_parser.add_argument("--ci-sha", required=True)
+    nightly_summary_parser.add_argument(
+        "--output", type=Path, default=os.environ.get("GITHUB_STEP_SUMMARY")
+    )
+    nightly_summary_parser.set_defaults(func=command_nightly_summary)
 
     list_parser = sub.add_parser("list", help="print the registry")
     list_parser.set_defaults(func=command_list)

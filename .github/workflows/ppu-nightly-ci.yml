@@ -126,8 +126,32 @@ jobs:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
 
-  nightly-finish:
+  publish-summary:
     needs: [resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]
+    if: always()
+    runs-on: k8s-runner-group-cpu-flytiger
+    container: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Publish one table per release
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+          AREAS: ${{ inputs.areas }}
+          DEVICE: ${{ inputs.device || 'OAM-810E' }}
+          RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
+        run: |
+          python3 -m pip install --quiet --break-system-packages regex
+          python3 scripts/ppu/ppu_ci_nightly.py summary-nightly \
+            --results-root "${RESULTS_ROOT}" --areas "${AREAS}" \
+            --device "${DEVICE}" --ci-sha "${GITHUB_SHA}"
+
+  nightly-finish:
+    needs: [publish-summary, resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -143,6 +167,9 @@ jobs:
           selected = os.environ["SELECTED"]
           if not selected:
               print("Release resolution did not succeed")
+              sys.exit(1)
+          if needs.get("publish-summary", {}).get("result") != "success":
+              print("Summary publication did not succeed")
               sys.exit(1)
           failed = []
           for release in selected.split(","):
