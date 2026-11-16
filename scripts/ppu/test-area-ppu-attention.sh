@@ -24,13 +24,118 @@ pytest() {
 }
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" ]]; then
-  # Run 41978966338: v0.26 PPU failures; keep other releases unchanged.
-  PYTEST_EXTRA+=(
-    --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[auto-0]"
-    --deselect "tests/v1/attention/test_mla_backends.py::test_mla_kv_cache_spec_uses_layer_cache_dtype[fp8_ds_mla-1]"
-    --deselect "tests/v1/attention/test_mla_noncausal.py::test_mla_cache_marker_is_preserved_and_cannot_be_mixed"
-  )
+  # Keep MLA cache metadata explicit and reject incompatible cache groups.
+  python3 - <<'PY'
+from pathlib import Path
+
+
+def replace_once(path, old, new):
+    path = Path(path)
+    text = path.read_text()
+    if new in text:
+        return
+    if text.count(old) != 1:
+        raise RuntimeError(f"MLA fix anchor missing or ambiguous: {path}")
+    path.write_text(text.replace(old, new, 1))
+
+
+replace_once(
+    "tests/v1/attention/test_mla_backends.py",
+    "    layer = SimpleNamespace(kv_cache_dtype=cache_dtype, head_size=576)\n",
+    '''    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=576,
+        non_causal_multi_token_decode=False,
+    )
+''',
+)
+replace_once(
+    "vllm/v1/core/kv_cache_utils.py",
+    '''    # property it can reconcile (e.g. MLA layers differing only in
+    # non_causal_multi_token_decode).
+''',
+    '''    # property it can reconcile (e.g. full attention layers differing only in
+    # sliding window / attention chunk size).
+''',
+)
+replace_once(
+    "vllm/v1/kv_cache_interface.py",
+    '''            "stride indexing."
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+''',
+    '''            "stride indexing."
+        )
+        non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
+        assert len(non_causal_mtd_set) == 1, (
+            "All attention layers in the same KV cache group must agree on "
+            "non-causal decode mode."
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+''',
+)
+replace_once(
+    "vllm/v1/kv_cache_interface.py",
+    '''            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
+''',
+    "            non_causal_multi_token_decode=non_causal_mtd_set.pop(),\n",
+)
+PY
 fi
+
+# FA4 is a capability query: unsupported versions must not abort collection or
+# engine initialization. Sync the installed wheel copy because this area runs
+# after ppu_ci_nightly_install_dependency.sh has installed it into REPO_ROOT.
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path("vllm/vllm_flash_attn/ppu/flash_attn_interface.py")
+installed = Path("vllm/vllm_flash_attn/flash_attn_interface.py")
+old = r'''def is_fa_version_supported(fa_version: int, device = None) -> bool:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[0]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[0]
+
+def fa_version_unsupported_reason(fa_version: int, device = None) \
+    -> Optional[str]:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[1]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[1]
+'''
+new = r'''def is_fa_version_supported(fa_version: int, device = None) -> bool:
+    # Callers probe newer versions (e.g. FA4 for mm-prefix support) as a
+    # capability query, so report unsupported versions instead of asserting.
+    if fa_version == 2:
+        return _is_fa2_supported(device)[0]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[0]
+    return False
+
+def fa_version_unsupported_reason(fa_version: int, device = None) \
+    -> Optional[str]:
+    if fa_version == 2:
+        return _is_fa2_supported(device)[1]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[1]
+    return f"FA{fa_version} is not supported on PPU"
+'''
+text = source.read_text()
+if new not in text:
+    if text.count(old) != 1:
+        raise RuntimeError(f"FA capability-probe anchor missing: {source}")
+    source.write_text(text.replace(old, new, 1))
+if not installed.is_file():
+    raise RuntimeError(f"installed FlashAttention interface missing: {installed}")
+installed.write_text(source.read_text())
+PY
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
 TMP_JUNIT="/tmp/ppu-attention-junit"
@@ -57,18 +162,6 @@ if [[ -f tests/v1/attention/test_indexer_native_next_n.py ]]; then
     '--deselect=tests/v1/attention/test_indexer_native_next_n.py::test_native_decode_gate_per_architecture[9-expected_native0]'
   )
 fi
-if [[ -f tests/v1/attention/test_mm_prefix.py ]]; then
-  # Run 40838662055: test_mm_prefix.py resolves its skipif at import time through
-  # is_fa_version_supported(4), and the FlashAttention port the wheel bundles still
-  # asserts the version is 2 or 3, so the module raises during collection instead of
-  # skipping and interrupts the whole run. Its FA4 cases need SM100 and cannot run on
-  # PPU anyway; the metadata cases in the same file are lost with them until the port
-  # answers False for FA4.
-  ATTN_SINGLE_ARGS+=(
-    '--ignore=tests/v1/attention/test_mm_prefix.py'
-  )
-fi
-
 # multi: none (tests/v1/attention/ has no @multi_gpu_test)
 
 # ------------------------------------------------------------------------------

@@ -205,6 +205,26 @@ jobs:
           python3 -m pip download --no-deps pytest pytest-asyncio tblib pytest-shard pyyaml \
             -d source/dist/toolchain \
             -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+      - name: Stage EXAONE processor metadata
+        if: inputs.release == 'v0.28.0'
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          for endpoint in https://huggingface.co https://hf-mirror.com; do
+            echo "[hf] fetching EXAONE processor metadata from ${endpoint}"
+            if HF_ENDPOINT="${endpoint}" HF_HUB_OFFLINE=0 python3 - <<'PY'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="LGAI-EXAONE/EXAONE-4.5-33B",
+              local_dir="source/dist/hf-models/LGAI-EXAONE/EXAONE-4.5-33B",
+              allow_patterns=["*.json", "*.model", "*.txt", "*.jinja", "*.py"],
+          )
+          PY
+            then
+              break
+            fi
+          done
+          test -f source/dist/hf-models/LGAI-EXAONE/EXAONE-4.5-33B/config.json
       - name: Upload wheel artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -213,6 +233,7 @@ jobs:
             source/dist/*.whl
             source/dist/manifest.json
             source/dist/toolchain/*.whl
+            source/dist/hf-models/**
           if-no-files-found: error
 
   select-areas:
@@ -283,6 +304,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CI_SHA: ${{ inputs.ci_sha }}
+          RELEASE: ${{ inputs.release }}
         run: |
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git -C ci rev-parse HEAD)" = "$CI_SHA"

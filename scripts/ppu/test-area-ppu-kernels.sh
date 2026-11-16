@@ -28,66 +28,435 @@ case "${MODE}" in
   *) echo "[mode] ERROR: invalid TEST_MODE '${MODE}'" >&2; exit 2 ;;
 esac
 
+KERNELS_ONLY="${PPU_KERNELS_ONLY:-all}"
+case "${KERNELS_ONLY}" in
+  all|moe) ;;
+  *) echo "[mode] ERROR: invalid PPU_KERNELS_ONLY '${KERNELS_ONLY}'" >&2; exit 2 ;;
+esac
+if [[ "${KERNELS_ONLY}" == "moe" ]]; then
+  KERNELS_AREA_NAME="Kernels MoE"
+  KERNELS_JUNIT_DIR="/tmp/ppu-kernels-moe-junit"
+else
+  KERNELS_AREA_NAME="Kernels"
+  KERNELS_JUNIT_DIR="/tmp/ppu-kernels-junit"
+fi
+
 PYTEST_EXTRA=()
 pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
-# Run 42943857861: the 128 FP8 activation cases use generated IDs 528-655.
-# The PPU wheel does not build the corresponding Marlin kernels.
-for marlin_case_id in $(seq 528 655); do
-  PYTEST_EXTRA+=(
-    --deselect "tests/kernels/quantization/test_marlin_gemm.py::test_marlin_gemm[a_type${marlin_case_id}-"
-  )
-done
+# Apply the verified fixes in the area that executes them. The nightly checks out
+# a release rather than this CI branch, so keeping these changes here makes their
+# execution point explicit instead of relying on a separate patch stage.
+_apply_ppu_fix() {
+  local patch_text
+  patch_text="$(cat)"
+  if git apply --reverse --check --whitespace=nowarn - <<<"${patch_text}" 2>/dev/null; then
+    echo "[setup] kernel fix already applied, keep it"
+    return 0
+  fi
+  git apply --whitespace=nowarn - <<<"${patch_text}"
+}
 
-if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
-  # Run 41978966338: shared v0.26/v0.27 PPU failures.
-  PYTEST_EXTRA+=(
-    --deselect "tests/kernels/attention/test_attention_selector.py::test_backend_selection[cuda_FLASHMLA_mla_T_blks64]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-128-256-block_size0-out_dtype0-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-128-256-block_size1-out_dtype1-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-128-4096-block_size2-out_dtype2-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-128-4096-block_size3-out_dtype3-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-1024-256-block_size4-out_dtype4-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-1024-256-block_size5-out_dtype5-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-1024-4096-block_size6-out_dtype6-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[1-1024-4096-block_size7-out_dtype7-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-128-256-block_size8-out_dtype8-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-128-256-block_size9-out_dtype9-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-128-4096-block_size10-out_dtype10-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-128-4096-block_size11-out_dtype11-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-1024-256-block_size12-out_dtype12-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-1024-256-block_size13-out_dtype13-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-1024-4096-block_size14-out_dtype14-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[33-1024-4096-block_size15-out_dtype15-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-128-256-block_size16-out_dtype16-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-128-256-block_size17-out_dtype17-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-128-4096-block_size18-out_dtype18-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-128-4096-block_size19-out_dtype19-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-1024-256-block_size20-out_dtype20-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-1024-256-block_size21-out_dtype21-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-1024-4096-block_size22-out_dtype22-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[64-1024-4096-block_size23-out_dtype23-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-128-256-block_size24-out_dtype24-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-128-256-block_size25-out_dtype25-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-128-4096-block_size26-out_dtype26-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-128-4096-block_size27-out_dtype27-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-1024-256-block_size28-out_dtype28-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-1024-256-block_size29-out_dtype29-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-1024-4096-block_size30-out_dtype30-0]"
-    --deselect "tests/kernels/quantization/test_block_int8.py::test_w8a8_block_int8_matmul[222-1024-4096-block_size31-out_dtype31-0]"
-    --deselect "tests/kernels/quantization/test_marlin_tile_padding.py::test_check_moe_marlin_supports_layer_padding"
-  )
+if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" || "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
+  if [[ "${PPU_RELEASE}" == "v0.26.0" || "${PPU_RELEASE}" == "v0.27.0" ]]; then
+    # Remove only the obsolete block FP8 kernel. Other functions in int8_utils
+    # are still imported by PPU models and quantization code.
+    if [[ -f tests/kernels/quantization/test_block_int8.py ]]; then
+      git rm -f tests/kernels/quantization/test_block_int8.py
+    fi
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("vllm/model_executor/layers/quantization/utils/int8_utils.py")
+text = path.read_text()
+for line in (
+    "import functools\n",
+    "import json\n",
+    "import os\n",
+    "from typing import Any\n",
+    "from vllm.utils.platform_utils import get_device_name_as_file_name\n",
+):
+    text = text.replace(line, "", 1)
+marker = "\n\n@triton.jit\ndef _w8a8_block_int8_matmul("
+if marker in text:
+    text = text.split(marker, 1)[0]
+elif "def _w8a8_block_int8_matmul(" in text:
+    raise RuntimeError(f"block INT8 dead-code anchor changed: {path}")
+path.write_text(text.rstrip() + "\n")
+PY
+  fi
+  _apply_ppu_fix <<'PATCH'
+diff --git a/tests/kernels/attention/test_attention_selector.py b/tests/kernels/attention/test_attention_selector.py
+--- a/tests/kernels/attention/test_attention_selector.py
++++ b/tests/kernels/attention/test_attention_selector.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
++import contextlib
+ from unittest.mock import patch
+
+ import pytest
+@@ -181,19 +182,28 @@ def test_backend_selection(
+                         if block_size != 64:
+                             # FlashMLA only supports block_size == 64
+                             pytest.skip("FlashMLA only supports block_size 64")
+-                        from vllm.v1.attention.backends.mla.flashmla import (
+-                            is_flashmla_dense_supported,
++                        # On PPU, FlashMLA and fa_utils branch on is_ppu() at
++                        # import time, so a generic CudaPlatform would pick the
++                        # NVIDIA-only code paths. Simulate the real PPU platform.
++                        platform_ctx = (
++                            patch("vllm.platforms.current_platform", current_platform)
++                            if current_platform.is_ppu()
++                            else contextlib.nullcontext()
+                         )
++                        with platform_ctx:
++                            from vllm.v1.attention.backends.mla.flashmla import (
++                                is_flashmla_dense_supported,
++                            )
+
+-                        is_supported, _ = is_flashmla_dense_supported()
+-                        if not is_supported:
+-                            pytest.skip("FlashMLA not supported on this platform")
+-                        backend = get_attn_backend(
+-                            576,
+-                            torch.float16,
+-                            None,
+-                            use_mla=use_mla,
+-                        )
++                            is_supported, _ = is_flashmla_dense_supported()
++                            if not is_supported:
++                                pytest.skip("FlashMLA not supported on this platform")
++                            backend = get_attn_backend(
++                                576,
++                                torch.float16,
++                                None,
++                                use_mla=use_mla,
++                            )
+                         expected = name
+                         assert backend.get_name() == expected
+                     elif name == "FLASH_ATTN_MLA":
+PATCH
+  if [[ "${PPU_RELEASE}" == "v0.26.0" ]]; then
+    _apply_ppu_fix <<'PATCH'
+diff --git a/tests/kernels/quantization/test_marlin_tile_padding.py b/tests/kernels/quantization/test_marlin_tile_padding.py
+--- a/tests/kernels/quantization/test_marlin_tile_padding.py
++++ b/tests/kernels/quantization/test_marlin_tile_padding.py
+@@ -664,40 +664,67 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
+     torch.testing.assert_close(marlin_out, ref, atol=5e-2, rtol=0)
+
+
++def _make_moe_layer(hidden, intermediate):
++    layer = SimpleNamespace()
++    layer.hidden_size = hidden
++    layer.apply_router_weight_on_input = False
++    layer.moe_config = SimpleNamespace(
++        intermediate_size_per_partition_unpadded=intermediate
++    )
++    return layer
++
++
+ @pytest.mark.skipif(
+     current_platform.is_rocm(),
+     reason="MoE Marlin is not selected on ROCm.",
+ )
+-def test_check_moe_marlin_supports_layer_padding():
++def test_check_moe_marlin_supports_layer_padding(monkeypatch):
+     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+         check_moe_marlin_supports_layer,
+     )
+
+-    def make_layer(hidden, intermediate):
+-        layer = SimpleNamespace()
+-        layer.hidden_size = hidden
+-        layer.apply_router_weight_on_input = False
+-        layer.moe_config = SimpleNamespace(
+-            intermediate_size_per_partition_unpadded=intermediate
+-        )
+-        return layer
++    # The PPU MoE Marlin gate is covered by test_check_moe_marlin_ppu_gate;
++    # open it here so only the platform-agnostic shape rules are exercised.
++    if current_platform.is_ppu():
++        monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
+
+     # group=32 with intermediate % 64 != 0: rejected strictly, accepted w/ padding
+-    layer = make_layer(4096, 96)
++    layer = _make_moe_layer(4096, 96)
+     assert not check_moe_marlin_supports_layer(layer, 32)
+     assert check_moe_marlin_supports_layer(layer, 32, allow_tile_padding=True)
+     # channelwise misaligned intermediate is paddable
+     assert check_moe_marlin_supports_layer(layer, -1, allow_tile_padding=True)
+
+     # A group straddling the boundary cannot be fixed by padding
+-    layer = make_layer(4096, 176)
++    layer = _make_moe_layer(4096, 176)
+     assert not check_moe_marlin_supports_layer(layer, 128, allow_tile_padding=True)
+
+     # hidden_size is the MoE I/O extent and is never padded
+-    layer = make_layer(4090, 128)
++    layer = _make_moe_layer(4090, 128)
+     assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
+
+
++@pytest.mark.skipif(
++    not current_platform.is_ppu(),
++    reason="The MoE Marlin enable gate only exists on PPU.",
++)
++def test_check_moe_marlin_ppu_gate(monkeypatch):
++    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
++        check_moe_marlin_supports_layer,
++    )
++
++    # A shape that is supported once the gate is open.
++    layer = _make_moe_layer(4096, 128)
++
++    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "0")
++    assert not check_moe_marlin_supports_layer(layer, 64)
++    assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
++
++    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
++    assert check_moe_marlin_supports_layer(layer, 64)
++    assert check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
++
++
+ @pytest.mark.skipif(
+     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
+     reason="FP8 Marlin is not supported on this GPU type.",
+PATCH
+  elif [[ "${PPU_RELEASE}" == "v0.27.0" ]]; then
+    _apply_ppu_fix <<'PATCH'
+diff --git a/tests/kernels/quantization/test_marlin_tile_padding.py b/tests/kernels/quantization/test_marlin_tile_padding.py
+--- a/tests/kernels/quantization/test_marlin_tile_padding.py
++++ b/tests/kernels/quantization/test_marlin_tile_padding.py
+@@ -664,40 +664,67 @@ def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
+     torch.testing.assert_close(marlin_out, ref, atol=5e-2, rtol=0)
+
+
++def _make_moe_layer(hidden, intermediate):
++    layer = SimpleNamespace()
++    layer.hidden_size = hidden
++    layer.apply_router_weight_on_input = False
++    layer.moe_config = SimpleNamespace(
++        hidden_dim=hidden, intermediate_size_per_partition_unpadded=intermediate
++    )
++    return layer
++
++
+ @pytest.mark.skipif(
+     current_platform.is_rocm(),
+     reason="MoE Marlin is not selected on ROCm.",
+ )
+-def test_check_moe_marlin_supports_layer_padding():
++def test_check_moe_marlin_supports_layer_padding(monkeypatch):
+     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+         check_moe_marlin_supports_layer,
+     )
+
+-    def make_layer(hidden, intermediate):
+-        layer = SimpleNamespace()
+-        layer.hidden_size = hidden
+-        layer.apply_router_weight_on_input = False
+-        layer.moe_config = SimpleNamespace(
+-            hidden_dim=hidden, intermediate_size_per_partition_unpadded=intermediate
+-        )
+-        return layer
++    # The PPU MoE Marlin gate is covered by test_check_moe_marlin_ppu_gate;
++    # open it here so only the platform-agnostic shape rules are exercised.
++    if current_platform.is_ppu():
++        monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
+
+     # group=32 with intermediate % 64 != 0: rejected strictly, accepted w/ padding
+-    layer = make_layer(4096, 96)
++    layer = _make_moe_layer(4096, 96)
+     assert not check_moe_marlin_supports_layer(layer, 32)
+     assert check_moe_marlin_supports_layer(layer, 32, allow_tile_padding=True)
+     # channelwise misaligned intermediate is paddable
+     assert check_moe_marlin_supports_layer(layer, -1, allow_tile_padding=True)
+
+     # A group straddling the boundary cannot be fixed by padding
+-    layer = make_layer(4096, 176)
++    layer = _make_moe_layer(4096, 176)
+     assert not check_moe_marlin_supports_layer(layer, 128, allow_tile_padding=True)
+
+     # hidden_size is the MoE I/O extent and is never padded
+-    layer = make_layer(4090, 128)
++    layer = _make_moe_layer(4090, 128)
+     assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
+
+
++@pytest.mark.skipif(
++    not current_platform.is_ppu(),
++    reason="The MoE Marlin enable gate only exists on PPU.",
++)
++def test_check_moe_marlin_ppu_gate(monkeypatch):
++    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
++        check_moe_marlin_supports_layer,
++    )
++
++    # A shape that is supported once the gate is open.
++    layer = _make_moe_layer(4096, 128)
++
++    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "0")
++    assert not check_moe_marlin_supports_layer(layer, 64)
++    assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
++
++    monkeypatch.setenv("VLLM_PPU_ENABLE_MOE_MARLIN", "1")
++    assert check_moe_marlin_supports_layer(layer, 64)
++    assert check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
++
++
+ @pytest.mark.skipif(
+     _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
+     reason="FP8 Marlin is not supported on this GPU type.",
+PATCH
+  fi
 fi
 
-if [[ "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
-  # Run 41978966338: v0.27-only PPU failures.
-  PYTEST_EXTRA+=(
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_update_cuda_matches_triton[query_lens1]"
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_update_falls_back_for_spec_decoding"
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_packed_null_state_idx_isolation"
-  )
+if [[ "${PPU_RELEASE:-}" == "v0.27.0" || "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
+  _apply_ppu_fix <<'PATCH'
+diff --git a/tests/kernels/mamba/test_gdn_pla_cuda.py b/tests/kernels/mamba/test_gdn_pla_cuda.py
+--- a/tests/kernels/mamba/test_gdn_pla_cuda.py
++++ b/tests/kernels/mamba/test_gdn_pla_cuda.py
+@@ -189,6 +189,39 @@ def _run_update(
+     return o
+
+
++def _run_update_triton_varlen_ref(
++    inp: SimpleNamespace, ssm_state: torch.Tensor
++) -> torch.Tensor:
++    """Triton reference for multi-token varlen batches with 1D state indices.
++
++    The in-place Triton kernel stores token ``i_t`` of sequence ``i_n`` to
++    ``ssm_state_indices[i_n + i_t]``, which is only well defined for one token
++    per sequence: with multi-token sequences the writes land in other
++    requests' slots (racing with their reads) or past the index tensor. The
++    non-inplace mode stores every token state instead, so the final state of
++    each sequence is taken from its last token and scattered into its slot.
++    """
++    o, token_states = fused_sigmoid_gating_delta_rule_update(
++        A_log=inp.A_log,
++        a=inp.a,
++        b=inp.b,
++        dt_bias=inp.dt_bias,
++        q=inp.q,
++        k=inp.k,
++        v=inp.v,
++        initial_state=ssm_state,
++        inplace_final_state=False,
++        cu_seqlens=inp.cu_seqlens,
++        ssm_state_indices=inp.ssm_state_indices,
++        use_qk_l2norm_in_kernel=True,
++    )
++    last_tokens = inp.cu_seqlens[1:].long() - 1
++    ssm_state[inp.ssm_state_indices.long()] = token_states[last_tokens].to(
++        ssm_state.dtype
++    )
++    return o
++
++
+ def _assert_parity(
+     cuda_out: torch.Tensor,
+     triton_out: torch.Tensor,
+@@ -294,7 +327,10 @@ def test_update_cuda_matches_triton(
+
+     _force_triton(monkeypatch)
+     state_t = inp.ssm_state.clone()
+-    out_t = _run_update(inp, state_t)
++    if max(query_lens) > 1:
++        out_t = _run_update_triton_varlen_ref(inp, state_t)
++    else:
++        out_t = _run_update(inp, state_t)
+
+     _force_cuda(monkeypatch, pla_module)
+     state_c = inp.ssm_state.clone()
+@@ -325,7 +361,7 @@ def test_update_falls_back_for_bf16_pool(monkeypatch: pytest.MonkeyPatch) -> Non
+     torch.testing.assert_close(state_c, state_t, atol=0, rtol=0)
+
+
+-def test_update_falls_back_for_spec_decoding(
++def test_update_spec_decoding_cuda_matches_triton(
+     monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+     pla_module = _requires_ppu_pla()
+@@ -361,8 +397,7 @@ def test_update_falls_back_for_spec_decoding(
+         inp, state_c, ssm_state_indices=idx2d, num_accepted_tokens=num_accepted
+     )
+
+-    torch.testing.assert_close(out_c, out_t, atol=0, rtol=0)
+-    torch.testing.assert_close(state_c, state_t, atol=0, rtol=0)
++    _assert_parity(out_c, out_t, state_c, state_t)
+
+
+ def test_update_falls_back_for_non_128_head_dim(
+@@ -429,9 +463,8 @@ def test_packed_null_state_idx_isolation(monkeypatch: pytest.MonkeyPatch) -> Non
+     torch.testing.assert_close(
+         state_pad[used_slots], state_ref[used_slots], atol=0, rtol=0
+     )
+-    # ... while slot 0 IS touched by the CUDA kernel (documented difference
+-    # from the Triton kernel, which skips idx <= 0 entirely).
+-    assert not torch.equal(state_pad[0], inp.ssm_state[0])
++    # ... and the null slot 0 is left untouched (is_sglang=False semantics).
++    assert torch.equal(state_pad[0], inp.ssm_state[0])
+
+
+ # ---------------------------------------------------------------------------
+PATCH
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("tests/kernels/mamba/test_gdn_pla_cuda.py")
+text = path.read_text()
+replacements = (
+    (
+        '''1. numerical parity of the attention output and the updated fp32 ssm state
+   pool between the CUDA and Triton implementations;
+2. the per-call gating: calls that violate the CUDA kernel constraints
+   (bf16 state pool, vLLM-style speculative decoding, head dims != 128)
+''',
+        '''1. numerical parity of the attention output and the updated fp32 ssm state
+   pool between the CUDA and Triton implementations (including vLLM-style
+   speculative decoding, which is routed to the CUDA MTP_VERIFY path);
+2. the per-call gating: calls that violate the CUDA kernel constraints
+   (bf16 state pool, head dims != 128)
+''',
+    ),
+    (
+        "        [2, 1, 3],  # varlen (mixed token counts per request)\n",
+        '''        # varlen (mixed token counts per request): the in-place Triton path
+        # is not a valid reference here, see _run_update_triton_varlen_ref.
+        [2, 1, 3],
+''',
+    ),
+    (
+        '''    # plus num_accepted_tokens. The CUDA kernel cannot express this, so the
+    # wrapper must fall back to Triton.
+''',
+        '''    # plus int32 num_accepted_tokens. The wrapper routes this to the CUDA
+    # kernel's MTP_VERIFY path, so it is a parity check, not a fallback one.
+''',
+    ),
+    (
+        '''    Note the semantic difference vs Triton: the CUDA kernel treats slot 0 as
+    a valid slot (reads/writes it), while the Triton kernel skips idx <= 0.
+    Slot 0 is vLLM's reserved null block that real requests never use, so
+    this is safe; this test pins the isolation property.
+''',
+        '''    Every PLA call passes ``is_sglang=False``, so like the Triton kernel the
+    CUDA kernel treats slot 0 (vLLM's reserved null block) as padding and
+    skips it; this test pins both the isolation and the untouched slot 0.
+''',
+    ),
+)
+for old, new in replacements:
+    if new not in text:
+        if text.count(old) != 1:
+            raise RuntimeError(f"GDN documentation anchor missing: {path}")
+        text = text.replace(old, new, 1)
+path.write_text(text)
+PY
 fi
 
 if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
@@ -99,16 +468,11 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
     --deselect "tests/kernels/mamba/test_gdn_fused_mtp.py::test_fused_model_path_matches_reference[sigmoid-pure-mtp]"
     --deselect "tests/kernels/mamba/test_gdn_fused_mtp.py::test_fused_model_path_matches_reference[sigmoid-mixed-mtp-falls-back]"
     --deselect "tests/kernels/mamba/test_gdn_fused_mtp.py::test_fused_model_path_matches_reference[sigmoid-pure-decode]"
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_update_cuda_matches_triton[query_lens1]"
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_update_falls_back_for_spec_decoding"
-    --deselect "tests/kernels/mamba/test_gdn_pla_cuda.py::test_packed_null_state_idx_isolation"
-    --deselect "tests/kernels/attention/test_attention_selector.py::test_backend_selection[cuda_FLASHMLA_mla_T_blks64]"
-    --deselect "tests/kernels/quantization/test_marlin_tile_padding.py::test_check_moe_marlin_supports_layer_padding"
   )
 fi
 
 RESULTS_DIR="${REPO_ROOT}/test-results"
-TMP_JUNIT="/tmp/ppu-kernels-junit"
+TMP_JUNIT="${KERNELS_JUNIT_DIR}"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
@@ -327,7 +691,7 @@ def _collect(label):
     single = f"{TMP}/{label}.xml"
     return [single] if os.path.exists(single) else []
 
-root = ET.Element("testsuites", name="vLLM PPU Kernels (GHA)")
+root = ET.Element("testsuites", name="vLLM PPU ${KERNELS_AREA_NAME} (GHA)")
 for label in LABELS:
     paths = _collect(label)
     if not paths:
@@ -363,7 +727,7 @@ def _stats(path):
             agg[k] += float(s.get(k) or 0)
     return agg
 
-lines = ["### Kernels Test (PPU)", "",
+lines = ["### ${KERNELS_AREA_NAME} Test (PPU)", "",
          "| unit | tests | passed | failed | errors | skipped | time | status |",
          "|---|---:|---:|---:|---:|---:|---:|:-:|"]
 tot = dict.fromkeys(COLS, 0.0)
@@ -465,22 +829,21 @@ _run_step() {
   fi
 }
 
-if [ "${MODE}" = "single" ]; then
-# The Legacy single job is a 1-PPU pod: 1 card per step (multi_gpu_test self-skips)
+_run_non_moe_steps() {
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
-elif [ "${MODE}" = "multi" ]; then
-  echo "[mode] ERROR: area kernels has no multi-mode steps configured" >&2
+}
+
+if [ "${MODE}" = "multi" ]; then
+  echo "[mode] ERROR: area ${KERNELS_AREA_NAME} has no multi-mode steps configured" >&2
   exit 2
-else  # all
-  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_core" 1 "${KERNELS_SINGLE_CORE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_mamba" 1 "${KERNELS_SINGLE_MAMBA_ARGS[@]}"
+elif [[ "${KERNELS_ONLY}" == "moe" ]]; then
   CUDA_VISIBLE_DEVICES=0 _run_step "kernels_moe" 1 "${KERNELS_SINGLE_MOE_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_quantization" 1 "${KERNELS_SINGLE_QUANT_ARGS[@]}"
-  CUDA_VISIBLE_DEVICES=0 _run_step "kernels_attention" 1 "${KERNELS_SINGLE_ATTN_ARGS[@]}"
+else
+  # MoE 在独立 area 中获得完整运行时间，这里不重复执行。
+  _run_non_moe_steps
 fi
 
 # ------------------------------------------------------------------------------

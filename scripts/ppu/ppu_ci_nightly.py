@@ -3,7 +3,7 @@
 """Daily PPU area registry for the maintained release branches.
 
 The workflow supplies a release checkout through ``--source-root``. The same
-24 areas run on every release every day; an explicit area list is only for
+area set runs on every release every day; an explicit area list is only for
 manual diagnosis. Test source paths are checked before building or scheduling
 pods so a release layout change cannot turn into an empty successful test.
 """
@@ -71,6 +71,7 @@ AREAS = (
     Area("spec-decode", nproc=1, run_timeout=90),
     Area("engine", nproc=1, run_timeout=290),
     Area("kernels", nproc=1, run_timeout=350),
+    Area("kernels-moe", nproc=1, run_timeout=350),
     Area("models-language", nproc=2, run_timeout=290),
     Area("benchmarks", nproc=1, run_timeout=90),
     Area("compile", nproc=2, run_timeout=90),

@@ -116,6 +116,20 @@ PPU_STACK_BEFORE="$(python3 -c 'import importlib.metadata as m; print(" ".join(f
 echo "[deps] preserve image ${PPU_STACK_BEFORE}"
 
 echo "========== [deps] resolve ${PPU_RELEASE} requirements =========="
+if [[ "${PPU_RELEASE}" == "v0.28.0" ]]; then
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("requirements/ppu.txt")
+text = path.read_text()
+old = "apache-tvm-ffi==0.1.11\nxgrammar==0.2.9\n"
+new = "apache-tvm-ffi==0.1.9\n"
+if new not in text:
+    if text.count(old) != 1:
+        raise RuntimeError(f"v0.28 requirements anchor missing: {path}")
+    path.write_text(text.replace(old, new, 1))
+PY
+fi
 # pip keeps installed packages that satisfy the release's own constraints. No
 # package table from another release is applied to this installation.
 _pip_retry -r requirements/ppu.txt
@@ -129,6 +143,42 @@ _pip_retry pytest pytest-asyncio tblib pytest-shard pyyaml
 # "numpy.core.multiarray failed to import" raised inside the image scipy. Move those two
 # forward together with numpy rather than holding numpy back.
 _pip_retry --upgrade scipy scikit-learn
+
+# The image's leftover numba uses the NumPy 1.x C ABI. The private index serves a
+# platform wrapper with a local version tag, so install the official cp312 wheel
+# explicitly from the public mirror and remove the wrapper first.
+python3 -m pip uninstall -y numba >/dev/null 2>&1 || true
+n=1
+while ! ${PIP_INSTALL} --upgrade "numba == 0.65.0" -i "https://mirrors.aliyun.com/pypi/simple/"; do
+    if [[ ${n} -ge 8 ]]; then
+        echo "[deps] WARNING: numba installation failed; test_ngram collection will fail" >&2
+        break
+    fi
+    wait_s=$(( n * 30 > 90 ? 90 : n * 30 ))
+    wait_s=$(( wait_s + RANDOM % 30 ))
+    echo "[deps] retry ${n}/8 in ${wait_s}s: numba == 0.65.0 (aliyun)" >&2
+    sleep "${wait_s}"
+    n=$(( n + 1 ))
+done
+python3 -c "import numba; print(f'[verify] numba {numba.__version__}')" 2>/dev/null \
+  || echo "[verify] numba NOT importable - test_ngram collection will fail" >&2
+
+# No torchaudio build matches the image's torch 2.13. Use the newest verified
+# importable 2.11 build without dependencies so pip cannot replace the PPU torch.
+if python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio already importable, keep it"
+elif ${PIP_INSTALL} --no-deps --force-reinstall "torchaudio == 2.11.0" -i "${PPU_PIP_INDEX}" \
+    && python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio == 2.11.0 (PPU) installed and importable"
+elif ${PIP_INSTALL} --no-deps --force-reinstall "torchaudio == 2.11.1" -i "https://mirrors.aliyun.com/pypi/simple/" \
+    && python3 -c "import torchaudio" 2>/dev/null; then
+    echo "[deps] torchaudio == 2.11.1 (aliyun) installed and importable"
+else
+    echo "[deps] WARNING: torchaudio install/import failed; MiniCPM-o processing will fail" >&2
+fi
+python3 -c "import torch, torchaudio; print(f'[verify] torch {torch.__version__}, torchaudio {torchaudio.__version__}')" 2>/dev/null \
+  || echo "[verify] torchaudio NOT importable - MiniCPM-o processing will fail" >&2
+
 # Diagnostic only: the remaining image packages are not pinned against this numpy either, so
 # print the mismatches instead of letting the next one surface as an unrelated import error.
 python3 -m pip check || echo "[deps] WARNING: pip check reports unsatisfied requirements" >&2

@@ -25,19 +25,61 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
-if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
-  # Run 41978966338: collection fails before any test in this pytest step runs.
-  PYTEST_EXTRA+=(
-    --ignore=tests/v1/spec_decode/test_ngram.py
-  )
-fi
-
 if [[ "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
+  # These tests touch CUDA in children, so forking an initialized parent is invalid.
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("tests/utils_/test_gpu_sync_debug.py")
+text = path.read_text()
+old = "@create_new_process_for_each_test()"
+new = "@create_new_process_for_each_test(\"spawn\")"
+if text.count(new) != 2:
+    if text.count(old) != 2:
+        raise RuntimeError(f"expected two GPU-sync process decorators: {path}")
+    text = text.replace(old, new)
+comment = '''# The tests touch CUDA in the child, and earlier tests in the same pytest
+# process may already have initialized CUDA in the parent, which makes a
+# forked child fail with "Cannot re-initialize CUDA in forked subprocess".
+# Spawn a fresh interpreter instead.
+'''
+if comment not in text:
+    anchor = "pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason=\"requires CUDA\")\n"
+    if text.count(anchor) != 1:
+        raise RuntimeError(f"GPU-sync comment anchor missing: {path}")
+    text = text.replace(anchor, anchor + "\n" + comment, 1)
+path.write_text(text)
+
+path = Path("vllm/transformers_utils/repo_utils.py")
+text = path.read_text()
+old = '''        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error("%s: %s", log_msg, e)
+                raise
+            logger.error(
+                "%s: %s, retrying %d of %d", log_msg, e, attempt + 1, max_retries
+            )
+'''
+new = '''        except Exception as e:
+            # Log str(e), not the exception: a LogRecord kept by a capturing
+            # handler (e.g. pytest's log capture) would otherwise pin the
+            # traceback and every caller frame's locals.
+            err = str(e)
+            if attempt == max_retries - 1:
+                logger.error("%s: %s", log_msg, err)
+                raise
+            logger.error(
+                "%s: %s, retrying %d of %d", log_msg, err, attempt + 1, max_retries
+            )
+'''
+if new not in text:
+    if old not in text:
+        raise RuntimeError(f"retry logging anchor missing: {path}")
+    text = text.replace(old, new, 1)
+path.write_text(text)
+PY
   # Run 41978966338: v0.27 PPU failures; keep other releases unchanged.
   PYTEST_EXTRA+=(
-    --deselect "tests/utils_/test_gpu_sync_debug.py::test_with_env_set[warn]"
-    --deselect "tests/utils_/test_gpu_sync_debug.py::test_with_env_set[error]"
-    --deselect "tests/utils_/test_gpu_sync_debug.py::test_without_env_set"
     --deselect "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-False-cuda:0-0-4-256-64-1-1024-3-False]"
     --deselect "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-False-cuda:0-0-4-256-64-1-1024-3-True]"
     --deselect "tests/v1/kv_offload/cpu/test_gpu_worker.py::test_transfer[True-False-cuda:0-0-4-256-64-1-512-3-False]"
@@ -61,7 +103,6 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
   # Run 40843713842: v0.28 PPU failures; keep other releases unchanged.
   PYTEST_EXTRA+=(
     --deselect "tests/v1/worker/test_mamba_utils.py::test_stage_postprocess_inputs_to_gpu_fills_pinned_views"
-    --ignore=tests/v1/spec_decode/test_ngram.py
     --deselect "tests/utils_/test_gpu_sync_debug.py::test_with_env_set[warn]"
     --deselect "tests/utils_/test_gpu_sync_debug.py::test_with_env_set[error]"
     --deselect "tests/utils_/test_gpu_sync_debug.py::test_other_threads_are_not_policed"

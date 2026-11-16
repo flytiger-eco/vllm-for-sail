@@ -29,12 +29,61 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
+# mm-prefix initialization probes FA4. Return unsupported instead of raising an
+# assertion, and update the wheel copy installed into REPO_ROOT as well as the
+# PPU source overlay so the test process imports the fixed implementation.
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path("vllm/vllm_flash_attn/ppu/flash_attn_interface.py")
+installed = Path("vllm/vllm_flash_attn/flash_attn_interface.py")
+old = r'''def is_fa_version_supported(fa_version: int, device = None) -> bool:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[0]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[0]
+
+def fa_version_unsupported_reason(fa_version: int, device = None) \
+    -> Optional[str]:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[1]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[1]
+'''
+new = r'''def is_fa_version_supported(fa_version: int, device = None) -> bool:
+    # Callers probe newer versions (e.g. FA4 for mm-prefix support) as a
+    # capability query, so report unsupported versions instead of asserting.
+    if fa_version == 2:
+        return _is_fa2_supported(device)[0]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[0]
+    return False
+
+def fa_version_unsupported_reason(fa_version: int, device = None) \
+    -> Optional[str]:
+    if fa_version == 2:
+        return _is_fa2_supported(device)[1]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[1]
+    return f"FA{fa_version} is not supported on PPU"
+'''
+text = source.read_text()
+if new not in text:
+    if text.count(old) != 1:
+        raise RuntimeError(f"FA capability-probe anchor missing: {source}")
+    source.write_text(text.replace(old, new, 1))
+if not installed.is_file():
+    raise RuntimeError(f"installed FlashAttention interface missing: {installed}")
+installed.write_text(source.read_text())
+PY
+
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
   # Run 41379000962: shared v0.26/v0.27 generation failures.
   # The processing step is skipped below because every test_tensor_schema case
   # failed again in run 41978966338 (108/108 and 110/110).
   PYTEST_EXTRA+=(
-    --deselect "tests/models/multimodal/generation/test_mm_prefix_lm.py::test_mm_prefix_lm_e2e"
     --deselect "tests/models/multimodal/generation/test_moss_audio.py::test_moss_audio_generation_smoke"
     --deselect "tests/models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_image[qwen3_vl]"
     --deselect "tests/models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_image[internvl]"
@@ -60,7 +109,6 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
   PYTEST_EXTRA+=(
     --deselect "tests/models/multimodal/generation/test_gemma_ragged_audio.py::test_variable_length_audio_batching[8-Gemma3nForConditionalGeneration]"
     --deselect "tests/models/multimodal/generation/test_gemma_ragged_audio.py::test_variable_length_audio_batching[8-Gemma4ForConditionalGeneration]"
-    --deselect "tests/models/multimodal/generation/test_mm_prefix_lm.py::test_mm_prefix_lm_e2e"
     --deselect "tests/models/multimodal/generation/test_moss_audio.py::test_moss_audio_generation_smoke"
     --deselect "tests/models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_image[kimi_vl]"
     --deselect "tests/models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_image[qwen3_vl]"
@@ -180,61 +228,22 @@ fi
 
 # ------------------------------------------------------------------------------
 # [setup] HF hub cache symlink: HF id -> local checkpoint under /nas_aisw
+# (MODEL_MAP plus a by-name probe for the generation models; extend with
+# PPU_MM_MODEL_MAP="org/a=/path/a,..."). The snapshot is named by a 40-hex
+# revision because trust_remote_code models cannot load from snapshots/main.
 # ------------------------------------------------------------------------------
-# paths come from the red-zone model list's path field
-# (absolute NAS path = /nas_aisw/datasets/ + path); entries missing from the list follow the Legacy
-# /ppusw-isomorphic path and are marked "unconfirmed". A missing path warns and is skipped.
+if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
+  EXAONE_METADATA_DIR="${REPO_ROOT}/ci-wheel/hf-models/LGAI-EXAONE/EXAONE-4.5-33B"
+  if [[ ! -f "${EXAONE_METADATA_DIR}/config.json" ]]; then
+    echo "[setup] ERROR: staged EXAONE metadata is missing: ${EXAONE_METADATA_DIR}" >&2
+    exit 1
+  fi
+  EXAONE_MAPPING="LGAI-EXAONE/EXAONE-4.5-33B=${EXAONE_METADATA_DIR}"
+  export PPU_MM_MODEL_MAP="${PPU_MM_MODEL_MAP:+${PPU_MM_MODEL_MAP},}${EXAONE_MAPPING}"
+fi
 echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
-python3 - <<'PYEOF'
-import os
-
-MODEL_MAP = {
-# test_nemotron_parse.py::test_models (the only core_model, trust_remote_code=True)
-# hit: legacy_ci/scripts/ppu_model_aliases.json key nv-community/... ->
-# ... (/ppusw -> /nas_aisw). The test uses the HF id nvidia/... (a different org pointing at
-# the same weights), so the symlink is created under the id the test actually uses.
-# trust_remote_code needs the dynamic modules (modeling_*.py etc.) inside the NAS directory;
-# when missing the case fails (waiting for the .py files to be staged).
-    "nvidia/NVIDIA-Nemotron-Parse-v1.1":
-        "/nas_aisw/datasets/checkpoints/LLM/NVIDIA/v1.1/NVIDIA-Nemotron-Parse-v1.1",
-# pooling/test_llava_next.py MODELS (core_model)
-# hit: ppu_model_aliases.json royokong/e5-v ->
-# /ppusw/datasets/checkpoints/LLM/e5/v1.0/e5-v (/ppusw -> /nas_aisw)
-    "royokong/e5-v": "/nas_aisw/datasets/checkpoints/LLM/e5/v1.0/e5-v",
-# Note: mm_processing (test_tensor_schema.py) walks the multimodal models of the
-# HF_EXAMPLE_MODELS registry for processor validation and only needs config/tokenizer through
-# dummy_hf_overrides; the set is large and most cases carry skip guards, so they are not
-# enumerated here - watch the MISS report of the first run and add them as needed (same
-# strategy as models-language).
-}
-
-HF_CACHE = os.environ.get("HF_HUB_CACHE") or os.path.expanduser(
-    "~/.cache/huggingface/hub")
-os.makedirs(HF_CACHE, exist_ok=True)
-
-created = skipped = missing = 0
-for hf_id, local_path in MODEL_MAP.items():
-    if not os.path.isdir(local_path):
-        print(f"[setup] MISS  {hf_id} -> {local_path} (tests using it will fail)")
-        missing += 1
-        continue
-    org, repo = hf_id.split("/", 1)
-    cache_dir = os.path.join(HF_CACHE, f"models--{org}--{repo}")
-    snap_link = os.path.join(cache_dir, "snapshots", "main")
-    refs_file = os.path.join(cache_dir, "refs", "main")
-    if os.path.islink(snap_link) or os.path.exists(snap_link):
-        skipped += 1
-        continue
-    os.makedirs(os.path.dirname(snap_link), exist_ok=True)
-    os.makedirs(os.path.dirname(refs_file), exist_ok=True)
-    os.symlink(local_path, snap_link)
-    with open(refs_file, "w") as rf:
-        rf.write("main")
-    created += 1
-    print(f"[setup] OK    {hf_id} -> {local_path}")
-print(f"[setup] symlinks: created={created} skipped={skipped} "
-      f"missing={missing} (total {len(MODEL_MAP)})")
-PYEOF
+python3 scripts/ppu/ppu_mm_hf_cache.py link \
+  || echo "[setup] WARN: HF cache link step failed; generation cases may miss checkpoints"
 
 # ------------------------------------------------------------------------------
 # [assets] offline fallback for the vLLM public assets (images + video)
@@ -255,6 +264,7 @@ PYEOF
 # the first run adds the measured candidate paths.
 echo "========== [assets] bootstrap vLLM public assets (/nas_aisw) =========="
 python3 - <<'PYEOF'
+import glob
 import os
 import shutil
 
@@ -263,17 +273,20 @@ CACHE = os.environ.get("VLLM_ASSETS_CACHE") or os.path.expanduser(
 IMG_DST = os.path.join(CACHE, "vllm_public_assets")
 VID_DST = os.path.join(CACHE, "video-example-data")
 
-# candidate directories for the vLLM public assets on /nas_aisw (narrowed by the first run; the red-zone list does not track such assets)
 IMG_SRC_CANDS = [
     "/nas_aisw/datasets/vllm_public_assets",
     "/nas_aisw/datasets/vllm_assets/vision_model_images",
     "/nas_aisw/datasets/assets/vllm_public_assets",
 ]
 VID_SRC_CANDS = [
+    p for p in (os.environ.get("PPU_VIDEO_ASSET_SRC"),) if p
+] + [
     "/nas_aisw/datasets/vllm_public_assets",
     "/nas_aisw/datasets/vllm_assets/multimodal_asset",
     "/nas_aisw/datasets/assets/vllm_public_assets",
-]
+] + sorted(glob.glob(os.path.join(
+    os.environ.get("HF_HUB_CACHE") or os.path.expanduser("~/.cache/huggingface/hub"),
+    "datasets--raushan-testing-hf--videos-test", "snapshots", "*")))
 
 def _bootstrap(dst, cands, only=None):
     os.makedirs(dst, exist_ok=True)
@@ -304,6 +317,14 @@ if not os.path.exists(os.path.join(VID_DST, "sample_demo_1.mp4")):
     print("[assets] WARN: sample_demo_1.mp4 absent (not staged) - "
           "test_common/test_tensor_schema collection will crash")
 PYEOF
+
+# v0.28 只恢复已有离线元数据支撑的 processing；缺失清单随结果发布，便于诊断。
+if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
+  echo "========== [preflight] offline HF cache coverage =========="
+  python3 scripts/ppu/ppu_mm_hf_cache.py check \
+    --out "${RESULTS_DIR}/mm-hf-cache-missing.tsv" \
+    || echo "[preflight] WARN: HF cache coverage check failed to run"
+fi
 
 # ------------------------------------------------------------------------------
 # [junit] merge helper (with a fallback when pytest crashes)
@@ -467,15 +488,12 @@ _run_step() {
   fi
 }
 
-# Mirrors the PPU single section. Generation always runs; processing is skipped on all
-# supported releases: v0.26/v0.27 failed every tensor-schema case in run 41978966338,
-# and v0.28 hit another unavailable offline model in run 43170695229. This area has no multi.
-# The pod is 1-PPU, so visible cards are limited to 1 to keep single-card semantics.
+# v0.26/v0.27 的整组 processing 离线缓存仍未补齐；v0.28 的 EXAONE 元数据已随
+# wheel artifact 发布，因此恢复真实 tensor-schema 执行。本 area 没有 multi。
 CUDA_VISIBLE_DEVICES=0 _run_step "mm_generation_dedicated" 1 "${MM_GENERATION_ARGS[@]}"
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" || \
-      "${PPU_RELEASE:-}" == "v0.27.0" || \
-      "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
-  echo "[step] mm_processing skipped: tensor-schema coverage disabled for supported releases"
+      "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
+  echo "[step] mm_processing skipped: release-wide offline metadata is incomplete"
 else
   CUDA_VISIBLE_DEVICES=0 _run_step "mm_processing" 1 "${MM_PROCESSING_ARGS[@]}"
 fi

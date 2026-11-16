@@ -24,14 +24,41 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
-if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" && \
-      ( "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ) ]]; then
-  # Run 42943857861: TP=2 output differs after sharded_state reload on ZW-M890P.
-  # Keep OAM-810E and TP=1 coverage unchanged.
-  PYTEST_EXTRA+=(
-    --deselect "tests/model_executor/model_loader/test_sharded_state_loader.py::test_sharded_state_loader[2-False]"
-    --deselect "tests/model_executor/model_loader/test_sharded_state_loader.py::test_sharded_state_loader[2-True]"
-  )
+if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
+  # Compare sharded-state reload outputs without PPU graph/batch differences.
+  # Both generate calls must use the same arguments; the equality assertion stays.
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("tests/model_executor/model_loader/test_sharded_state_loader.py")
+text = path.read_text()
+old = '''    if current_platform.is_rocm() or current_platform.is_xpu():
+        platform_args["max_num_seqs"] = 1
+
+    # Run in separate processes for memory & CUDA isolation
+'''
+new = '''    if current_platform.is_rocm() or current_platform.is_xpu():
+        platform_args["max_num_seqs"] = 1
+    generate_args = dict(platform_args)
+    if current_platform.is_ppu():
+        # Compare loader outputs without PPU graph/batch scheduling differences.
+        generate_args.update(max_num_seqs=1, enforce_eager=True)
+
+    # Run in separate processes for memory & CUDA isolation
+'''
+if new not in text:
+    if old not in text:
+        raise RuntimeError(f"sharded-state generate_args anchor missing: {path}")
+    text = text.replace(old, new, 1)
+old = "                **platform_args,"
+new_call = "                **generate_args,"
+if not (text.count(old) == 1 and text.count(new_call) == 2):
+    if text.count(old) != 3:
+        raise RuntimeError(f"expected three sharded-state platform-arg calls: {path}")
+    text = text.replace(old, new_call)
+    text = text.replace(new_call, old, 1)
+path.write_text(text)
+PY
 fi
 
 RESULTS_DIR="${REPO_ROOT}/test-results"

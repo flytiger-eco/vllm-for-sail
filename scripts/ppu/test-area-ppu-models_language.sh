@@ -31,6 +31,43 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
+# The untrained tiny-mixtral logits are sensitive to graph/batch scheduling.
+# Keep the HF comparison strict while making the two execution paths deterministic.
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("tests/models/language/generation/test_common.py")
+text = path.read_text()
+old = '''    vllm_kwargs = {}
+    if (
+        model == "bigscience/bloom-560m"
+'''
+new = '''    vllm_kwargs = {}
+    if model == "TitanML/tiny-mixtral" and current_platform.is_ppu():
+        # Keep this numerical parity check independent of PPU graph capture and
+        # cross-request MoE batching; the HF reference is also generated per prompt.
+        vllm_kwargs["enforce_eager"] = True
+    if (
+        model == "bigscience/bloom-560m"
+'''
+if new not in text:
+    if old not in text:
+        raise RuntimeError(f"tiny-mixtral vllm_kwargs anchor missing: {path}")
+    text = text.replace(old, new, 1)
+old = "        max_num_seqs=1 if current_platform.is_rocm() else 2,"
+new = '''        max_num_seqs=(
+            1
+            if current_platform.is_rocm()
+            or (model == "TitanML/tiny-mixtral" and current_platform.is_ppu())
+            else 2
+        ),'''
+if new not in text:
+    if old not in text:
+        raise RuntimeError(f"tiny-mixtral max_num_seqs anchor missing: {path}")
+    text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" ]]; then
   # Run 41379000962: v0.26 PPU failures; keep other releases unchanged.
   PYTEST_EXTRA+=(
@@ -59,15 +96,6 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
     --deselect "tests/models/language/generation/test_hybrid.py::test_models[5-64-ibm-granite/granite-4.0-tiny-preview]"
     --deselect "tests/models/language/generation/test_hybrid.py::test_same_mamba_output_apc_on_vs_off[tiiuae/falcon-mamba-7b]"
     --deselect "tests/models/language/generation/test_hybrid.py::test_apc_common_prefix_same_batch[tiiuae/falcon-mamba-7b]"
-  )
-fi
-
-if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
-  # Run 42943857861: ZW-M890P-only generation mismatches in all maintained releases.
-  # Keep OAM-810E coverage unchanged.
-  PYTEST_EXTRA+=(
-    --deselect "tests/models/language/generation/test_common.py::test_models[True-False-5-32-TitanML/tiny-mixtral]"
-    --deselect "tests/models/language/generation/test_common.py::test_models[False-False-5-32-TitanML/tiny-mixtral]"
   )
 fi
 
