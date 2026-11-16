@@ -624,6 +624,63 @@ def test_nightly_private_cache_repairs_an_unpublished_main_ref(tmp_path):
         nightly.prepare_cache(source, source / "private")
 
 
+@pytest.mark.parametrize(
+    "state,action_status,expected",
+    [
+        ("passed", "succeeded", "PASSED"),
+        ("passed", "", "CI_FAILED"),
+        ("failed", "failed", "TEST_FAILED"),
+        ("interrupted", "", "CI_FAILED"),
+        ("unknown", "", "CI_FAILED"),
+    ],
+)
+def test_nightly_area_validation_does_not_publish_a_summary(
+    tmp_path, state, action_status, expected
+):
+    step = next(
+        step
+        for step in workflow("ppu-build-nightly.yml")["jobs"]["test"]["steps"]
+        if step.get("name") == "Validate test results"
+    )
+    if state != "unknown":
+        (tmp_path / "summary.md").write_text("worker summary\n")
+    if state in {"passed", "failed"}:
+        (tmp_path / "test.xml").write_text('<testsuite tests="1"/>')
+        (tmp_path / "exit-code.txt").write_text(f"{int(state == 'failed')}\n")
+    if state == "interrupted":
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw/step.xml").write_text('<testsuite tests="1"/>')
+    summary = tmp_path / "github-summary.md"
+    result = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env={
+            **os.environ,
+            "NAS_DIR": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "SOURCE_SHA": "a" * 40,
+            "CI_SHA": "c" * 40,
+            "WHEEL_VERSION": "0.28.0.dev1",
+            "WHEEL_SHA256": "b" * 64,
+            "OUT_JOB_NAME": "job",
+            "OUT_JOB_STATUS": action_status,
+            "OUT_DURATION": "1",
+            "OUT_TASK_PODS": "pod",
+            "OUT_LOG_ARTIFACT": "log",
+        },
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == int(expected != "PASSED"), result.stderr
+    assert not summary.exists()
+    info = (tmp_path / "job-info.txt").read_text()
+    assert info.startswith(f"Result: {expected}\n")
+    assert "Source SHA: " + "a" * 40 in info
+    assert "CI SHA: " + "c" * 40 in info
+    assert "Wheel SHA256: " + "b" * 64 in info
+    assert "K8s job: job" in info
+
+
 def test_nightly_summary_groups_areas_into_three_release_tables(tmp_path):
     needs = {
         "resolve-releases": {
@@ -1428,6 +1485,13 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
     assert expected_devices in action["extra_env"].split(",")
     assert jobs["build-wheel"]["needs"] == "select-areas"
     assert set(jobs["build-wheel"]["outputs"]) >= {"wheel_version", "wheel_sha256"}
+    assert not any(
+        step.get("name") == "Publish test summary" for step in jobs["test"]["steps"]
+    )
+    assert all(
+        "GITHUB_STEP_SUMMARY" not in step.get("run", "")
+        for step in jobs["test"]["steps"]
+    )
     upload = next(
         s for s in jobs["test"]["steps"] if s.get("name") == "Upload test results"
     )

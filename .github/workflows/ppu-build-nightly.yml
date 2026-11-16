@@ -381,13 +381,13 @@ jobs:
           extra_env: >-
             HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=${{ inputs.device }},PPU_RELEASE=${{ inputs.release }},PPU_SOURCE_SHA=${{ inputs.source_sha }},PPU_CI_SHA=${{ inputs.ci_sha }},PPU_WHEEL_PATH=${{ steps.payload.outputs.wheel_path }},PPU_WHEEL_SHA256=${{ steps.payload.outputs.wheel_sha256 }},PPU_EXPECTED_VLLM_VERSION=${{ steps.payload.outputs.wheel_version }},PPU_EXPECTED_DEVICES=${{ matrix.nproc }},PPU_TOOLCHAIN_DIR=/workspace/source/source/ci-wheel/toolchain,AREA=${{ matrix.area }},AREA_SCRIPT=${{ matrix.script }},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
           command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
-      - name: Publish test summary
+      - name: Validate test results
         if: always()
         env:
-          AREA: ${{ matrix.area }}
-          RELEASE: ${{ inputs.release }}
-          DEVICE: ${{ inputs.device }}
+          NAS_DIR: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          WHEEL_VERSION: ${{ steps.payload.outputs.wheel_version }}
           WHEEL_SHA256: ${{ steps.payload.outputs.wheel_sha256 }}
           OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
           OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
@@ -395,19 +395,30 @@ jobs:
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
         run: |
-          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/test/${RELEASE}/${DEVICE}/${AREA}/summary.md"
-          {
-            echo "## ${RELEASE} / ${AREA} / ${DEVICE}"
-            echo "Source SHA: \`${SOURCE_SHA}\`"
-            echo "Wheel SHA256: \`${WHEEL_SHA256}\`"
-            if [ -f "${NAS_SUM}" ]; then
-              cat "${NAS_SUM}"
-            else
-              echo "summary.md was not returned; this area did not pass."
-              exit 1
+          worker_rc=""
+          if [[ -f "${NAS_DIR}/test.xml" && -f "${NAS_DIR}/exit-code.txt" ]]; then
+            read -r worker_rc < "${NAS_DIR}/exit-code.txt"
+          fi
+          result="CI_FAILED"
+          if [[ "${worker_rc}" =~ ^[0-9]+$ ]]; then
+            if [ "${worker_rc}" -ne 0 ]; then
+              result="TEST_FAILED"
+            elif [ "${OUT_JOB_STATUS}" = "succeeded" ]; then
+              result="PASSED"
             fi
-            echo "K8s job: \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ ! -f "${NAS_DIR}/summary.md" ]; then
+            result="CI_FAILED"
+          fi
+          {
+            echo "Result: ${result}"
+            echo "Source SHA: ${SOURCE_SHA}"
+            echo "CI SHA: ${CI_SHA}"
+            echo "Wheel version: ${WHEEL_VERSION}"
+            echo "Wheel SHA256: ${WHEEL_SHA256}"
+            echo "K8s job: ${OUT_JOB_NAME:-<empty>} · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: ${OUT_TASK_PODS:-<empty>} · log: ${OUT_LOG_ARTIFACT:-<empty>}"
+          } > "${NAS_DIR}/job-info.txt"
+          [ "${result}" = "PASSED" ]
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
