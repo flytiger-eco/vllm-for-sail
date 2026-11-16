@@ -22,19 +22,36 @@ on:
         options:
           - OAM-810E
           - ZW-M890P
+      wheel_run_id:
+        description: "Temporary diagnostic: nightly run ID that produced the wheel"
+        type: string
+        default: "43745438303"
+      wheel_artifact:
+        description: "Temporary diagnostic: exact nightly wheel artifact name"
+        type: string
+        default: "ppu-nightly-43745438303-1-v0.27.0-OAM-810E"
+      nodeid:
+        description: "Temporary diagnostic: exact pytest nodeid to repeat"
+        type: string
+        default: "tests/models/language/generation/test_common.py::test_models[True-False-5-32-TitanML/tiny-mixtral]"
+      repeat_case:
+        description: "Temporary diagnostic: repeat count; 0 runs the normal nightly"
+        type: number
+        default: 0
 
 # A full regression can exceed one day. Queue repeated triggers for the same
 # device rather than cancelling them; different devices run independently.
 concurrency:
   group: nightly-ppu-releases-${{ inputs.device || 'OAM-810E' }}
   cancel-in-progress: false
-  queue: max
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   resolve-releases:
+    if: ${{ !inputs.repeat_case }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -126,9 +143,182 @@ jobs:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
 
+  repeat-case:
+    if: >-
+      github.repository == 'flytiger-eco/vllm-for-sail' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.repeat_case > 0
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+    timeout-minutes: 150
+    steps:
+      - name: Download existing nightly wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.wheel_artifact }}
+          path: ci-wheel
+          run-id: ${{ inputs.wheel_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify wheel and read provenance
+        id: wheel
+        run: |
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import hashlib, json, pathlib, sys
+          root = pathlib.Path("ci-wheel")
+          wheels = list(root.glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          wheel = wheels[0]
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert wheel.name == manifest["wheel"]
+          assert manifest["release"] in ("v0.26.0", "v0.27.0", "v0.28.0")
+          assert len(manifest["source_sha"]) == 40
+          int(manifest["source_sha"], 16)
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          assert digest == manifest["wheel_sha256"]
+          print(json.dumps(manifest, indent=2))
+          with open(sys.argv[1], "a") as output:
+              output.write(f"release={manifest['release']}\n")
+              output.write(f"source_sha={manifest['source_sha']}\n")
+              output.write(f"version={manifest['version']}\n")
+              output.write(f"sha256={digest}\n")
+              output.write(f"path={wheel.as_posix()}\n")
+          PY
+
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.wheel.outputs.source_sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout diagnostic scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: ci
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+
+      - name: Install diagnostic scripts and verify checkouts
+        env:
+          EXPECTED_SOURCE_SHA: ${{ steps.wheel.outputs.source_sha }}
+          EXPECTED_CI_SHA: ${{ github.sha }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test "$(git -C ci rev-parse HEAD)" = "$EXPECTED_CI_SHA"
+          mkdir -p source/scripts/ppu
+          cp -a ci/scripts/ppu/. source/scripts/ppu/
+
+      - name: Build in-pod runner payload
+        id: payload
+        env:
+          NODEID: ${{ inputs.nodeid }}
+          REPEAT: ${{ inputs.repeat_case }}
+          RELEASE: ${{ steps.wheel.outputs.release }}
+          SOURCE_SHA: ${{ steps.wheel.outputs.source_sha }}
+          WHEEL_VERSION: ${{ steps.wheel.outputs.version }}
+          WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+          WHEEL_PATH: ${{ steps.wheel.outputs.path }}
+        run: |
+          case "$REPEAT" in *[!0-9]*|'') echo "::error::Invalid repeat count" >&2; exit 2 ;; esac
+          if [ "$REPEAT" -lt 1 ] || [ "$REPEAT" -gt 40 ]; then
+            echo "::error::repeat must be between 1 and 40" >&2
+            exit 2
+          fi
+          nodeid_b64="$(printf '%s' "$NODEID" | base64 | tr -d '\n')"
+          test -n "$nodeid_b64"
+          cat > /tmp/ppu-run.sh <<'RUNEOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /workspace/source/source
+          mkdir -p test-results
+          _publish_results() {
+            local rc=$?
+            trap - EXIT
+            set +e
+            python3 scripts/ppu/ppu_ci_nightly.py summarize test-results "$rc" || rc=1
+            printf '%s\n' "$rc" > test-results/exit-code.txt
+            chmod -R a+rX test-results || rc=1
+            mkdir -p "$PPU_SUMMARY_NAS_DIR" && cp -a test-results/. "$PPU_SUMMARY_NAS_DIR/" || rc=1
+            exit "$rc"
+          }
+          trap _publish_results EXIT
+          {
+            echo "[repeat-case] release=${PPU_RELEASE} source=${PPU_SOURCE_SHA} ci=${PPU_CI_SHA}"
+            echo "[repeat-case] HF_HUB_CACHE=${HF_HUB_CACHE}"
+            bash scripts/ppu/ppu_ci_nightly_install_dependency.sh
+            export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+            export PATH="$PWD/bin:$PATH"
+            python3 scripts/ppu/ppu_repeat_case.py
+          } 2>&1 | tee test-results/run.log
+          RUNEOF
+          bash -n /tmp/ppu-run.sh
+          echo "b64=$(base64 < /tmp/ppu-run.sh | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          pod_wheel="/workspace/source/${WHEEL_PATH}"
+          envs="HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=OAM-810E"
+          envs="${envs},PPU_RELEASE=${RELEASE},PPU_SOURCE_SHA=${SOURCE_SHA},PPU_CI_SHA=${GITHUB_SHA}"
+          envs="${envs},PPU_WHEEL_PATH=${pod_wheel},PPU_WHEEL_SHA256=${WHEEL_SHA256}"
+          envs="${envs},PPU_EXPECTED_VLLM_VERSION=${WHEEL_VERSION},PPU_EXPECTED_DEVICES=1"
+          envs="${envs},PPU_TOOLCHAIN_DIR=/workspace/source/ci-wheel/toolchain"
+          envs="${envs},PPU_CASE_NODEID_B64=${nodeid_b64},PPU_CASE_REPEAT=${REPEAT}"
+          envs="${envs},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}"
+          echo "extra_env=${envs}" >> "$GITHUB_OUTPUT"
+
+      - name: Run repeated PPU case
+        id: ppu
+        uses: flytiger-eco/ppu-distributed-action@06c8ee7cadaae2086db4977e571b19f461653f16
+        with:
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=OAM-810E
+          image: ${{ env.PPU_BASE_IMAGE }}
+          namespace: ppu-sched
+          job_suffix: repeat-case-${{ github.run_id }}
+          timeout_minutes: 120
+          cleanup_policy: always
+          container_options: |
+            host_ipc: true
+            shm_size: "8Gi"
+          extra_env: ${{ steps.payload.outputs.extra_env }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+          command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
+
+      - name: Publish test summary
+        if: always()
+        env:
+          NODEID: ${{ inputs.nodeid }}
+          REPEAT: ${{ inputs.repeat_case }}
+          WHEEL_ARTIFACT: ${{ inputs.wheel_artifact }}
+        run: |
+          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/summary.md"
+          {
+            echo "## Repeated PPU case"
+            echo ""
+            echo "Nodeid: \`${NODEID}\`"
+            echo "Iterations: ${REPEAT}"
+            echo "Wheel: \`${WHEEL_ARTIFACT}\`"
+            echo ""
+            if [ -f "${NAS_SUM}" ]; then
+              cat "${NAS_SUM}"
+            else
+              echo "summary.md was not returned; the diagnostic run did not pass."
+              exit 1
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ppu-repeat-case-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/
+          if-no-files-found: error
+
   nightly-finish:
     needs: [resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]
-    if: always()
+    if: always() && !inputs.repeat_case
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
