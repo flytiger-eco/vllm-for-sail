@@ -363,6 +363,29 @@ def _format_prefetch_error(error: Exception) -> str:
     return " | caused by ".join(parts)
 
 
+def _gated_prefetch_error(error: Exception) -> bool:
+    """True when the failure is an authorization gate (401/403).
+
+    Gated HF repos return 401/403 without a PPU_HF_TOKEN. That is an expected,
+    tolerable gap for a build-only metadata prefetch and must not fail the whole
+    step, which would upload no wheel artifact and skip every area's tests.
+    Real transport/missing-file errors stay fatal.
+    """
+    for cause in _exception_chain(error):
+        response = getattr(cause, "response", None)
+        status = getattr(response, "status_code", None)
+        if status in (401, 403):
+            return True
+        text = str(cause)
+        if type(cause).__name__ == "GatedRepoError" or (
+            "is restricted" in text
+            or "401 Unauthorized" in text
+            or "403 Forbidden" in text
+        ):
+            return True
+    return False
+
+
 def cmd_prefetch(args: argparse.Namespace) -> int:
     from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -371,6 +394,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     cache = _hub_cache(args.cache_dir)
     rows = _read_list(args.list) if args.list else _requirements()
     failed = 0
+    gated = 0
     for kind, repo_id, rev, mode in rows:
         revision = None if rev == "-" else rev
         local_dir = None
@@ -415,6 +439,13 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                           f"after {delay}s: {type(e).__name__}")
                     time.sleep(delay)
                     continue
+                if args.allow_gated and _gated_prefetch_error(e):
+                    # Authorization gate (401/403): expected without a token,
+                    # recorded but not fatal, so it cannot skip every area.
+                    gated += 1
+                    print(f"[prefetch] GATED {kind} {repo_id}@{rev} ({mode}): "
+                          f"access restricted, skipped without a token")
+                    break
                 failed += 1
                 print(f"[prefetch] FAIL  {kind} {repo_id}@{rev} ({mode}): "
                       f"{_format_prefetch_error(e)}")
@@ -425,7 +456,8 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 print(f"[prefetch] OK    {kind} {repo_id}@{rev} ({mode})")
                 break
     destination = args.local_root or cache
-    print(f"[prefetch] {len(rows) - failed}/{len(rows)} fetched into {destination}")
+    print(f"[prefetch] {len(rows) - failed - gated}/{len(rows)} fetched, "
+          f"{gated} gated-skipped, {failed} failed into {destination}")
     return 1 if failed else 0
 
 
@@ -450,6 +482,9 @@ def main() -> int:
     p_pre.add_argument("--dataset-root", help="flat dataset root with --local-root")
     p_pre.add_argument("--metadata-only", action="store_true",
                        help="fetch only processor/tokenizer/config/dynamic code")
+    p_pre.add_argument("--allow-gated", action="store_true",
+                       help="tolerate 401/403 authorization-gated repos "
+                            "(expected without a PPU_HF_TOKEN) instead of failing")
     p_pre.add_argument("--max-workers", type=int, default=4,
                        help="parallel downloads per repository (default: 4)")
     p_pre.add_argument("--retries", type=int, default=3,

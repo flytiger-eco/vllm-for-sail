@@ -234,7 +234,7 @@ jobs:
                  --cache-dir "source/dist/hf-download-cache/${cache_key}" \
                  --local-root source/dist/hf-models \
                  --dataset-root source/dist/hf-datasets \
-                 --metadata-only --max-workers 2 \
+                 --metadata-only --allow-gated --max-workers 2 \
                  --retries 4 --retry-delay 15; then
               staged=1
               break
