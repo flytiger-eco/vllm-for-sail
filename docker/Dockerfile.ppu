@@ -261,6 +261,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         /tmp/wheels/vllm/vllm_sail-*.whl \
     && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         --no-deps numpy==1.26.4 \
+    && uv pip install --python .venv/bin/python --index-url "${PPU_PIP_INDEX}" \
+        --no-deps ml-dtypes==0.6.0 \
     && rm -rf /tmp/wheels
 
 # Validate installed package metadata without importing device-dependent code.
@@ -269,6 +271,7 @@ from importlib.metadata import entry_points, requires, version
 from pathlib import Path
 from packaging.requirements import Requirement
 
+assert version("ml-dtypes") == "0.6.0"
 for group in ("vllm.platform_plugins", "vllm.general_plugins"):
     assert any(ep.name == "ppu" and ep.value.startswith("vllm_sail:")
                for ep in entry_points(group=group)), group
@@ -301,7 +304,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         pytest pytest-asyncio pytest-xdist pre-commit ruff py-spy \
     && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         --no-deps numpy==1.26.4 \
-    && .venv/bin/python -c 'from importlib.metadata import version; assert version("numpy") == "1.26.4"' \
+    && uv pip install --python .venv/bin/python --index-url "${PPU_PIP_INDEX}" \
+        --no-deps ml-dtypes==0.6.0 \
+    && .venv/bin/python -c 'from importlib.metadata import version; assert version("numpy") == "1.26.4"; assert version("ml-dtypes") == "0.6.0"' \
     && pre-commit --version
 
 WORKDIR /workspace
