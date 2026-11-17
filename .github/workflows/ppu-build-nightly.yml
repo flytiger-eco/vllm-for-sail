@@ -338,7 +338,7 @@ jobs:
             python3 scripts/ppu/ppu_ci_nightly.py summarize test-results "$rc" || rc=1
             printf '%s\n' "$rc" > test-results/exit-code.txt
             chmod -R a+rX test-results || rc=1
-            mkdir -p "$PPU_SUMMARY_NAS_DIR" && cp -a test-results/. "$PPU_SUMMARY_NAS_DIR/" && chmod a+rwX "$PPU_SUMMARY_NAS_DIR" || rc=1
+            mkdir -p "$PPU_SUMMARY_NAS_DIR" && chmod a+rwX "$(dirname "$PPU_SUMMARY_NAS_DIR")" "$PPU_SUMMARY_NAS_DIR" && cp -a test-results/. "$PPU_SUMMARY_NAS_DIR/" || rc=1
             exit "$rc"
           }
           trap _publish_results EXIT
@@ -401,6 +401,9 @@ jobs:
           if [ -f "${NAS_DIR}/summary.md" ] && [ "${worker_rc}" = "0" ]; then
             result="PASSED"
           fi
+          # Always recreate this attempt's directory so result aggregation never
+          # falls back to an older attempt for an area that was rerun.
+          mkdir -p "${NAS_DIR}"
           {
             echo "Result: ${result}"
             echo "Source SHA: ${SOURCE_SHA}"
@@ -436,7 +439,7 @@ jobs:
           CI_SHA: ${{ inputs.ci_sha }}
           WHEEL_VERSION: ${{ needs.build-wheel.outputs.wheel_version }}
           WHEEL_SHA256: ${{ needs.build-wheel.outputs.wheel_sha256 }}
-          RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
+          RESULTS_ROOT: /wl_nas/devops
         run: |
           python3 scripts/ppu/ppu_ci_nightly.py summary-release \
             --results-root "${RESULTS_ROOT}" --release "${RELEASE}" \

@@ -631,6 +631,7 @@ def test_nightly_private_cache_repairs_an_unpublished_main_ref(tmp_path):
         ("failed", "FAILED"),
         ("interrupted", "FAILED"),
         ("missing-summary", "FAILED"),
+        ("missing-dir", "FAILED"),
         ("unknown", "FAILED"),
     ],
 )
@@ -641,20 +642,23 @@ def test_nightly_area_validation_does_not_publish_a_summary(tmp_path, state, exp
         if step.get("name") == "Validate test results"
     )
     assert step.get("shell") == "bash"
+    # A rerun whose worker died before publishing must still own this attempt's
+    # directory so aggregation never falls back to an older attempt's success.
+    nas_dir = tmp_path / "area" if state == "missing-dir" else tmp_path
     if state in {"passed", "failed", "missing-summary"}:
-        (tmp_path / "exit-code.txt").write_text(f"{int(state == 'failed')}\n")
+        (nas_dir / "exit-code.txt").write_text(f"{int(state == 'failed')}\n")
     if state in {"passed", "failed"}:
-        (tmp_path / "summary.md").write_text("worker summary\n")
-        (tmp_path / "test.xml").write_text('<testsuite tests="1"/>')
+        (nas_dir / "summary.md").write_text("worker summary\n")
+        (nas_dir / "test.xml").write_text('<testsuite tests="1"/>')
     if state == "interrupted":
-        (tmp_path / "raw").mkdir()
-        (tmp_path / "raw/step.xml").write_text('<testsuite tests="1"/>')
+        (nas_dir / "raw").mkdir()
+        (nas_dir / "raw/step.xml").write_text('<testsuite tests="1"/>')
     summary = tmp_path / "github-summary.md"
     result = subprocess.run(
         ["bash", "-c", step["run"]],
         env={
             **os.environ,
-            "NAS_DIR": str(tmp_path),
+            "NAS_DIR": str(nas_dir),
             "GITHUB_STEP_SUMMARY": str(summary),
             "SOURCE_SHA": "a" * 40,
             "CI_SHA": "c" * 40,
@@ -672,7 +676,7 @@ def test_nightly_area_validation_does_not_publish_a_summary(tmp_path, state, exp
     )
     assert result.returncode == int(expected != "PASSED"), result.stderr
     assert not summary.exists()
-    info = (tmp_path / "job-info.txt").read_text()
+    info = (nas_dir / "job-info.txt").read_text()
     assert info.startswith(f"Result: {expected}\n")
     assert "Source SHA: " + "a" * 40 in info
     assert "CI SHA: " + "c" * 40 in info
@@ -680,37 +684,75 @@ def test_nightly_area_validation_does_not_publish_a_summary(tmp_path, state, exp
     assert "K8s job: job" in info
 
 
-def test_nightly_summary_groups_areas_into_three_release_tables(tmp_path):
+def _write_release_manifest(results_root, attempt, release, manifest):
+    release_dir = results_root / f"123-{attempt}" / "test" / release / "OAM-810E"
+    release_dir.mkdir(parents=True)
+    (release_dir / "release-manifest.json").write_text(json.dumps(manifest))
+
+
+def _run_nightly_summary(tmp_path, results_root, areas, run_attempt="1"):
+    output = tmp_path / "github-summary.md"
+    output.write_text("")
+    result = nightly.main(
+        [
+            "summary-nightly",
+            "--results-root",
+            str(results_root),
+            "--areas",
+            areas,
+            "--device",
+            "OAM-810E",
+            "--ci-sha",
+            "c" * 40,
+            "--run-id",
+            "123",
+            "--run-attempt",
+            run_attempt,
+            "--output",
+            str(output),
+        ]
+    )
+    return result, output.read_text()
+
+
+def test_nightly_summary_groups_areas_into_three_release_tables(tmp_path, monkeypatch):
     needs = {
         "resolve-releases": {
             "outputs": {"selected": ",".join(nightly.SUPPORTED_RELEASES)}
         }
     }
+    monkeypatch.setenv("NEEDS_JSON", json.dumps(needs))
+    results_root = tmp_path / "devops"
     for index, release in enumerate(nightly.SUPPORTED_RELEASES, start=1):
-        key = release.replace(".", "_")
-        needs["resolve-releases"]["outputs"][key] = str(index) * 40
-        needs[f"release-{release.replace('.', '-')}"] = {
-            "outputs": {
+        failed = release == "v0.28.0"
+        _write_release_manifest(
+            results_root,
+            1,
+            release,
+            {
+                "result": "FAILED" if failed else "PASSED",
+                "source_sha": str(index) * 40,
+                "ci_sha": "c" * 40,
                 "wheel_version": f"{release[1:]}.dev{index}",
                 "wheel_sha256": str(index) * 64,
-            }
-        }
-        for area in ("attention", "kernels"):
-            result_dir = tmp_path / release / "OAM-810E" / area
-            result_dir.mkdir(parents=True)
-            failures = int(release == "v0.28.0" and area == "kernels")
-            if area == "attention":
-                xml = (
-                    '<testsuites><testsuite tests="3" skipped="1"/>'
-                    '<testsuite tests="2"/></testsuites>'
-                )
-            else:
-                xml = f'<testsuite tests="4" failures="{failures}" skipped="1"/>'
-            (result_dir / "test.xml").write_text(xml)
-            (result_dir / "exit-code.txt").write_text(f"{failures}\n")
-    summary = nightly.render_nightly_summary(
-        tmp_path, "attention,kernels", "OAM-810E", "c" * 40, needs
-    )
+                "areas": [
+                    {
+                        "name": "attention",
+                        "result": "PASSED",
+                        "totals": dict(tests=5, failures=0, errors=0, skipped=1),
+                    },
+                    {
+                        "name": "kernels",
+                        "result": "FAILED" if failed else "PASSED",
+                        "totals": dict(
+                            tests=4, failures=int(failed), errors=0, skipped=1
+                        ),
+                    },
+                ],
+            },
+        )
+    result, summary = _run_nightly_summary(tmp_path, results_root, "attention,kernels")
+    assert result == 0
     assert summary.count("| Area | Tests | Failures | Errors | Skipped | Result |") == 3
     assert "### Nightly PPU results" not in summary
     positions = [
@@ -726,73 +768,67 @@ def test_nightly_summary_groups_areas_into_three_release_tables(tmp_path):
     assert "| **Total** | **9** | **1** | **0** | **2** | **FAILED** |" in summary
 
 
+@pytest.mark.parametrize("state", ["missing", "invalid"])
 def test_nightly_summary_command_fails_closed_for_missing_or_invalid_results(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, state
 ):
-    needs = {
-        "resolve-releases": {"outputs": {"selected": "v0.26.0", "v0_26_0": "a" * 40}},
-        "release-v0-26-0": {
-            "outputs": {"wheel_version": "0.26.0.dev1", "wheel_sha256": "b" * 64}
-        },
-    }
+    needs = {"resolve-releases": {"outputs": {"selected": "v0.26.0"}}}
     monkeypatch.setenv("NEEDS_JSON", json.dumps(needs))
-    invalid = tmp_path / "results/v0.26.0/OAM-810E/kernels"
-    invalid.mkdir(parents=True)
-    (invalid / "exit-code.txt").write_text("0\n")
-    output = tmp_path / "github-summary.md"
-    output.write_text("")
-    assert (
-        nightly.main(
-            [
-                "summary-nightly",
-                "--results-root",
-                str(tmp_path / "results"),
-                "--areas",
-                "attention,kernels",
-                "--device",
-                "OAM-810E",
-                "--ci-sha",
-                "c" * 40,
-                "--output",
-                str(output),
-            ]
-        )
-        == 0
-    )
-    summary = output.read_text()
+    results_root = tmp_path / "devops"
+    if state == "invalid":
+        release_dir = results_root / "123-1/test/v0.26.0/OAM-810E"
+        release_dir.mkdir(parents=True)
+        (release_dir / "release-manifest.json").write_text("{not json")
+    result, summary = _run_nightly_summary(tmp_path, results_root, "attention,kernels")
+    assert result == 0
     assert "| attention | - | - | - | - | FAILED |" in summary
     assert "| kernels | - | - | - | - | FAILED |" in summary
     assert "| **Total** | **0** | **0** | **0** | **0** | **FAILED** |" in summary
+    assert "Source SHA: `<unavailable>`" in summary
+
+
+def test_nightly_summary_prefers_newest_release_manifest(tmp_path, monkeypatch):
+    needs = {"resolve-releases": {"outputs": {"selected": "v0.26.0"}}}
+    monkeypatch.setenv("NEEDS_JSON", json.dumps(needs))
+    results_root = tmp_path / "devops"
+    for attempt, status in ((1, "PASSED"), (2, "FAILED")):
+        _write_release_manifest(
+            results_root,
+            attempt,
+            "v0.26.0",
+            {
+                "result": status,
+                "source_sha": "a" * 40,
+                "ci_sha": "c" * 40,
+                "wheel_version": "0.26.0.dev1",
+                "wheel_sha256": "b" * 64,
+                "areas": [
+                    {
+                        "name": "attention",
+                        "result": status,
+                        "totals": dict(tests=2, failures=0, errors=0, skipped=0),
+                    }
+                ],
+            },
+        )
+    result, summary = _run_nightly_summary(
+        tmp_path, results_root, "attention", run_attempt="2"
+    )
+    assert result == 0
+    assert "| attention | 2 | 0 | 0 | 0 | FAILED |" in summary
+    assert "| **Total** | **2** | **0** | **0** | **0** | **FAILED** |" in summary
 
 
 def test_nightly_summary_command_reports_missing_release_resolution(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("NEEDS_JSON", json.dumps({"resolve-releases": {"outputs": {}}}))
-    output = tmp_path / "github-summary.md"
-    output.write_text("")
-    assert (
-        nightly.main(
-            [
-                "summary-nightly",
-                "--results-root",
-                str(tmp_path / "results"),
-                "--areas",
-                "",
-                "--device",
-                "OAM-810E",
-                "--ci-sha",
-                "c" * 40,
-                "--output",
-                str(output),
-            ]
-        )
-        == 2
-    )
-    assert output.read_text() == ""
+    result, summary = _run_nightly_summary(tmp_path, tmp_path / "devops", "")
+    assert result == 2
+    assert summary == ""
 
 
-def _write_nightly_area_evidence(release_dir, name, exit_code=0):
+def _write_nightly_area_evidence(release_dir, name, exit_code=0, shard_logs=True):
     area_dir = release_dir / name
     raw = area_dir / "raw" / f"ppu-{name}-junit"
     raw.mkdir(parents=True)
@@ -806,11 +842,12 @@ def _write_nightly_area_evidence(release_dir, name, exit_code=0):
         f"Result: {'FAILED' if exit_code else 'PASSED'}\n"
     )
     (raw / "step.xml").write_text(xml)
-    (raw / "step.log").write_text("step output\n")
+    if shard_logs:
+        (raw / "step.log").write_text("step output\n")
 
 
 def _run_nightly_release_summary(tmp_path, areas):
-    results_root = tmp_path / "results"
+    results_root = tmp_path / "devops"
     result = nightly.main(
         [
             "summary-release",
@@ -836,13 +873,15 @@ def _run_nightly_release_summary(tmp_path, areas):
             "2",
         ]
     )
-    return result, results_root / "v0.26.0" / "OAM-810E"
+    return result, results_root / "123-2" / "test" / "v0.26.0" / "OAM-810E"
 
 
 def test_nightly_release_summary_writes_one_complete_bundle(tmp_path):
-    release_dir = tmp_path / "results/v0.26.0/OAM-810E"
-    for area in ("attention", "kernels"):
-        _write_nightly_area_evidence(release_dir, area)
+    release_dir = tmp_path / "devops/123-2/test/v0.26.0/OAM-810E"
+    # Unsharded areas (for example attention) only produce run.log, never raw
+    # shard logs; their evidence must still count as complete.
+    _write_nightly_area_evidence(release_dir, "attention", shard_logs=False)
+    _write_nightly_area_evidence(release_dir, "kernels")
 
     result, release_dir = _run_nightly_release_summary(tmp_path, "attention,kernels")
 
@@ -862,10 +901,12 @@ def test_nightly_release_summary_writes_one_complete_bundle(tmp_path):
     assert manifest["passed_areas"] == 2
     assert manifest["missing_areas"] == []
     assert manifest["incomplete_areas"] == []
+    assert all(item["attempt"] == 2 for item in manifest["areas"])
+    assert all(item["issues"] == [] for item in manifest["areas"])
 
 
 def test_nightly_release_summary_preserves_failed_and_missing_evidence(tmp_path):
-    release_dir = tmp_path / "results/v0.26.0/OAM-810E"
+    release_dir = tmp_path / "devops/123-2/test/v0.26.0/OAM-810E"
     _write_nightly_area_evidence(release_dir, "attention", exit_code=1)
 
     result, release_dir = _run_nightly_release_summary(tmp_path, "attention,kernels")
@@ -882,12 +923,51 @@ def test_nightly_release_summary_preserves_failed_and_missing_evidence(tmp_path)
     assert attention["result"] == "FAILED"
     assert attention["complete"] is True
     assert "missing raw JUnit" in kernels["issues"]
-    assert "missing raw logs" in kernels["issues"]
     summary = (release_dir / "release-summary.md").read_text()
     assert "| attention | 2 | 1 | 0 | 0 | FAILED |" in summary
     assert "| kernels | - | - | - | - | FAILED |" in summary
     assert "Evidence: **1/2 complete**." in summary
     assert "Incomplete areas: kernels" in summary
+
+
+def test_nightly_release_summary_reuses_earlier_attempt_for_skipped_reruns(tmp_path):
+    devops = tmp_path / "devops"
+    first = devops / "123-1/test/v0.26.0/OAM-810E"
+    _write_nightly_area_evidence(first, "attention")
+    second = devops / "123-2/test/v0.26.0/OAM-810E"
+    _write_nightly_area_evidence(second, "kernels")
+
+    result, release_dir = _run_nightly_release_summary(tmp_path, "attention,kernels")
+
+    assert result == 0
+    manifest = json.loads((release_dir / "release-manifest.json").read_text())
+    assert manifest["result"] == "PASSED"
+    attention, kernels = manifest["areas"]
+    assert attention["attempt"] == 1
+    assert kernels["attempt"] == 2
+    # Earlier-attempt evidence is materialized into the uploaded bundle.
+    assert (release_dir / "attention" / "run.log").is_file()
+    assert (release_dir / "attention" / "raw").is_dir()
+
+
+def test_nightly_release_summary_prefers_rerun_failure_over_old_success(tmp_path):
+    devops = tmp_path / "devops"
+    first = devops / "123-1/test/v0.26.0/OAM-810E"
+    _write_nightly_area_evidence(first, "attention")
+    _write_nightly_area_evidence(first, "kernels")
+    second = devops / "123-2/test/v0.26.0/OAM-810E"
+    _write_nightly_area_evidence(second, "kernels", exit_code=1)
+
+    result, release_dir = _run_nightly_release_summary(tmp_path, "attention,kernels")
+
+    assert result == 1
+    manifest = json.loads((release_dir / "release-manifest.json").read_text())
+    assert manifest["result"] == "FAILED"
+    attention, kernels = manifest["areas"]
+    assert attention["attempt"] == 1
+    assert attention["result"] == "PASSED"
+    assert kernels["attempt"] == 2
+    assert kernels["result"] == "FAILED"
 
 
 @pytest.mark.parametrize(
@@ -1558,7 +1638,9 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
     assert summary_job["if"] == "always()"
     assert "publish-summary" in config["jobs"]["nightly-finish"]["needs"]
     assert "summary-nightly" in summary_job["steps"][-1]["run"]
-    assert "/${{ github.job }}/" not in summary_job["steps"][-1]["env"]["RESULTS_ROOT"]
+    assert summary_job["steps"][-1]["env"]["RESULTS_ROOT"] == "/wl_nas/devops"
+    assert "--run-id" in summary_job["steps"][-1]["run"]
+    assert "--run-attempt" in summary_job["steps"][-1]["run"]
     release_config = workflow("ppu-build-nightly.yml")
     assert release_config[True]["workflow_call"]["secrets"] == {
         "PPU_ARTIFACTORY_USER": {"required": True},
@@ -1599,6 +1681,7 @@ def test_nightly_inputs_and_artifacts_are_device_scoped():
     bundle = next(s for s in finish["steps"] if s.get("id") == "bundle")
     assert bundle["if"] == "always()"
     assert "summary-release" in bundle["run"]
+    assert bundle["env"]["RESULTS_ROOT"] == "/wl_nas/devops"
     upload = next(s for s in finish["steps"] if s.get("id") == "upload")
     assert upload["if"] == "always()"
     assert upload["with"]["if-no-files-found"] == "error"

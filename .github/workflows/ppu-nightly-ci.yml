@@ -143,11 +143,12 @@ jobs:
           NEEDS_JSON: ${{ toJson(needs) }}
           AREAS: ${{ inputs.areas }}
           DEVICE: ${{ inputs.device || 'OAM-810E' }}
-          RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
+          RESULTS_ROOT: /wl_nas/devops
         run: |
           python3 scripts/ppu/ppu_ci_nightly.py summary-nightly \
             --results-root "${RESULTS_ROOT}" --areas "${AREAS}" \
-            --device "${DEVICE}" --ci-sha "${GITHUB_SHA}"
+            --device "${DEVICE}" --ci-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
 
   nightly-finish:
     needs: [publish-summary, resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]
