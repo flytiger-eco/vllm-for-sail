@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-import regex as re
-
 SUPPORTED_RELEASES = ("v0.26.0", "v0.27.0", "v0.28.0")
 # Test paths an area script may reference although only some release branches carry
 # them. Without an entry here the layout check reports the path as missing, which is
@@ -156,6 +154,9 @@ def path_supported_on_release(area, relative, release):
 
 def check_source_layout(source_root, release=None):
     """Find dead pytest paths before collection can silently discard them."""
+    # Keep summary commands independent of third-party packages on K8s.
+    import regex as re
+
     root = Path(source_root).resolve()
     problems = []
     path_pattern = re.compile(r"(?<![\w./-])(tests/[\w./.*?\[\]-]+)")

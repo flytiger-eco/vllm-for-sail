@@ -145,7 +145,6 @@ jobs:
           DEVICE: ${{ inputs.device || 'OAM-810E' }}
           RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
         run: |
-          python3 -m pip install --quiet --break-system-packages regex
           python3 scripts/ppu/ppu_ci_nightly.py summary-nightly \
             --results-root "${RESULTS_ROOT}" --areas "${AREAS}" \
             --device "${DEVICE}" --ci-sha "${GITHUB_SHA}"

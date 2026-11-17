@@ -438,7 +438,6 @@ jobs:
           WHEEL_SHA256: ${{ needs.build-wheel.outputs.wheel_sha256 }}
           RESULTS_ROOT: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test
         run: |
-          python3 -m pip install --quiet --break-system-packages regex
           python3 scripts/ppu/ppu_ci_nightly.py summary-release \
             --results-root "${RESULTS_ROOT}" --release "${RELEASE}" \
             --areas "${AREAS}" --device "${DEVICE}" \
