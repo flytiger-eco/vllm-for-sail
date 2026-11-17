@@ -226,7 +226,8 @@ diff --git a/tests/kernels/quantization/test_marlin_tile_padding.py b/tests/kern
      _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
      reason="FP8 Marlin is not supported on this GPU type.",
 PATCH
-  elif [[ "${PPU_RELEASE}" == "v0.27.0" ]]; then
+  elif [[ "${PPU_RELEASE}" == "v0.27.0" || \
+          "${PPU_RELEASE}" == "v0.28.0" ]]; then
     _apply_ppu_fix <<'PATCH'
 diff --git a/tests/kernels/quantization/test_marlin_tile_padding.py b/tests/kernels/quantization/test_marlin_tile_padding.py
 --- a/tests/kernels/quantization/test_marlin_tile_padding.py

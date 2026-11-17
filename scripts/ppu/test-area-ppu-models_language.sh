@@ -31,9 +31,10 @@ pytest() {
   python3 "${REPO_ROOT}/scripts/ppu/ppu_ci_nightly.py" run-pytest -- "$@"
 }
 
-# The untrained tiny-mixtral logits are sensitive to graph/batch scheduling.
-# Keep the HF comparison strict while making the two execution paths deterministic.
-python3 - <<'PY'
+# ZW's untrained tiny-mixtral logits are sensitive to graph/batch scheduling.
+# Keep OAM on the upstream defaults, which already pass this strict HF comparison.
+if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
+  python3 - <<'PY'
 from pathlib import Path
 
 path = Path("tests/models/language/generation/test_common.py")
@@ -67,6 +68,7 @@ if new not in text:
     text = text.replace(old, new, 1)
 path.write_text(text)
 PY
+fi
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" ]]; then
   # Run 41379000962: v0.26 PPU failures; keep other releases unchanged.

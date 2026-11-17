@@ -77,6 +77,35 @@ if new not in text:
 if not installed.is_file():
     raise RuntimeError(f"installed FlashAttention interface missing: {installed}")
 installed.write_text(source.read_text())
+
+# PPU cannot safely fork a test process after the parent has initialized its
+# device runtime. The tensor-schema test constructs its first device tensors in
+# the child, so use spawn while preserving the upstream default elsewhere.
+path = Path("tests/models/multimodal/processing/test_tensor_schema.py")
+text = path.read_text()
+old = "@create_new_process_for_each_test()\n"
+new = '''@create_new_process_for_each_test(
+    "spawn" if current_platform.is_ppu() else None
+)
+'''
+if new not in text:
+    if text.count(old) != 1:
+        raise RuntimeError(f"tensor-schema process decorator missing: {path}")
+    path.write_text(text.replace(old, new, 1))
+
+# Unlimited-OCR uses custom configuration/model code from its HF repository.
+path = Path("tests/models/registry.py")
+text = path.read_text()
+old = '''    "UnlimitedOCRForCausalLM": _HfExamplesInfo(
+        "baidu/Unlimited-OCR",
+    ),'''
+new = '''    "UnlimitedOCRForCausalLM": _HfExamplesInfo(
+        "baidu/Unlimited-OCR", trust_remote_code=True
+    ),'''
+if new not in text:
+    if text.count(old) != 1:
+        raise RuntimeError(f"Unlimited-OCR registry anchor missing: {path}")
+    path.write_text(text.replace(old, new, 1))
 PY
 
 if [[ "${PPU_RELEASE:-}" == "v0.26.0" || "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
@@ -156,6 +185,9 @@ MM_GENERATION_ARGS=(
 # collection-time crash: test_common.py's module-level video_with_metadata_glm4_1v()
 # -> hf_hub_download(sample_demo_1.mp4); an offline pod crashes during collection and -k/-m cannot avoid it
   "--ignore=tests/models/multimodal/generation/test_common.py"
+# Executed in its own pytest process below so its in-process LLM cannot retain
+# device memory and poison the following engine initializations.
+  "--ignore=tests/models/multimodal/generation/test_memory_leak.py"
 # librosa missing (reference.md Landmine #17)
   "--ignore=tests/models/multimodal/generation/test_whisper.py"
   "--ignore=tests/models/multimodal/generation/test_phi4mm.py"
@@ -232,16 +264,11 @@ fi
 # PPU_MM_MODEL_MAP="org/a=/path/a,..."). The snapshot is named by a 40-hex
 # revision because trust_remote_code models cannot load from snapshots/main.
 # ------------------------------------------------------------------------------
-if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
-  EXAONE_METADATA_DIR="${REPO_ROOT}/ci-wheel/hf-models/LGAI-EXAONE/EXAONE-4.5-33B"
-  if [[ ! -f "${EXAONE_METADATA_DIR}/config.json" ]]; then
-    echo "[setup] ERROR: staged EXAONE metadata is missing: ${EXAONE_METADATA_DIR}" >&2
-    exit 1
-  fi
-  EXAONE_MAPPING="LGAI-EXAONE/EXAONE-4.5-33B=${EXAONE_METADATA_DIR}"
-  export PPU_MM_MODEL_MAP="${PPU_MM_MODEL_MAP:+${PPU_MM_MODEL_MAP},}${EXAONE_MAPPING}"
+if [[ ! -d "${REPO_ROOT}/ci-wheel/hf-models" ]]; then
+  echo "[setup] ERROR: staged multimodal metadata is missing from the wheel artifact" >&2
+  exit 1
 fi
-echo "========== [setup] HF cache symlinks (/nas_aisw models) =========="
+echo "========== [setup] HF cache symlinks (CI metadata + /nas_aisw models) =========="
 python3 scripts/ppu/ppu_mm_hf_cache.py link \
   || echo "[setup] WARN: HF cache link step failed; generation cases may miss checkpoints"
 
@@ -281,6 +308,7 @@ IMG_SRC_CANDS = [
 VID_SRC_CANDS = [
     p for p in (os.environ.get("PPU_VIDEO_ASSET_SRC"),) if p
 ] + [
+    "${REPO_ROOT}/ci-wheel/hf-datasets/raushan-testing-hf/videos-test",
     "/nas_aisw/datasets/vllm_public_assets",
     "/nas_aisw/datasets/vllm_assets/multimodal_asset",
     "/nas_aisw/datasets/assets/vllm_public_assets",
@@ -318,13 +346,12 @@ if not os.path.exists(os.path.join(VID_DST, "sample_demo_1.mp4")):
           "test_common/test_tensor_schema collection will crash")
 PYEOF
 
-# v0.28 只恢复已有离线元数据支撑的 processing；缺失清单随结果发布，便于诊断。
-if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
-  echo "========== [preflight] offline HF cache coverage =========="
-  python3 scripts/ppu/ppu_mm_hf_cache.py check \
-    --out "${RESULTS_DIR}/mm-hf-cache-missing.tsv" \
-    || echo "[preflight] WARN: HF cache coverage check failed to run"
-fi
+# Keep the coverage report with the test artifacts; the tests themselves remain
+# the source of truth and no missing model is deselected.
+echo "========== [preflight] offline HF cache coverage =========="
+python3 scripts/ppu/ppu_mm_hf_cache.py check \
+  --out "${RESULTS_DIR}/mm-hf-cache-missing.tsv" \
+  || echo "[preflight] WARN: HF cache coverage check failed to run"
 
 # ------------------------------------------------------------------------------
 # [junit] merge helper (with a fallback when pytest crashes)
@@ -488,15 +515,13 @@ _run_step() {
   fi
 }
 
-# v0.26/v0.27 的整组 processing 离线缓存仍未补齐；v0.28 的 EXAONE 元数据已随
-# wheel artifact 发布，因此恢复真实 tensor-schema 执行。本 area 没有 multi。
+# test_memory_leak deliberately constructs an in-process LLM. Run the complete
+# fixture/test/teardown lifecycle in a separate pytest process so every device
+# allocation is released by process exit before the remaining generation tests.
+CUDA_VISIBLE_DEVICES=0 _run_step "mm_memory_leak" 1 \
+  tests/models/multimodal/generation/test_memory_leak.py -m core_model
 CUDA_VISIBLE_DEVICES=0 _run_step "mm_generation_dedicated" 1 "${MM_GENERATION_ARGS[@]}"
-if [[ "${PPU_RELEASE:-}" == "v0.26.0" || \
-      "${PPU_RELEASE:-}" == "v0.27.0" ]]; then
-  echo "[step] mm_processing skipped: release-wide offline metadata is incomplete"
-else
-  CUDA_VISIBLE_DEVICES=0 _run_step "mm_processing" 1 "${MM_PROCESSING_ARGS[@]}"
-fi
+CUDA_VISIBLE_DEVICES=0 _run_step "mm_processing" 1 "${MM_PROCESSING_ARGS[@]}"
 
 # ------------------------------------------------------------------------------
 # [summary] aggregate exit code: the script exits with the merged rc so CI reports the truth

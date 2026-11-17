@@ -97,6 +97,7 @@ jobs:
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+      PPU_HF_TOKEN: ${{ secrets.PPU_HF_TOKEN }}
 
   release-v0-27-0:
     needs: resolve-releases
@@ -111,6 +112,7 @@ jobs:
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+      PPU_HF_TOKEN: ${{ secrets.PPU_HF_TOKEN }}
 
   release-v0-28-0:
     needs: resolve-releases
@@ -125,6 +127,7 @@ jobs:
     secrets:
       PPU_ARTIFACTORY_USER: ${{ secrets.PPU_ARTIFACTORY_USER }}
       PPU_ARTIFACTORY_PASSWORD: ${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+      PPU_HF_TOKEN: ${{ secrets.PPU_HF_TOKEN }}
 
   nightly-finish:
     needs: [resolve-releases, release-v0-26-0, release-v0-27-0, release-v0-28-0]

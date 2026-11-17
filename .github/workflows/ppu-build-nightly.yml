@@ -26,6 +26,8 @@ on:
         required: true
       PPU_ARTIFACTORY_PASSWORD:
         required: true
+      PPU_HF_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -205,26 +207,40 @@ jobs:
           python3 -m pip download --no-deps pytest pytest-asyncio tblib pytest-shard pyyaml \
             -d source/dist/toolchain \
             -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
-      - name: Stage EXAONE processor metadata
-        if: inputs.release == 'v0.28.0'
+      - name: Stage multimodal processor metadata
+        if: contains(needs.select-areas.outputs.matrix, 'models-multimodal')
+        env:
+          PPU_HF_TOKEN: ${{ secrets.PPU_HF_TOKEN }}
         run: |
-          python3 -m pip install --quiet huggingface_hub
+          python3 -m pip install --quiet huggingface_hub pytest packaging transformers
+          python3 source/scripts/ppu/ppu_mm_hf_cache.py requirements \
+            --lightweight --processing-only --out source/dist/mm-requirements.tsv
+          staged=0
           for endpoint in https://huggingface.co https://hf-mirror.com; do
-            echo "[hf] fetching EXAONE processor metadata from ${endpoint}"
-            if HF_ENDPOINT="${endpoint}" HF_HUB_OFFLINE=0 python3 - <<'PY'
-          from huggingface_hub import snapshot_download
-
-          snapshot_download(
-              repo_id="LGAI-EXAONE/EXAONE-4.5-33B",
-              local_dir="source/dist/hf-models/LGAI-EXAONE/EXAONE-4.5-33B",
-              allow_patterns=["*.json", "*.model", "*.txt", "*.jinja", "*.py"],
-          )
-          PY
-            then
+            echo "[hf] fetching multimodal processor metadata from ${endpoint}"
+            cache_key="${endpoint#https://}"
+            cache_key="${cache_key//[^a-zA-Z0-9]/_}"
+            if [[ "${endpoint}" == "https://huggingface.co" ]]; then
+              export HF_TOKEN="${PPU_HF_TOKEN:-}"
+              unset HF_HUB_DISABLE_IMPLICIT_TOKEN
+            else
+              # Never disclose the HF credential to a third-party mirror.
+              unset HF_TOKEN
+              export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+            fi
+            if HF_ENDPOINT="${endpoint}" HF_HUB_OFFLINE=0 \
+               python3 source/scripts/ppu/ppu_mm_hf_cache.py prefetch \
+                 --list source/dist/mm-requirements.tsv \
+                 --cache-dir "source/dist/hf-download-cache/${cache_key}" \
+                 --local-root source/dist/hf-models \
+                 --dataset-root source/dist/hf-datasets \
+                 --metadata-only --max-workers 2 \
+                 --retries 4 --retry-delay 15; then
+              staged=1
               break
             fi
           done
-          test -f source/dist/hf-models/LGAI-EXAONE/EXAONE-4.5-33B/config.json
+          test "${staged}" -eq 1
       - name: Upload wheel artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -233,7 +249,9 @@ jobs:
             source/dist/*.whl
             source/dist/manifest.json
             source/dist/toolchain/*.whl
+            source/dist/mm-requirements.tsv
             source/dist/hf-models/**
+            source/dist/hf-datasets/**
           if-no-files-found: error
 
   select-areas:
