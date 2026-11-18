@@ -81,7 +81,11 @@ AREAS = (
     Area("misc", nproc=1, run_timeout=90),
     Area("model-runner-v2", nproc=2, run_timeout=90),
     Area("models-distributed", nproc=2, run_timeout=90),
-    Area("models-multimodal", nproc=1, run_timeout=90),
+    # run_timeout 150: mm_processing runs 159 tensor-schema cases single-card
+    # serially, each respawning the interpreter + reloading the model under
+    # VLLM_WORKER_MULTIPROC_METHOD=spawn; 90min only reached 129/159 before the
+    # pod timeout killed it (run 44122846215). job timeout = 150 + 25 margin.
+    Area("models-multimodal", nproc=1, run_timeout=150),
     Area("pytorch", nproc=1, run_timeout=90),
     Area("quantization", nproc=1, run_timeout=90),
     Area("weight-loading", nproc=2, run_timeout=90),

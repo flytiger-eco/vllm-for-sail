@@ -158,7 +158,7 @@ TMP_JUNIT="/tmp/ppu-models-multimodal-junit"
 mkdir -p "${RESULTS_DIR}" "${TMP_JUNIT}"
 
 # ------------------------------------------------------------------------------
-# [deps] area-specific dependencies: opencv (cv2).
+# [deps] area-specific dependencies: opencv (cv2) + tensor-schema model deps.
 # ------------------------------------------------------------------------------
 if python3 -c "import cv2" 2>/dev/null; then
   echo "[deps] opencv already importable: $(python3 -c 'import cv2; print(cv2.__version__)')"
@@ -168,6 +168,22 @@ else
     -i "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple" || \
 echo "[deps] WARN: opencv install failed - the test_common import chain crashes at collection"
 fi
+
+# timm/einops/regex back several tensor-schema vision models that otherwise fail
+# at processor/model construction (run 44122846215): HyperCLOVAX-SEED-Vision-3B,
+# kanana-1.5-v-3b, NVIDIA-Nemotron-Parse-v1.2, Llama-3.1-Nemotron-Nano-VL-8B-V1.
+# Idempotent install mirroring test-area-ppu-models_language.sh.
+PIP_INSTALL="python3 -m pip install --no-cache-dir"
+PPU_PIP_INDEX="https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"
+for pkg in einops timm regex; do
+  if python3 -c "import ${pkg}" 2>/dev/null; then
+    echo "[deps] ${pkg} already importable — skip"
+  else
+    echo "[deps] installing ${pkg}"
+    ${PIP_INSTALL} "${pkg}" -i "${PPU_PIP_INDEX}" || \
+      echo "[deps] WARN: ${pkg} install failed - tensor-schema cases needing it will fail"
+  fi
+done
 
 # ------------------------------------------------------------------------------
 # [tests] case selection (snapshot of the single section in legacy_ci/ppu_extras/models_multimodal.yaml)
