@@ -597,10 +597,10 @@ def _attempt_root(results_root, run_id, attempt):
 def _resolve_area_dir(results_root, run_id, run_attempt, release, device, area):
     """Return the newest attempt directory that holds this area's results.
 
-    The always-on validate step recreates the area directory on every rerun,
-    so an earlier attempt is only used for areas that were not rerun. A rerun
-    area with missing or failed results stays FAILED instead of falling back
-    to an older success.
+    The payload step claims the area directory before dispatch and the
+    always-on validate step refreshes it, so an earlier attempt is only used
+    for areas that were not rerun. A rerun area with missing or failed results
+    stays FAILED instead of falling back to an older success.
     """
     for attempt in range(int(run_attempt), 0, -1):
         candidate = (
@@ -649,7 +649,41 @@ def render_release_table(release, device, meta, areas, overall):
     return lines
 
 
-def _load_release_manifest(results_root, run_id, run_attempt, release, device):
+def _manifest_valid(manifest, expected_areas):
+    """Reject manifests with wrong coverage, fields, counts, or consistency."""
+    if not isinstance(manifest, dict) or manifest.get("result") not in (
+        "PASSED",
+        "FAILED",
+    ):
+        return False
+    areas = manifest.get("areas")
+    if not isinstance(areas, list) or not areas:
+        return False
+    if {item.get("name") for item in areas} != set(expected_areas):
+        return False
+    for item in areas:
+        if item.get("result") not in ("PASSED", "FAILED"):
+            return False
+        totals = item.get("totals")
+        if totals is None:
+            if item["result"] == "PASSED":
+                return False
+            continue
+        if not isinstance(totals, dict) or any(
+            not isinstance(totals.get(key), int) for key in _COUNT_KEYS
+        ):
+            return False
+        clean = totals["tests"] > 0 and not totals["failures"] and not totals["errors"]
+        if item["result"] == "PASSED" and not clean:
+            return False
+    return manifest["result"] == "FAILED" or all(
+        item["result"] == "PASSED" for item in areas
+    )
+
+
+def _load_release_manifest(
+    results_root, run_id, run_attempt, release, device, expected_areas
+):
     """Read the newest release manifest; missing or invalid means FAILED."""
     current_attempt = int(run_attempt)
     for attempt in range(current_attempt, 0, -1):
@@ -665,14 +699,8 @@ def _load_release_manifest(results_root, run_id, run_attempt, release, device):
             continue
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
-            if manifest["result"] not in ("PASSED", "FAILED"):
-                return None
-            if not all(
-                item["result"] in ("PASSED", "FAILED") for item in manifest["areas"]
-            ):
-                return None
-            return manifest
-        except (OSError, ValueError, KeyError, TypeError):
+            return manifest if _manifest_valid(manifest, expected_areas) else None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
     return None
 
@@ -700,7 +728,12 @@ def command_nightly_summary(args):
         if release not in selected:
             continue
         manifest = _load_release_manifest(
-            args.results_root, args.run_id, args.run_attempt, release, args.device
+            args.results_root,
+            args.run_id,
+            args.run_attempt,
+            release,
+            args.device,
+            [area.name for area in fallback_areas],
         )
         if manifest is None:
             # Fail closed: without a trustworthy manifest every area is FAILED.
