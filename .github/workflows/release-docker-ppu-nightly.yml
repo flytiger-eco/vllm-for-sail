@@ -47,7 +47,7 @@ jobs:
           short_sha="${commit:0:7}"
           {
             echo "image=ghcr.io/${owner_lc}/vllm-ppu-nightly"
-            echo "tag=v0.33.0-${date_tag}-cuda13.0.0-sdk2.2.0-${short_sha}"
+            echo "tag=v0.33.0-${date_tag}-cuda13.0.0-sdk2.2.1-${short_sha}"
             echo "rolling=nightly"
             echo "commit=${commit}"
           } >> "$GITHUB_OUTPUT"
