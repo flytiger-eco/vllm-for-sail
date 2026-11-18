@@ -695,7 +695,8 @@ def _load_release_manifest(
             / "release-manifest.json"
         )
         if not path.is_file():
-            if attempt == current_attempt and path.parent.is_dir():
+            # A claimed attempt without a manifest blocks older fallbacks.
+            if path.parent.is_dir():
                 return None
             continue
         try:
@@ -771,7 +772,7 @@ def _release_area_manifest(area_dir, name, attempt):
         "name": name,
         "attempt": attempt,
         "present": area_dir.is_dir(),
-        "result": status,
+        "result": "FAILED" if issues else status,
         "complete": not issues,
         "issues": issues,
         "totals": totals,
@@ -796,36 +797,50 @@ def _matches_current_build(area_dir, args):
     )
 
 
+def _github_api(path):
+    request = urllib.request.Request(
+        f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def _retained_from_jobs(jobs, attempt_started_at, suffix):
+    # Retained jobs carry the current run_attempt, so judge by execution time.
+    retained = set()
+    for job in jobs:
+        name = job.get("name", "")
+        completed_at = job.get("completed_at") or ""
+        if (
+            job.get("conclusion") == "success"
+            and completed_at
+            and completed_at < attempt_started_at
+            and suffix in name
+        ):
+            retained.add(name.rsplit(suffix, 1)[1])
+    return retained
+
+
 def _retained_successful_areas(args):
     """Find area jobs retained from earlier attempts of this run."""
+    repo = os.environ["GITHUB_REPOSITORY"]
+    run = _github_api(f"/repos/{repo}/actions/runs/{args.run_id}")
+    attempt_started_at = run["run_started_at"]
     suffix = f" / {args.release} / {args.device} / "
     retained = set()
     page = 1
     while True:
-        url = (
-            f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}"
-            f"/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{args.run_id}"
+        payload = _github_api(
+            f"/repos/{repo}/actions/runs/{args.run_id}"
             f"/jobs?filter=latest&per_page=100&page={page}"
         )
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            jobs = json.load(response)["jobs"]
-        for job in jobs:
-            attempt = int(job.get("run_attempt", 0))
-            name = job.get("name", "")
-            if (
-                job.get("conclusion") == "success"
-                and 0 < attempt < int(args.run_attempt)
-                and suffix in name
-            ):
-                retained.add(name.rsplit(suffix, 1)[1])
+        jobs = payload["jobs"]
+        retained |= _retained_from_jobs(jobs, attempt_started_at, suffix)
         if len(jobs) < 100:
             return retained
         page += 1
