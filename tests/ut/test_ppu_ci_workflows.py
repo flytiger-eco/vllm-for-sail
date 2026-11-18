@@ -934,7 +934,12 @@ def test_nightly_release_summary_preserves_failed_and_missing_evidence(tmp_path)
     assert "Incomplete areas: kernels" in summary
 
 
-def test_nightly_release_summary_reuses_earlier_attempt_for_skipped_reruns(tmp_path):
+def test_nightly_release_summary_reuses_earlier_attempt_for_skipped_reruns(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        nightly, "_retained_successful_areas", lambda args: {"attention"}
+    )
     devops = tmp_path / "devops"
     first = devops / "123-1/test/v0.26.0/OAM-810E"
     _write_nightly_area_evidence(first, "attention")
@@ -954,7 +959,12 @@ def test_nightly_release_summary_reuses_earlier_attempt_for_skipped_reruns(tmp_p
     assert (release_dir / "attention" / "raw").is_dir()
 
 
-def test_nightly_release_summary_prefers_rerun_failure_over_old_success(tmp_path):
+def test_nightly_release_summary_prefers_rerun_failure_over_old_success(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        nightly, "_retained_successful_areas", lambda args: {"attention"}
+    )
     devops = tmp_path / "devops"
     first = devops / "123-1/test/v0.26.0/OAM-810E"
     _write_nightly_area_evidence(first, "attention")

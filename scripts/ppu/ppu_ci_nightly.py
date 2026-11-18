@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import sys
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -795,11 +796,55 @@ def _matches_current_build(area_dir, args):
     )
 
 
+def _retained_successful_areas(args):
+    """Find area jobs retained from earlier attempts of this run."""
+    suffix = f" / {args.release} / {args.device} / "
+    retained = set()
+    page = 1
+    while True:
+        url = (
+            f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}"
+            f"/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{args.run_id}"
+            f"/jobs?filter=latest&per_page=100&page={page}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            jobs = json.load(response)["jobs"]
+        for job in jobs:
+            attempt = int(job.get("run_attempt", 0))
+            name = job.get("name", "")
+            if (
+                job.get("conclusion") == "success"
+                and 0 < attempt < int(args.run_attempt)
+                and suffix in name
+            ):
+                retained.add(name.rsplit(suffix, 1)[1])
+        if len(jobs) < 100:
+            return retained
+        page += 1
+
+
 def command_release_summary(args):
     requested = [name for name in args.areas.replace(",", " ").split() if name]
     if args.areas.strip() and not requested:
         raise SelectionError("no area in manual selection")
     selected_areas = select(requested)
+    current_attempt = int(args.run_attempt)
+    retained = set()
+    if current_attempt > 1:
+        try:
+            retained = _retained_successful_areas(args)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            print(
+                f"[summary-release] cannot confirm retained jobs: {error}; fail closed"
+            )
     release_dir = (
         _attempt_root(args.results_root, args.run_id, args.run_attempt)
         / args.release
@@ -807,14 +852,18 @@ def command_release_summary(args):
     )
     area_results = []
     for area in selected_areas:
-        area_dir, attempt = _resolve_area_dir(
-            args.results_root,
-            args.run_id,
-            args.run_attempt,
-            args.release,
-            args.device,
-            area.name,
-        )
+        if current_attempt > 1 and area.name not in retained:
+            area_dir = release_dir / area.name
+            attempt = current_attempt
+        else:
+            area_dir, attempt = _resolve_area_dir(
+                args.results_root,
+                args.run_id,
+                args.run_attempt,
+                args.release,
+                args.device,
+                area.name,
+            )
         target = release_dir / area.name
         if area_dir != target:
             # Materialize earlier-attempt evidence only for the same build;
