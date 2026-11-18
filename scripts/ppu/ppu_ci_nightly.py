@@ -15,11 +15,10 @@ import os
 import shlex
 import shutil
 import sys
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
-
-import regex as re
 
 SUPPORTED_RELEASES = ("v0.26.0", "v0.27.0", "v0.28.0")
 # Test paths an area script may reference although only some release branches carry
@@ -105,6 +104,17 @@ def select(requested):
     return [by_name(name) for name in names] if names else list(AREAS)
 
 
+def stagger_lora(areas, release):
+    """Place the four-card LoRA area at a release-specific matrix slot."""
+    if release not in SUPPORTED_RELEASES or all(area.name != "lora" for area in areas):
+        return areas
+    lora = next(area for area in areas if area.name == "lora")
+    ordered = [area for area in areas if area.name != "lora"]
+    slot = {"v0.26.0": 4, "v0.27.0": 12}.get(release, len(ordered))
+    ordered.insert(min(slot, len(ordered)), lora)
+    return ordered
+
+
 def worst_case_minutes(areas):
     return sum(area.timeout for area in areas)
 
@@ -145,6 +155,9 @@ def path_supported_on_release(area, relative, release):
 
 def check_source_layout(source_root, release=None):
     """Find dead pytest paths before collection can silently discard them."""
+    # Keep summary commands independent of third-party packages on K8s.
+    import regex as re
+
     root = Path(source_root).resolve()
     problems = []
     path_pattern = re.compile(r"(?<![\w./-])(tests/[\w./.*?\[\]-]+)")
@@ -250,6 +263,8 @@ def command_select(args):
     if args.areas.strip() and not requested:
         raise SelectionError("no area in manual selection")
     areas = select(requested)
+    if not requested:
+        areas = stagger_lora(areas, args.release)
     entries = [area.matrix_entry() for area in areas]
     matrix = json.dumps(entries, separators=(",", ":"))
     emit_github_output({"matrix": matrix, "count": str(len(entries))}, args.stream)
@@ -553,6 +568,405 @@ def command_skip_empty(args):
     return record_empty_skip(args.path, args.release, args.label, selection)
 
 
+def _nightly_area_result(area_dir):
+    try:
+        suites = list(ET.parse(area_dir / "test.xml").iter("testsuite"))
+        if not suites:
+            raise ValueError("JUnit has no testsuite")
+        totals = {
+            key: sum(int(suite.get(key, "0")) for suite in suites)
+            for key in ("tests", "failures", "errors", "skipped")
+        }
+    except (OSError, ValueError, ET.ParseError):
+        return "FAILED", None
+    try:
+        exit_code = int((area_dir / "exit-code.txt").read_text().strip())
+    except (OSError, ValueError):
+        return "FAILED", totals
+    if exit_code or totals["tests"] <= 0 or totals["failures"] or totals["errors"]:
+        return "FAILED", totals
+    return "PASSED", totals
+
+
+_COUNT_KEYS = ("tests", "failures", "errors", "skipped")
+
+
+def _attempt_root(results_root, run_id, attempt):
+    return Path(results_root) / f"{run_id}-{attempt}" / "test"
+
+
+def _resolve_area_dir(results_root, run_id, run_attempt, release, device, area):
+    """Return the newest attempt directory that holds this area's results.
+
+    The payload step claims the area directory before dispatch and the
+    always-on validate step refreshes it, so an earlier attempt is only used
+    for areas that were not rerun. A rerun area with missing or failed results
+    stays FAILED instead of falling back to an older success.
+    """
+    for attempt in range(int(run_attempt), 0, -1):
+        candidate = (
+            _attempt_root(results_root, run_id, attempt) / release / device / area
+        )
+        if candidate.is_dir():
+            return candidate, attempt
+    return (
+        _attempt_root(results_root, run_id, run_attempt) / release / device / area,
+        int(run_attempt),
+    )
+
+
+def render_release_table(release, device, meta, areas, overall):
+    """Render one release table from manifest-style area entries."""
+    lines = [
+        f"## {release} / {device}",
+        "",
+        f"Source SHA: `{meta.get('source_sha') or '<unavailable>'}`",
+        f"CI SHA: `{meta.get('ci_sha') or '<unavailable>'}`",
+        f"Wheel version: `{meta.get('wheel_version') or '<unavailable>'}`",
+        f"Wheel SHA256: `{meta.get('wheel_sha256') or '<unavailable>'}`",
+        "",
+        "| Area | Tests | Failures | Errors | Skipped | Result |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    totals = dict.fromkeys(_COUNT_KEYS, 0)
+    for item in areas:
+        counts = item.get("totals")
+        values = {key: "-" for key in _COUNT_KEYS}
+        if counts is not None:
+            values = counts
+            for key in _COUNT_KEYS:
+                totals[key] += counts[key]
+        lines.append(
+            f"| {item['name']} | {values['tests']} | {values['failures']} | "
+            f"{values['errors']} | {values['skipped']} | {item['result']} |"
+        )
+    lines.extend(
+        [
+            f"| **Total** | **{totals['tests']}** | **{totals['failures']}** | "
+            f"**{totals['errors']}** | **{totals['skipped']}** | **{overall}** |",
+            "",
+        ]
+    )
+    return lines
+
+
+def _manifest_valid(manifest, expected_areas):
+    """Reject manifests with wrong coverage, fields, counts, or consistency."""
+    if not isinstance(manifest, dict) or manifest.get("result") not in (
+        "PASSED",
+        "FAILED",
+    ):
+        return False
+    areas = manifest.get("areas")
+    if not isinstance(areas, list) or not areas:
+        return False
+    if {item.get("name") for item in areas} != set(expected_areas):
+        return False
+    for item in areas:
+        if item.get("result") not in ("PASSED", "FAILED"):
+            return False
+        totals = item.get("totals")
+        if totals is None:
+            if item["result"] == "PASSED":
+                return False
+            continue
+        if not isinstance(totals, dict) or any(
+            not isinstance(totals.get(key), int) for key in _COUNT_KEYS
+        ):
+            return False
+        clean = totals["tests"] > 0 and not totals["failures"] and not totals["errors"]
+        if item["result"] == "PASSED" and not clean:
+            return False
+    return manifest["result"] == "FAILED" or all(
+        item["result"] == "PASSED" for item in areas
+    )
+
+
+def _load_release_manifest(
+    results_root, run_id, run_attempt, release, device, expected_areas
+):
+    """Read the newest release manifest; missing or invalid means FAILED."""
+    current_attempt = int(run_attempt)
+    for attempt in range(current_attempt, 0, -1):
+        path = (
+            _attempt_root(results_root, run_id, attempt)
+            / release
+            / device
+            / "release-manifest.json"
+        )
+        if not path.is_file():
+            # A claimed attempt without a manifest blocks older fallbacks.
+            if path.parent.is_dir():
+                return None
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            return manifest if _manifest_valid(manifest, expected_areas) else None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+    return None
+
+
+def command_nightly_summary(args):
+    if args.output is None:
+        raise SelectionError("summary-nightly requires --output or GITHUB_STEP_SUMMARY")
+    needs = json.loads(os.environ["NEEDS_JSON"])
+    selected = (
+        needs.get("resolve-releases", {}).get("outputs", {}).get("selected", "")
+    ).split(",")
+    if any(release not in SUPPORTED_RELEASES for release in selected):
+        raise SelectionError(f"invalid selected releases: {selected}")
+    requested = [name for name in args.areas.replace(",", " ").split() if name]
+    if args.areas.strip() and not requested:
+        raise SelectionError("no area in manual selection")
+    fallback_areas = select(requested)
+    lines = [
+        "# PPU nightly summary",
+        "",
+        "Detailed per-step results are available in the `ppu-results-*` artifacts.",
+        "",
+    ]
+    for release in SUPPORTED_RELEASES:
+        if release not in selected:
+            continue
+        manifest = _load_release_manifest(
+            args.results_root,
+            args.run_id,
+            args.run_attempt,
+            release,
+            args.device,
+            [area.name for area in fallback_areas],
+        )
+        if manifest is None:
+            # Fail closed: without a trustworthy manifest every area is FAILED.
+            meta = {"ci_sha": args.ci_sha}
+            areas = [
+                {"name": area.name, "result": "FAILED", "totals": None}
+                for area in fallback_areas
+            ]
+            overall = "FAILED"
+        else:
+            meta = manifest
+            areas = manifest["areas"]
+            overall = manifest["result"]
+        lines.extend(render_release_table(release, args.device, meta, areas, overall))
+    with args.output.open("a", encoding="utf-8") as stream:
+        stream.write("\n".join(lines))
+    return 0
+
+
+def _release_area_manifest(area_dir, name, attempt):
+    status, totals = _nightly_area_result(area_dir)
+    required = ("summary.md", "test.xml", "exit-code.txt", "run.log", "job-info.txt")
+    issues = [f"missing {path}" for path in required if not (area_dir / path).is_file()]
+    # Unsharded steps log to run.log only, so raw logs must not be required.
+    if not list(area_dir.glob("raw/**/*.xml")):
+        issues.append("missing raw JUnit")
+    if totals is None:
+        issues.append("invalid test.xml")
+    try:
+        int((area_dir / "exit-code.txt").read_text().strip())
+    except (OSError, ValueError):
+        issues.append("invalid exit-code.txt")
+    job_info_path = area_dir / "job-info.txt"
+    if job_info_path.is_file():
+        try:
+            job_info = dict(
+                line.split(": ", 1)
+                for line in job_info_path.read_text().splitlines()
+                if ": " in line
+            )
+            job_result = job_info.get("Result")
+        except (OSError, UnicodeError):
+            job_result = None
+        if job_result not in ("PASSED", "FAILED"):
+            issues.append("invalid job-info Result")
+        elif job_result != status:
+            issues.append(
+                f"job-info Result {job_result} does not match test result {status}"
+            )
+    return {
+        "name": name,
+        "attempt": attempt,
+        "present": area_dir.is_dir(),
+        "result": "FAILED" if issues else status,
+        "complete": not issues,
+        "issues": issues,
+        "totals": totals,
+    }
+
+
+def _matches_current_build(area_dir, args):
+    """Earlier-attempt evidence is reusable only for the identical build."""
+    try:
+        info = dict(
+            line.split(": ", 1)
+            for line in (area_dir / "job-info.txt").read_text().splitlines()
+            if ": " in line
+        )
+    except OSError:
+        return False
+    return (
+        info.get("Source SHA") == args.source_sha
+        and info.get("CI SHA") == args.ci_sha
+        and info.get("Wheel version") == args.wheel_version
+        and info.get("Wheel SHA256") == args.wheel_sha256
+    )
+
+
+def _github_api(path):
+    request = urllib.request.Request(
+        f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def _retained_from_jobs(jobs, attempt_started_at, suffix):
+    # Retained jobs carry the current run_attempt, so judge by execution time.
+    retained = set()
+    for job in jobs:
+        name = job.get("name", "")
+        completed_at = job.get("completed_at") or ""
+        if (
+            job.get("conclusion") == "success"
+            and completed_at
+            and completed_at < attempt_started_at
+            and suffix in name
+        ):
+            retained.add(name.rsplit(suffix, 1)[1])
+    return retained
+
+
+def _retained_successful_areas(args):
+    """Find area jobs retained from earlier attempts of this run."""
+    repo = os.environ["GITHUB_REPOSITORY"]
+    run = _github_api(f"/repos/{repo}/actions/runs/{args.run_id}")
+    attempt_started_at = run["run_started_at"]
+    suffix = f" / {args.release} / {args.device} / "
+    retained = set()
+    page = 1
+    while True:
+        payload = _github_api(
+            f"/repos/{repo}/actions/runs/{args.run_id}"
+            f"/jobs?filter=latest&per_page=100&page={page}"
+        )
+        jobs = payload["jobs"]
+        retained |= _retained_from_jobs(jobs, attempt_started_at, suffix)
+        if len(jobs) < 100:
+            return retained
+        page += 1
+
+
+def command_release_summary(args):
+    requested = [name for name in args.areas.replace(",", " ").split() if name]
+    if args.areas.strip() and not requested:
+        raise SelectionError("no area in manual selection")
+    selected_areas = select(requested)
+    current_attempt = int(args.run_attempt)
+    retained = set()
+    if current_attempt > 1:
+        try:
+            retained = _retained_successful_areas(args)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            print(
+                f"[summary-release] cannot confirm retained jobs: {error}; fail closed"
+            )
+    release_dir = (
+        _attempt_root(args.results_root, args.run_id, args.run_attempt)
+        / args.release
+        / args.device
+    )
+    area_results = []
+    for area in selected_areas:
+        if current_attempt > 1 and area.name not in retained:
+            area_dir = release_dir / area.name
+            attempt = current_attempt
+        else:
+            area_dir, attempt = _resolve_area_dir(
+                args.results_root,
+                args.run_id,
+                args.run_attempt,
+                args.release,
+                args.device,
+                area.name,
+            )
+        target = release_dir / area.name
+        if area_dir != target:
+            # Materialize earlier-attempt evidence only for the same build;
+            # anything else fails closed as missing evidence.
+            if _matches_current_build(area_dir, args):
+                shutil.copytree(area_dir, target)
+            area_dir = target
+        area_results.append(_release_area_manifest(area_dir, area.name, attempt))
+    complete_count = sum(item["complete"] for item in area_results)
+    passed = all(
+        item["complete"] and item["result"] == "PASSED" for item in area_results
+    )
+    meta = {
+        "source_sha": args.source_sha,
+        "ci_sha": args.ci_sha,
+        "wheel_version": args.wheel_version,
+        "wheel_sha256": args.wheel_sha256,
+    }
+    lines = [
+        "# PPU nightly summary",
+        "",
+        "Detailed per-step results are available in the `ppu-results-*` artifacts.",
+        "",
+    ]
+    lines.extend(
+        render_release_table(
+            args.release,
+            args.device,
+            meta,
+            area_results,
+            "PASSED" if passed else "FAILED",
+        )
+    )
+    content = "\n".join(lines)
+    incomplete = [item["name"] for item in area_results if not item["complete"]]
+    content += f"\nEvidence: **{complete_count}/{len(area_results)} complete**.\n"
+    if incomplete:
+        content += "Incomplete areas: " + ", ".join(incomplete) + "\n"
+    manifest = {
+        "schema_version": 1,
+        "run_id": args.run_id,
+        "run_attempt": args.run_attempt,
+        "release": args.release,
+        "device": args.device,
+        "source_sha": args.source_sha,
+        "ci_sha": args.ci_sha,
+        "wheel_version": args.wheel_version,
+        "wheel_sha256": args.wheel_sha256,
+        "result": "PASSED" if passed else "FAILED",
+        "expected_areas": len(area_results),
+        "present_areas": sum(item["present"] for item in area_results),
+        "complete_areas": complete_count,
+        "passed_areas": sum(
+            item["complete"] and item["result"] == "PASSED" for item in area_results
+        ),
+        "missing_areas": [item["name"] for item in area_results if not item["present"]],
+        "incomplete_areas": incomplete,
+        "areas": area_results,
+    }
+    release_dir.mkdir(parents=True, exist_ok=True)
+    (release_dir / "release-summary.md").write_text(content, encoding="utf-8")
+    (release_dir / "release-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        f"[summary-release] {args.release}/{args.device}: {manifest['result']}; "
+        f"evidence={complete_count}/{len(area_results)}"
+    )
+    return int(not passed)
+
+
 def summarize_results(results_dir, exit_code):
     """Combine JUnit and process status; empty collections never pass."""
     results_dir = Path(results_dir)
@@ -623,6 +1037,7 @@ def parse_args(argv):
         default=os.environ.get("AREAS", ""),
         help="comma or space separated names; empty means all daily areas",
     )
+    select_parser.add_argument("--release", choices=SUPPORTED_RELEASES)
     select_parser.set_defaults(func=command_select)
 
     check_parser = sub.add_parser("check", help="validate registry and source layout")
@@ -654,6 +1069,47 @@ def parse_args(argv):
     summary_parser.set_defaults(
         func=lambda args: summarize_results(args.results_dir, args.exit_code)
     )
+
+    nightly_summary_parser = sub.add_parser(
+        "summary-nightly", help="render one summary table per release"
+    )
+    nightly_summary_parser.add_argument(
+        "--results-root",
+        required=True,
+        type=Path,
+        help="devops root holding {run_id}-{attempt}/test result trees",
+    )
+    nightly_summary_parser.add_argument("--areas", default=os.environ.get("AREAS", ""))
+    nightly_summary_parser.add_argument("--device", required=True)
+    nightly_summary_parser.add_argument("--ci-sha", required=True)
+    nightly_summary_parser.add_argument("--run-id", required=True)
+    nightly_summary_parser.add_argument("--run-attempt", required=True)
+    nightly_summary_parser.add_argument(
+        "--output", type=Path, default=os.environ.get("GITHUB_STEP_SUMMARY")
+    )
+    nightly_summary_parser.set_defaults(func=command_nightly_summary)
+
+    release_summary_parser = sub.add_parser(
+        "summary-release", help="write one release result bundle and evidence manifest"
+    )
+    release_summary_parser.add_argument(
+        "--results-root",
+        required=True,
+        type=Path,
+        help="devops root holding {run_id}-{attempt}/test result trees",
+    )
+    release_summary_parser.add_argument(
+        "--release", required=True, choices=SUPPORTED_RELEASES
+    )
+    release_summary_parser.add_argument("--areas", default=os.environ.get("AREAS", ""))
+    release_summary_parser.add_argument("--device", required=True)
+    release_summary_parser.add_argument("--source-sha", required=True)
+    release_summary_parser.add_argument("--ci-sha", required=True)
+    release_summary_parser.add_argument("--wheel-version", required=True)
+    release_summary_parser.add_argument("--wheel-sha256", required=True)
+    release_summary_parser.add_argument("--run-id", required=True)
+    release_summary_parser.add_argument("--run-attempt", required=True)
+    release_summary_parser.set_defaults(func=command_release_summary)
 
     list_parser = sub.add_parser("list", help="print the registry")
     list_parser.set_defaults(func=command_list)

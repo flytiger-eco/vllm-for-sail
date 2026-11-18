@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: OAM-810E
+    outputs:
+      wheel_version:
+        value: ${{ jobs.build-wheel.outputs.wheel_version }}
+      wheel_sha256:
+        value: ${{ jobs.build-wheel.outputs.wheel_sha256 }}
     secrets:
       PPU_ARTIFACTORY_USER:
         required: true
@@ -29,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PPU_BASE_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-20261001
@@ -42,6 +48,8 @@ jobs:
     timeout-minutes: 480
     outputs:
       artifact_name: ${{ steps.build.outputs.artifact_name }}
+      wheel_version: ${{ steps.build.outputs.wheel_version }}
+      wheel_sha256: ${{ steps.build.outputs.wheel_sha256 }}
     steps:
       - name: Check immutable inputs
         env:
@@ -142,7 +150,7 @@ jobs:
           mkdir -p "$HOST_CCACHE_DIR"
           (cd source && bash scripts/ppu/ppu_ci_nightly_build_wheel.sh "${RELEASE#v}")
           python3 - "$RELEASE" "$SOURCE_SHA" "$CI_SHA" "$VLLM_VERSION_OVERRIDE" <<'PY'
-          import hashlib, json, pathlib, sys, zipfile
+          import hashlib, json, os, pathlib, sys, zipfile
           release, source_sha, ci_sha, version = sys.argv[1:]
           wheels = list(pathlib.Path("source/dist").glob("*.whl"))
           assert len(wheels) == 1, wheels
@@ -168,6 +176,9 @@ jobs:
               "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
           }
           pathlib.Path("source/dist/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"wheel_version={version}", file=output)
+              print(f"wheel_sha256={manifest['wheel_sha256']}", file=output)
           print(json.dumps(manifest))
           PY
           echo "artifact_name=ppu-nightly-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}-${{ inputs.device }}" >> "$GITHUB_OUTPUT"
@@ -249,7 +260,7 @@ jobs:
           python3 -m pip install --quiet regex
           python3 source/scripts/ppu/ppu_ci_nightly.py check \
             --source-root "$GITHUB_WORKSPACE/source" --release "$RELEASE"
-          (cd source && python3 scripts/ppu/ppu_ci_nightly.py select)
+          (cd source && python3 scripts/ppu/ppu_ci_nightly.py select --release "${RELEASE}")
 
   test:
     name: ${{ inputs.release }} / ${{ inputs.device }} / ${{ matrix.area }}
@@ -300,7 +311,10 @@ jobs:
           CI_SHA: ${{ inputs.ci_sha }}
           AREA: ${{ matrix.area }}
           AREA_SCRIPT: ${{ matrix.script }}
+          NAS_DIR: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}
         run: |
+          mkdir -p "$NAS_DIR"
+          echo "Result: PENDING" > "$NAS_DIR/job-info.txt"
           python3 - "$RELEASE" "$SOURCE_SHA" "$CI_SHA" <<'PY'
           import hashlib, json, os, pathlib
           root = pathlib.Path("source")
@@ -328,7 +342,7 @@ jobs:
             python3 scripts/ppu/ppu_ci_nightly.py summarize test-results "$rc" || rc=1
             printf '%s\n' "$rc" > test-results/exit-code.txt
             chmod -R a+rX test-results || rc=1
-            mkdir -p "$PPU_SUMMARY_NAS_DIR" && cp -a test-results/. "$PPU_SUMMARY_NAS_DIR/" || rc=1
+            mkdir -p "$PPU_SUMMARY_NAS_DIR" && cp -a test-results/. "$PPU_SUMMARY_NAS_DIR/" && chmod a+rwX "$(dirname "$PPU_SUMMARY_NAS_DIR")" "$PPU_SUMMARY_NAS_DIR" || rc=1
             exit "$rc"
           }
           trap _publish_results EXIT
@@ -369,59 +383,103 @@ jobs:
             host_ipc: true
             shm_size: "8Gi"
           extra_env: >-
-            HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=${{ inputs.device }},PPU_RELEASE=${{ inputs.release }},PPU_SOURCE_SHA=${{ inputs.source_sha }},PPU_CI_SHA=${{ inputs.ci_sha }},PPU_WHEEL_PATH=${{ steps.payload.outputs.wheel_path }},PPU_WHEEL_SHA256=${{ steps.payload.outputs.wheel_sha256 }},PPU_EXPECTED_VLLM_VERSION=${{ steps.payload.outputs.wheel_version }},PPU_EXPECTED_DEVICES=${{ matrix.nproc }},PPU_TOOLCHAIN_DIR=/workspace/source/source/ci-wheel/toolchain,AREA=${{ matrix.area }},AREA_SCRIPT=${{ matrix.script }},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
+            HF_HUB_CACHE=/nas_aisw/datasets/hf_cache/hub,PPU_DEVICE_LABEL=${{ inputs.device }},PPU_RELEASE=${{ inputs.release }},PPU_SOURCE_SHA=${{ inputs.source_sha }},PPU_CI_SHA=${{ inputs.ci_sha }},PPU_WHEEL_PATH=${{ steps.payload.outputs.wheel_path }},PPU_WHEEL_SHA256=${{ steps.payload.outputs.wheel_sha256 }},PPU_EXPECTED_VLLM_VERSION=${{ steps.payload.outputs.wheel_version }},PPU_EXPECTED_DEVICES=${{ matrix.nproc }},PPU_TOOLCHAIN_DIR=/workspace/source/source/ci-wheel/toolchain,AREA=${{ matrix.area }},AREA_SCRIPT=${{ matrix.script }},PPU_SUMMARY_NAS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }},PPU_ARTIFACTORY_USER=${{ secrets.PPU_ARTIFACTORY_USER }},PPU_ARTIFACTORY_PASSWORD=${{ secrets.PPU_ARTIFACTORY_PASSWORD }}
           command: echo ${{ steps.payload.outputs.b64 }} | base64 -d > /tmp/ppu-run.sh && bash /tmp/ppu-run.sh
-      - name: Publish test summary
+      - name: Validate test results
         if: always()
+        shell: bash
         env:
-          AREA: ${{ matrix.area }}
-          RELEASE: ${{ inputs.release }}
-          DEVICE: ${{ inputs.device }}
+          NAS_DIR: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          WHEEL_VERSION: ${{ steps.payload.outputs.wheel_version }}
           WHEEL_SHA256: ${{ steps.payload.outputs.wheel_sha256 }}
+          PPU_STEP_OUTCOME: ${{ steps.ppu.outcome }}
           OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
           OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
           OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
           OUT_TASK_PODS: ${{ steps.ppu.outputs.task_pods }}
           OUT_LOG_ARTIFACT: ${{ steps.ppu.outputs.log_artifact_name }}
         run: |
-          NAS_SUM="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/${RELEASE}/${DEVICE}/${AREA}/summary.md"
+          result="FAILED"
+          worker_rc="$(cat "${NAS_DIR}/exit-code.txt" 2>/dev/null || true)"
+          if [ "${PPU_STEP_OUTCOME}" = "success" ] &&
+            [ -f "${NAS_DIR}/summary.md" ] && [ "${worker_rc}" = "0" ]; then
+            result="PASSED"
+          fi
+          # Always recreate this attempt's directory so result aggregation never
+          # falls back to an older attempt for an area that was rerun.
+          mkdir -p "${NAS_DIR}"
           {
-            echo "## ${RELEASE} / ${AREA} / ${DEVICE}"
-            echo "Source SHA: \`${SOURCE_SHA}\`"
-            echo "Wheel SHA256: \`${WHEEL_SHA256}\`"
-            if [ -f "${NAS_SUM}" ]; then
-              cat "${NAS_SUM}"
-            else
-              echo "summary.md was not returned; this area did not pass."
-              exit 1
-            fi
-            echo "K8s job: \`${OUT_JOB_NAME:-<empty>}\` · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: \`${OUT_TASK_PODS:-<empty>}\` · log: \`${OUT_LOG_ARTIFACT:-<empty>}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ppu-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}-${{ inputs.device }}-${{ matrix.area }}
-          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/${{ github.job }}/${{ inputs.release }}/${{ inputs.device }}/${{ matrix.area }}/
-          if-no-files-found: error
-
+            echo "Result: ${result}"
+            echo "Source SHA: ${SOURCE_SHA}"
+            echo "CI SHA: ${CI_SHA}"
+            echo "Wheel version: ${WHEEL_VERSION}"
+            echo "Wheel SHA256: ${WHEEL_SHA256}"
+            echo "K8s job: ${OUT_JOB_NAME:-<empty>} · ${OUT_JOB_STATUS:-<empty>} · ${OUT_DURATION:-<empty>}s · pods: ${OUT_TASK_PODS:-<empty>} · log: ${OUT_LOG_ARTIFACT:-<empty>}"
+          } > "${NAS_DIR}/job-info.txt"
+          [ "${result}" = "PASSED" ]
   release-finish:
     needs: [build-wheel, select-areas, test]
     if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
+    timeout-minutes: 15
     steps:
-      - name: Require successful build and all selected areas
+      - name: Checkout CI scripts
+        if: always()
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ci_sha }}
+          sparse-checkout: scripts/ppu
+          persist-credentials: false
+      - name: Build release result bundle
+        id: bundle
+        if: always()
+        env:
+          AREAS: ${{ inputs.areas }}
+          RELEASE: ${{ inputs.release }}
+          DEVICE: ${{ inputs.device }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_SHA: ${{ inputs.ci_sha }}
+          WHEEL_VERSION: ${{ needs.build-wheel.outputs.wheel_version }}
+          WHEEL_SHA256: ${{ needs.build-wheel.outputs.wheel_sha256 }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULTS_ROOT: /wl_nas/devops
+        run: |
+          python3 scripts/ppu/ppu_ci_nightly.py summary-release \
+            --results-root "${RESULTS_ROOT}" --release "${RELEASE}" \
+            --areas "${AREAS}" --device "${DEVICE}" \
+            --source-sha "${SOURCE_SHA}" --ci-sha "${CI_SHA}" \
+            --wheel-version "${WHEEL_VERSION}" --wheel-sha256 "${WHEEL_SHA256}" \
+            --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Upload release test results
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ppu-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.release }}-${{ inputs.device }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/test/${{ inputs.release }}/${{ inputs.device }}/
+          if-no-files-found: error
+      - name: Require successful build, areas, and result publication
+        if: always()
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
+          BUNDLE_OUTCOME: ${{ steps.bundle.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
         run: |
           python3 -c '
           import json, os, sys
           needs = json.loads(os.environ["NEEDS_JSON"])
           print(json.dumps(needs, indent=2))
           failed = [name for name, info in needs.items() if info.get("result") != "success"]
+          outcomes = {
+              "release result bundle": os.environ["BUNDLE_OUTCOME"],
+              "release artifact upload": os.environ["UPLOAD_OUTCOME"],
+          }
+          failed.extend(name for name, outcome in outcomes.items() if outcome != "success")
           if failed:
-              print("Unsuccessful jobs: " + ", ".join(failed))
+              print("Unsuccessful jobs or publication steps: " + ", ".join(failed))
               sys.exit(1)
           '

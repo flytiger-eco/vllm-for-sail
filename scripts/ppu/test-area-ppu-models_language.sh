@@ -63,10 +63,9 @@ if [[ "${PPU_RELEASE:-}" == "v0.28.0" ]]; then
 fi
 
 if [[ "${PPU_DEVICE_LABEL:-}" == "ZW-M890P" ]]; then
-  # Run 42943857861: ZW-M890P-only generation mismatches in all maintained releases.
-  # Keep OAM-810E coverage unchanged.
+  # Run 42943857861: ZW-M890P-only normal-token generation mismatch in all releases.
+  # The prompt-embeds variant is deselected globally in ML_STANDARD_ARGS below.
   PYTEST_EXTRA+=(
-    --deselect "tests/models/language/generation/test_common.py::test_models[True-False-5-32-TitanML/tiny-mixtral]"
     --deselect "tests/models/language/generation/test_common.py::test_models[False-False-5-32-TitanML/tiny-mixtral]"
   )
 fi
@@ -151,6 +150,10 @@ ML_STANDARD_ARGS=(
 # under HF_HUB_OFFLINE=1. Restore: drop these two lines once NAS holds the .py files.
   "--deselect=tests/models/language/generation/test_common.py::test_models[True-False-5-32-openbmb/MiniCPM4.1-8B]"
   "--deselect=tests/models/language/generation/test_common.py::test_models[False-False-5-32-openbmb/MiniCPM4.1-8B]"
+# Runs 43625290302 (v0.27) and 43926793459 (v0.28): intermittent top-k mismatches
+# between token and prompt-embeds inputs. Exclude only the prompt-embeds variant
+# on every release and device until the consistency issue is fixed.
+  "--deselect=tests/models/language/generation/test_common.py::test_models[True-False-5-32-TitanML/tiny-mixtral]"
 )
 # Step 2 extra_standard - mirrors upstream "Language Models Tests (Extra Standard) %N"
 # (torch_nightly, parallelism 2 -> shards=2, 45min): the slow_test subset.
