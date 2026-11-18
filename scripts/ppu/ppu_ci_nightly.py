@@ -768,6 +768,23 @@ def _release_area_manifest(area_dir, name, attempt):
         int((area_dir / "exit-code.txt").read_text().strip())
     except (OSError, ValueError):
         issues.append("invalid exit-code.txt")
+    job_info_path = area_dir / "job-info.txt"
+    if job_info_path.is_file():
+        try:
+            job_info = dict(
+                line.split(": ", 1)
+                for line in job_info_path.read_text().splitlines()
+                if ": " in line
+            )
+            job_result = job_info.get("Result")
+        except (OSError, UnicodeError):
+            job_result = None
+        if job_result not in ("PASSED", "FAILED"):
+            issues.append("invalid job-info Result")
+        elif job_result != status:
+            issues.append(
+                f"job-info Result {job_result} does not match test result {status}"
+            )
     return {
         "name": name,
         "attempt": attempt,

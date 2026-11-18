@@ -394,6 +394,7 @@ jobs:
           CI_SHA: ${{ inputs.ci_sha }}
           WHEEL_VERSION: ${{ steps.payload.outputs.wheel_version }}
           WHEEL_SHA256: ${{ steps.payload.outputs.wheel_sha256 }}
+          PPU_STEP_OUTCOME: ${{ steps.ppu.outcome }}
           OUT_JOB_NAME: ${{ steps.ppu.outputs.job_name }}
           OUT_JOB_STATUS: ${{ steps.ppu.outputs.job_status }}
           OUT_DURATION: ${{ steps.ppu.outputs.duration_seconds }}
@@ -402,7 +403,8 @@ jobs:
         run: |
           result="FAILED"
           worker_rc="$(cat "${NAS_DIR}/exit-code.txt" 2>/dev/null || true)"
-          if [ -f "${NAS_DIR}/summary.md" ] && [ "${worker_rc}" = "0" ]; then
+          if [ "${PPU_STEP_OUTCOME}" = "success" ] &&
+            [ -f "${NAS_DIR}/summary.md" ] && [ "${worker_rc}" = "0" ]; then
             result="PASSED"
           fi
           # Always recreate this attempt's directory so result aggregation never
