@@ -777,6 +777,24 @@ def _release_area_manifest(area_dir, name, attempt):
     }
 
 
+def _matches_current_build(area_dir, args):
+    """Earlier-attempt evidence is reusable only for the identical build."""
+    try:
+        info = dict(
+            line.split(": ", 1)
+            for line in (area_dir / "job-info.txt").read_text().splitlines()
+            if ": " in line
+        )
+    except OSError:
+        return False
+    return (
+        info.get("Source SHA") == args.source_sha
+        and info.get("CI SHA") == args.ci_sha
+        and info.get("Wheel version") == args.wheel_version
+        and info.get("Wheel SHA256") == args.wheel_sha256
+    )
+
+
 def command_release_summary(args):
     requested = [name for name in args.areas.replace(",", " ").split() if name]
     if args.areas.strip() and not requested:
@@ -798,9 +816,11 @@ def command_release_summary(args):
             area.name,
         )
         target = release_dir / area.name
-        if area_dir != target and area_dir.is_dir():
-            # Materialize earlier-attempt evidence so the bundle stays complete.
-            shutil.copytree(area_dir, target)
+        if area_dir != target:
+            # Materialize earlier-attempt evidence only for the same build;
+            # anything else fails closed as missing evidence.
+            if _matches_current_build(area_dir, args):
+                shutil.copytree(area_dir, target)
             area_dir = target
         area_results.append(_release_area_manifest(area_dir, area.name, attempt))
     complete_count = sum(item["complete"] for item in area_results)

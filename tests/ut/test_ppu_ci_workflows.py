@@ -840,6 +840,10 @@ def _write_nightly_area_evidence(release_dir, name, exit_code=0, shard_logs=True
     (area_dir / "run.log").write_text("worker output\n")
     (area_dir / "job-info.txt").write_text(
         f"Result: {'FAILED' if exit_code else 'PASSED'}\n"
+        f"Source SHA: {'a' * 40}\n"
+        f"CI SHA: {'c' * 40}\n"
+        "Wheel version: 0.26.0.dev1\n"
+        f"Wheel SHA256: {'b' * 64}\n"
     )
     (raw / "step.xml").write_text(xml)
     if shard_logs:
