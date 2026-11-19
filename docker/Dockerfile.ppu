@@ -9,12 +9,14 @@ ARG PPU_PIP_INDEX=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/s
 ARG PIP_DEFAULT_INDEX=https://pypi.org/simple
 ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
+ARG FFMPEG_VERSION=7.1.3
+ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
 ARG SAILIFY_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-03-0938/sailify-1.0.0-py3-none-any.whl
 ARG SAILIFY_WHEEL_SHA256=a9ad401a0319b7c95d112b3e69682427955fd7cfacec76255d3b4447e84c92a1
-ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1944/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261118.empty-cp312-cp312-linux_x86_64.whl
-ARG VLLM_WHEEL_SHA256=4c0f376deeae8c847647539ad5132935a0491ed71dac94d1abd316ab8d719f7e
-ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1944/vllm_sail-0.33.0rc2.dev9+g954fe2f-cp312-cp312-linux_x86_64.whl
-ARG VLLM_SAIL_WHEEL_SHA256=929af2915f74a55fd035b330aac51ef020e264bca1afa08e01c147115439afa1
+ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-19-1754/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261119.empty-cp312-cp312-linux_x86_64.whl
+ARG VLLM_WHEEL_SHA256=8b9bacadaef0b4bd0d3b2a6f9179c67c69ac1ae5f733125e04dfba4525b11039
+ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-19-1754/vllm_sail-0.33.0rc2.dev11+g31209fd-cp312-cp312-linux_x86_64.whl
+ARG VLLM_SAIL_WHEEL_SHA256=9b5a3f73e1cbaf400f6e6b95edb60c293047b6a1bb54d44bd2c265666befc710
 # The torchcodec wrapper index omits this existing wheel for the pinned base.
 ARG TORCHCODEC_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_generic/torchcodec/0.15.0+v0.1.0.ppu2.2.0/torchcodec-0.15.0+cu130torch2.13.0ubuntu2404ce-cp312-cp312-linux_x86_64.whl
 ARG TORCHCODEC_WHEEL_SHA256=6cacb4ece165e2eaf157f549526a315845b047c4d2c5a70895b8a0e0abe1d938
@@ -24,7 +26,7 @@ ARG PPU_PACKAGES="\
     cpm-kernels==1.0.11+v0.1.0.ppu2.2.0 \
     cuda-bindings==13.0.0+v0.1.0.ppu2.2.0 \
     cuda-python==13.0.0+v0.1.0.ppu2.2.0 \
-    deep_ep==2.2.0+v0.1.0.ppu2.2.0 \
+    deep_ep==2.2.1+v0.1.0.ppu2.2.0 \
     flashinfer-python==0.6.17+v0.1.0.ppu2.2.0 \
     mooncake==0.3.12.post1+v0.1.0.ppu2.2.0 \
     tilelang==0.1.12+v0.1.0.ppu2.2.1 \
@@ -32,10 +34,10 @@ ARG PPU_PACKAGES="\
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
     triton==3.7.0+v0.1.0.ppu2.2.0"
 ARG PPU_WHEEL_URLS="\
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1553/deep_gemm-1.1.0.dev316+v1.1.0.ppu2.2.1.g0fcb94b0-cp312-cp312-linux_x86_64.whl \
+    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-19-1223/deep_gemm-1.1.0.dev320+v1.1.0.ppu2.2.1.g0f9756f2-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1628/flash_mla-2.1.0.dev9+v1.0.0.ppu2.2.1.g2b70d8d-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1805/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-11-2345/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
+    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1805/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1607/pla-1.1.0-cp312-cp312-linux_x86_64.whl \
     https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1535/msa_for_sail-0.1.1+v0.1.0.ppu2.2.1-py3-none-any.whl"
 
@@ -59,14 +61,6 @@ ENV PATH="/opt/vllm/.venv/bin:${PPU_SDK}/bin:${PATH}" \
     LD_LIBRARY_PATH="${PPU_SDK}/lib:${LD_LIBRARY_PATH}"
 
 COPY --from=uv /uv /uvx /usr/local/bin/
-
-# DeepGEMM's CUDA-compatible JIT invokes cuobjdump to extract kernel symbols.
-RUN cuda_home="${CUDA_HOME:-${CUDA_PATH:-${PPU_SDK}/CUDA_SDK}}" \
-    && test -x "${PPU_SDK}/bin/hgobjdump" \
-    && if [ ! -e "${cuda_home}/bin/cuobjdump" ] && [ ! -L "${cuda_home}/bin/cuobjdump" ]; then \
-        ln -s "${PPU_SDK}/bin/hgobjdump" "${cuda_home}/bin/cuobjdump"; \
-    fi \
-    && test -x "${cuda_home}/bin/cuobjdump"
 
 RUN if [ -n "$UBUNTU_MIRROR" ]; then \
         for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
@@ -125,6 +119,28 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         -c base-constraints.txt \
         pip 'setuptools>=78.1.1,<81' 'setuptools-scm>=8,<9' \
         'setuptools-rust>=1.11' wheel packaging ninja pybind11 cython scikit-build-core
+
+FROM base AS ffmpeg_builder
+
+ARG MAX_JOBS
+ARG FFMPEG_VERSION
+ARG FFMPEG_SHA256
+
+WORKDIR /build/ffmpeg
+
+RUN apt-get update && apt-get install -y --no-install-recommends nasm zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --fail --location --retry 3 --connect-timeout 30 \
+        "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n${FFMPEG_VERSION}" \
+        -o /tmp/ffmpeg.tar.gz \
+    && echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/ffmpeg.tar.gz --strip-components=1 \
+    && ./configure --prefix=/opt/ffmpeg7 \
+        --enable-shared --disable-static --disable-programs \
+        --disable-doc --disable-debug --disable-autodetect --enable-zlib \
+    && make -j"${MAX_JOBS}" \
+    && make install
 
 FROM base AS ppu_kernels_builder
 
@@ -190,6 +206,9 @@ FROM base AS vllm_install
 
 ARG PPU_PIP_INDEX
 ARG PIP_DEFAULT_INDEX
+
+COPY --from=ffmpeg_builder /opt/ffmpeg7/lib /opt/ffmpeg7/lib
+ENV LD_LIBRARY_PATH="/opt/ffmpeg7/lib:${LD_LIBRARY_PATH}"
 
 COPY --from=ppu_kernels_builder /wheels /tmp/wheels/ppu
 COPY --from=vllm_wheels /wheels /tmp/wheels/vllm
@@ -290,6 +309,8 @@ print("fastapi:", version("fastapi"))
 print("ray:", version("ray"), "vllm-router:", version("vllm-router"))
 PY
 
+RUN .venv/bin/python -c 'from torchcodec.decoders import AudioDecoder, VideoDecoder'
+
 RUN mkdir -p /root/.cache/huggingface /root/.cache/vllm \
     && uv pip freeze --python .venv/bin/python > installed-packages.txt
 
@@ -298,6 +319,12 @@ FROM vllm_install AS framework
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gdb vim tmux htop less tree infiniband-diags perftest \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal \
+    && rustc --version && cargo --version
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python -c ppu-constraints.txt \
         --overrides runtime-overrides.txt \
@@ -319,7 +346,7 @@ RUN /opt/vllm/.venv/bin/python -m compileall -q -j 4 \
     /opt/vllm/.venv/lib/python3.12/site-packages
 
 ARG VLLM_BUILD_COMMIT=4ba787ec9959e566d3b587a796dff07673324da5
-ARG VLLM_SAIL_BUILD_COMMIT=954fe2f8234106983a1092677b9c5b2e3079e727
+ARG VLLM_SAIL_BUILD_COMMIT=31209fded2814c1b3396333c81b15c5f355419e0
 LABEL org.opencontainers.image.source="https://github.com/flytiger-eco/vllm-for-sail" \
       org.opencontainers.image.version="0.33.0" \
       org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
