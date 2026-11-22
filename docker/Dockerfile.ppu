@@ -2,7 +2,6 @@
 # Build from this Dockerfile-only branch; no local vLLM sources are required.
 # docker build --platform linux/amd64 -f docker/Dockerfile.ppu -t vllm:ppu .
 # docker build --platform linux/amd64 -f docker/Dockerfile.ppu --target framework -t vllm:ppu-dev .
-# Based on sglang-for-sail release/v0.5.23/docker/ppu.Dockerfile.
 # The v0.33.0 release line uses the exact empty vLLM + native vllm-sail pair below.
 ARG PPU_BASE_IMAGE=pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.1-2.13.0-ubuntu24.04-cuda13.0-py312-20261103
 ARG PPU_PIP_INDEX=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
@@ -11,12 +10,9 @@ ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
 ARG FFMPEG_VERSION=7.1.3
 ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
-ARG SAILIFY_WHEEL_URL=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-03-0938/sailify-1.0.0-py3-none-any.whl
-ARG SAILIFY_WHEEL_SHA256=a9ad401a0319b7c95d112b3e69682427955fd7cfacec76255d3b4447e84c92a1
-ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-20-1854/vllm-0.33.1.dev0+g4ba787ec9959e566d3b587a796dff07673324da5.d20261120.empty-cp312-cp312-linux_x86_64.whl
-ARG VLLM_WHEEL_SHA256=175b202bae2856e8310803fbed3d2cd8b5ac03b6568f4b6ec2cf856468449982
-ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-20-1854/vllm_sail-0.33.0rc2.dev15+g29ea3c7-cp312-cp312-linux_x86_64.whl
-ARG VLLM_SAIL_WHEEL_SHA256=9a31de5dd17ef6317d0b4f8ca06333896dc0729614b55f97508846f9b2ab0817
+ARG VLLM_PACKAGES="\
+    vllm==0.33.0+v0.1.0.ppu2.2.0 \
+    vllm-sail==0.33.0+ppu2.2.1"
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -33,6 +29,7 @@ ARG PPU_PACKAGES="\
     mooncake==0.3.12.post1+v0.1.0.ppu2.2.0 \
     msa_for_sail==0.1.1+v0.1.0.ppu2.2.0 \
     pla==1.1.0+v0.1.0.ppu2.2.0 \
+    sailify==1.0.0+ppu2.2.1 \
     tilelang==0.1.12+v0.1.0.ppu2.2.1 \
     torchaudio==2.11.0+v0.1.0.ppu2.2.0 \
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
@@ -144,17 +141,12 @@ FROM base AS ppu_kernels_builder
 
 ARG PPU_PIP_INDEX
 ARG MAX_JOBS
-ARG SAILIFY_WHEEL_URL
-ARG SAILIFY_WHEEL_SHA256
 ARG PPU_PACKAGES
 
 # Disable pip cache: wrapper sdists rename downloaded wheels and can hit EXDEV
 # across cache mounts. Build each dependency separately to identify failures.
 RUN source "${PPU_SDK}/envsetup.sh" ppu \
     && mkdir -p /wheels \
-    && curl --fail --location --retry 3 --connect-timeout 30 \
-        "${SAILIFY_WHEEL_URL}" -o /wheels/sailify-1.0.0-py3-none-any.whl \
-    && echo "${SAILIFY_WHEEL_SHA256}  /wheels/sailify-1.0.0-py3-none-any.whl" | sha256sum -c - \
     && for spec in ${PPU_PACKAGES}; do \
         echo "==> Building ${spec}" \
         && MAX_JOBS="${MAX_JOBS}" .venv/bin/python -m pip wheel \
@@ -182,17 +174,14 @@ PY
 
 FROM base AS vllm_wheels
 
-ARG VLLM_WHEEL_URL
-ARG VLLM_WHEEL_SHA256
-ARG VLLM_SAIL_WHEEL_URL
-ARG VLLM_SAIL_WHEEL_SHA256
+ARG PPU_PIP_INDEX
+ARG MAX_JOBS
+ARG VLLM_PACKAGES
 
-WORKDIR /wheels
-RUN curl --fail --location --retry 3 --connect-timeout 30 -O "${VLLM_WHEEL_URL}" \
-    && curl --fail --location --retry 3 --connect-timeout 30 -O "${VLLM_SAIL_WHEEL_URL}" \
-    && printf '%s  %s\n' \
-        "${VLLM_WHEEL_SHA256}" "${VLLM_WHEEL_URL##*/}" \
-        "${VLLM_SAIL_WHEEL_SHA256}" "${VLLM_SAIL_WHEEL_URL##*/}" | sha256sum -c -
+RUN source "${PPU_SDK}/envsetup.sh" ppu \
+    && MAX_JOBS="${MAX_JOBS}" .venv/bin/python -m pip wheel \
+        --no-cache-dir --no-deps --no-build-isolation \
+        --index-url "${PPU_PIP_INDEX}" --wheel-dir /wheels ${VLLM_PACKAGES}
 
 FROM base AS vllm_install
 
