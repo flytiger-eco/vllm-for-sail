@@ -17,9 +17,6 @@ ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-20-
 ARG VLLM_WHEEL_SHA256=175b202bae2856e8310803fbed3d2cd8b5ac03b6568f4b6ec2cf856468449982
 ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-20-1854/vllm_sail-0.33.0rc2.dev15+g29ea3c7-cp312-cp312-linux_x86_64.whl
 ARG VLLM_SAIL_WHEEL_SHA256=9a31de5dd17ef6317d0b4f8ca06333896dc0729614b55f97508846f9b2ab0817
-# The torchcodec wrapper index omits this existing wheel for the pinned base.
-ARG TORCHCODEC_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_generic/torchcodec/0.15.0+v0.1.0.ppu2.2.0/torchcodec-0.15.0+cu130torch2.13.0ubuntu2404ce-cp312-cp312-linux_x86_64.whl
-ARG TORCHCODEC_WHEEL_SHA256=6cacb4ece165e2eaf157f549526a315845b047c4d2c5a70895b8a0e0abe1d938
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -27,19 +24,20 @@ ARG PPU_PACKAGES="\
     cuda-bindings==13.0.0+v0.1.0.ppu2.2.0 \
     cuda-python==13.0.0+v0.1.0.ppu2.2.0 \
     deep_ep==2.2.1+v0.1.0.ppu2.2.0 \
+    deep_gemm==1.1.0+v1.1.0.ppu2.2.1 \
+    deep_select==1.0.0+v1.0.0.ppu2.2.1 \
+    flash_attn==2.8.2+v1.0.0.ppu2.2.1 \
+    flash_attn_3==3.0.0+v1.0.0.ppu2.2.1 \
+    flash_mla==2.1.0+v1.1.0.ppu2.2.1 \
     flashinfer-python==0.6.17+v0.1.0.ppu2.2.0 \
     mooncake==0.3.12.post1+v0.1.0.ppu2.2.0 \
+    msa_for_sail==0.1.1+v0.1.0.ppu2.2.0 \
+    pla==1.1.0+v0.1.0.ppu2.2.0 \
     tilelang==0.1.12+v0.1.0.ppu2.2.1 \
     torchaudio==2.11.0+v0.1.0.ppu2.2.0 \
     torchao==0.17.0+v0.1.0.ppu2.2.0 \
+    torchcodec==0.15.0+v0.1.0.ppu2.2.0 \
     triton==3.7.0+v0.1.0.ppu2.2.0"
-ARG PPU_WHEEL_URLS="\
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-19-1223/deep_gemm-1.1.0.dev320+v1.1.0.ppu2.2.1.g0f9756f2-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-20-2146/flash_mla-2.1.0.dev114+v1.1.0.ppu2.2.1.ge50a9128-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1805/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1805/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1607/pla-1.1.0-cp312-cp312-linux_x86_64.whl \
-    https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-18-1535/msa_for_sail-0.1.1+v0.1.0.ppu2.2.1-py3-none-any.whl"
 
 FROM ghcr.io/astral-sh/uv:0.8.18 AS uv
 
@@ -148,10 +146,7 @@ ARG PPU_PIP_INDEX
 ARG MAX_JOBS
 ARG SAILIFY_WHEEL_URL
 ARG SAILIFY_WHEEL_SHA256
-ARG TORCHCODEC_WHEEL_URL
-ARG TORCHCODEC_WHEEL_SHA256
 ARG PPU_PACKAGES
-ARG PPU_WHEEL_URLS
 
 # Disable pip cache: wrapper sdists rename downloaded wheels and can hit EXDEV
 # across cache mounts. Build each dependency separately to identify failures.
@@ -160,10 +155,7 @@ RUN source "${PPU_SDK}/envsetup.sh" ppu \
     && curl --fail --location --retry 3 --connect-timeout 30 \
         "${SAILIFY_WHEEL_URL}" -o /wheels/sailify-1.0.0-py3-none-any.whl \
     && echo "${SAILIFY_WHEEL_SHA256}  /wheels/sailify-1.0.0-py3-none-any.whl" | sha256sum -c - \
-    && curl --fail --location --retry 3 --connect-timeout 30 \
-        "${TORCHCODEC_WHEEL_URL}" -o /wheels/torchcodec-0.15.0+v0.1.0.ppu2.2.0-cp312-cp312-linux_x86_64.whl \
-    && echo "${TORCHCODEC_WHEEL_SHA256}  /wheels/torchcodec-0.15.0+v0.1.0.ppu2.2.0-cp312-cp312-linux_x86_64.whl" | sha256sum -c - \
-    && for spec in ${PPU_PACKAGES} ${PPU_WHEEL_URLS}; do \
+    && for spec in ${PPU_PACKAGES}; do \
         echo "==> Building ${spec}" \
         && MAX_JOBS="${MAX_JOBS}" .venv/bin/python -m pip wheel \
             --no-cache-dir --no-deps --no-build-isolation \
@@ -223,7 +215,6 @@ from pathlib import Path
 from zipfile import ZipFile
 from email.parser import BytesParser
 from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
 
 pins = dict(line.split("==", 1) for line in Path("base-constraints.txt").read_text().splitlines())
 for wheel in Path("/tmp/wheels/ppu").glob("*.whl"):
@@ -258,16 +249,13 @@ for wheel in Path("/tmp/wheels/vllm").glob("*.whl"):
         message = BytesParser().parsebytes(archive.read(metadata))
     for spec in message.get_all("Requires-Dist", []):
         requirement = Requirement(spec)
-        # DeepSelect is intentionally omitted: its wheel is unreachable from CI.
-        if canonicalize_name(requirement.name) == "deep-select":
-            print("Skipping unavailable DeepSelect:", spec)
-        elif requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
+        if requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
             runtime_requirements.add(spec)
 Path("vllm-runtime-requirements.txt").write_text("\n".join(sorted(runtime_requirements)) + "\n")
 PY
 
 # Resolve the extracted runtime dependencies under the PPU pins and overrides.
-# Install both vLLM wheels separately so the omitted DeepSelect is not resolved.
+# Install the vLLM wheels after resolving their runtime dependencies.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python \
         --index-url "${PPU_PIP_INDEX}" --extra-index-url "${PIP_DEFAULT_INDEX}" \
