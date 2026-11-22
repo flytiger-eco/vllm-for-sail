@@ -11,7 +11,7 @@ ARG MAX_JOBS=16
 ARG FFMPEG_VERSION=7.1.3
 ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
 ARG VLLM_PACKAGES="\
-    vllm==0.33.0+v0.1.0.ppu2.2.0 \
+    vllm==0.33.0+v0.1.0.ppu2.2.1 \
     vllm-sail==0.33.0+ppu2.2.1"
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
