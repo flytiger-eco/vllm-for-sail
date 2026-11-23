@@ -23,8 +23,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: x86-ubuntu2404-8-32
-    timeout-minutes: 300
+    runs-on: x86-ubuntu2404-64-256
+    timeout-minutes: 7200
     steps:
       - name: Checkout build ref
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -72,6 +72,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.rolling }}
           build-args: |
+            BUILDKIT_STEP_TIMEOUT: "3600s"
             VLLM_BUILD_COMMIT=${{ steps.meta.outputs.commit }}
 
       - name: Write image address to job summary

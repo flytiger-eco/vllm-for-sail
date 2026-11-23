@@ -149,10 +149,12 @@ RUN source "${PPU_SDK}/envsetup.sh" ppu \
     && mkdir -p /wheels \
     && for spec in ${PPU_PACKAGES}; do \
         echo "==> Building ${spec}" \
+        && (while true; do echo "...still downloading"; sleep 60; done) & HEARTBEAT=$! \
         && MAX_JOBS="${MAX_JOBS}" .venv/bin/python -m pip wheel \
-            --no-cache-dir --no-deps --no-build-isolation \
+            --timeout 3600 --retries 5 --no-cache-dir --no-deps --no-build-isolation \
             --index-url "${PPU_PIP_INDEX}" --wheel-dir /wheels "${spec}" \
-        || exit 1; \
+        && kill $HEARTBEAT \
+        || { kill $HEARTBEAT; exit 1; }; \
     done
 
 # Normalize wrapper wheel filenames using their actual distribution metadata.
