@@ -232,7 +232,8 @@ for wheel in Path("/tmp/wheels/ppu").glob("*.whl"):
 pins.update({
     "z3-solver": "4.15.4.0",
     "apache-tvm-ffi": "0.1.11",
-    "transformers": "5.16.1",
+    # vLLM 0.34 requires huggingface-hub>=2.0; transformers<5.18 caps it at <2.0.
+    "transformers": "5.19.0",
     "numpy": "1.26.4",
     "numba": "0.66.0+v0.1.0.ppu2.2.0",
     "llvmlite": "0.48.0",
