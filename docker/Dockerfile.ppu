@@ -15,11 +15,11 @@ ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
 ARG FFMPEG_VERSION=7.1.3
 ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
-ARG VLLM_WHEEL_DIR=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1534
-# Each entry: "<url-encoded wheel filename> <sha256 from wheel-manifest.json>".
-ARG VLLM_WHEELS="\
-    vllm-0.34.1.dev0%2Bg62d4bc3c7e33b1b6c906e233e6af2d3506c482ca.d20261124.empty-cp312-cp312-linux_x86_64.whl efcc9320b422945d4f12b10dbb8b811278be84886d3aeeaf60e9f086fc440052 \
-    vllm_sail-0.32.0rc2.dev93%2Bg6182001-cp312-cp312-linux_x86_64.whl b9707e52a95f058afcd65984584d2a960efdae4e83d28586cf115219529b2760"
+# Full wheel URLs and sha256 from the run's wheel-manifest.json.
+ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1534/vllm-0.34.1.dev0+g62d4bc3c7e33b1b6c906e233e6af2d3506c482ca.d20261124.empty-cp312-cp312-linux_x86_64.whl
+ARG VLLM_WHEEL_SHA256=efcc9320b422945d4f12b10dbb8b811278be84886d3aeeaf60e9f086fc440052
+ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1534/vllm_sail-0.32.0rc2.dev93+g6182001-cp312-cp312-linux_x86_64.whl
+ARG VLLM_SAIL_WHEEL_SHA256=b9707e52a95f058afcd65984584d2a960efdae4e83d28586cf115219529b2760
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -181,20 +181,25 @@ PY
 
 FROM base AS vllm_wheels
 
-ARG VLLM_WHEEL_DIR
-ARG VLLM_WHEELS
+ARG VLLM_WHEEL_URL
+ARG VLLM_WHEEL_SHA256
+ARG VLLM_SAIL_WHEEL_URL
+ARG VLLM_SAIL_WHEEL_SHA256
 
 # Fetch the nightly pair from the office artifactory pypi_tmp and verify the
-# wheel-manifest checksums. %2B decodes to '+' so the on-disk filenames stay
-# parseable by the downstream --no-deps installs.
+# wheel-manifest checksums. Keep the original basenames so the downstream
+# --no-deps installs see parseable wheel filenames.
 RUN mkdir -p /wheels \
-    && printf '%s\n' ${VLLM_WHEELS} | xargs -n2 | while read -r name sha; do \
-        file="${name//%2B/+}"; \
-        echo "==> Fetching ${VLLM_WHEEL_DIR}/${name}"; \
-        curl --fail --location --retry 3 --connect-timeout 30 \
-            -o "/wheels/${file}" "${VLLM_WHEEL_DIR}/${name}" || exit 1; \
-        echo "${sha}  /wheels/${file}" | sha256sum -c - || exit 1; \
-    done
+    && vllm_file="$(basename "${VLLM_WHEEL_URL}")" \
+    && echo "==> Fetching ${VLLM_WHEEL_URL}" \
+    && curl --fail --location --retry 3 --connect-timeout 30 \
+        -o "/wheels/${vllm_file}" "${VLLM_WHEEL_URL}" \
+    && echo "${VLLM_WHEEL_SHA256}  /wheels/${vllm_file}" | sha256sum -c - \
+    && sail_file="$(basename "${VLLM_SAIL_WHEEL_URL}")" \
+    && echo "==> Fetching ${VLLM_SAIL_WHEEL_URL}" \
+    && curl --fail --location --retry 3 --connect-timeout 30 \
+        -o "/wheels/${sail_file}" "${VLLM_SAIL_WHEEL_URL}" \
+    && echo "${VLLM_SAIL_WHEEL_SHA256}  /wheels/${sail_file}" | sha256sum -c -
 
 FROM base AS vllm_install
 
