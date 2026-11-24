@@ -3,9 +3,9 @@
 # docker build --platform linux/amd64 -f docker/Dockerfile.ppu -t vllm:ppu .
 # docker build --platform linux/amd64 -f docker/Dockerfile.ppu --target framework -t vllm:ppu-dev .
 # The v0.34.0 nightly line uses the empty vLLM + native vllm-sail dev pair from
-# vllm-sail "Nightly wheels" run 45319969051 (source 6182001, upstream 62d4bc3).
-# These commit-id wheels are published to pypi_tmp; fetch them at build time from
-# the office artifactory mirror, falling back to the public host. deep_select is
+# cudafy-for-sail "vLLM SAIL nightly wheels" run 45347125767 (source 6182001,
+# upstream 62d4bc3). These commit-id wheels are published to the office
+# artifactory pypi_tmp and fetched from there at build time. deep_select is
 # intentionally left on the release index and is overlaid separately per the test
 # guide.
 ARG PPU_BASE_IMAGE=pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.1-2.13.0-ubuntu24.04-cuda13.0-py312-20261103
@@ -15,12 +15,11 @@ ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
 ARG FFMPEG_VERSION=7.1.3
 ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
-ARG VLLM_WHEEL_DIR_PRIMARY=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1209
-ARG VLLM_WHEEL_DIR_FALLBACK=https://download.t-head.cn/artifactory/pypi_tmp/2026-11-24-1209
+ARG VLLM_WHEEL_DIR=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1534
 # Each entry: "<url-encoded wheel filename> <sha256 from wheel-manifest.json>".
 ARG VLLM_WHEELS="\
-    vllm-0.34.1.dev0%2Bg62d4bc3c7e33b1b6c906e233e6af2d3506c482ca.d20261124.empty-cp312-cp312-linux_x86_64.whl d3695b4493aa718bd47d4fb32cffcb05a5cf9ec60f37ae8eeca12946a0830935 \
-    vllm_sail-0.32.0rc2.dev93%2Bg6182001-cp312-cp312-linux_x86_64.whl df4799dbdf086826275e71e7e6988c20df9a5e8ab1e56c6c9dba8425ec9a8478"
+    vllm-0.34.1.dev0%2Bg62d4bc3c7e33b1b6c906e233e6af2d3506c482ca.d20261124.empty-cp312-cp312-linux_x86_64.whl efcc9320b422945d4f12b10dbb8b811278be84886d3aeeaf60e9f086fc440052 \
+    vllm_sail-0.32.0rc2.dev93%2Bg6182001-cp312-cp312-linux_x86_64.whl b9707e52a95f058afcd65984584d2a960efdae4e83d28586cf115219529b2760"
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -182,25 +181,18 @@ PY
 
 FROM base AS vllm_wheels
 
-ARG VLLM_WHEEL_DIR_PRIMARY
-ARG VLLM_WHEEL_DIR_FALLBACK
+ARG VLLM_WHEEL_DIR
 ARG VLLM_WHEELS
 
-# Fetch the nightly pair from pypi_tmp (office mirror first, public fallback) and
-# verify the wheel-manifest checksums. %2B decodes to '+' so the on-disk filenames
-# stay parseable by the downstream --no-deps installs.
+# Fetch the nightly pair from the office artifactory pypi_tmp and verify the
+# wheel-manifest checksums. %2B decodes to '+' so the on-disk filenames stay
+# parseable by the downstream --no-deps installs.
 RUN mkdir -p /wheels \
     && printf '%s\n' ${VLLM_WHEELS} | xargs -n2 | while read -r name sha; do \
         file="${name//%2B/+}"; \
-        fetched=0; \
-        for dir in "${VLLM_WHEEL_DIR_PRIMARY}" "${VLLM_WHEEL_DIR_FALLBACK}"; do \
-            echo "==> Trying ${dir}/${name}"; \
-            if curl --fail --location --retry 2 --connect-timeout 20 \
-                -o "/wheels/${file}" "${dir}/${name}"; then \
-                echo "==> Fetched ${file} from ${dir}"; fetched=1; break; \
-            fi; \
-        done; \
-        if [ "${fetched}" != 1 ]; then echo "ERROR: could not fetch ${name}" >&2; exit 1; fi; \
+        echo "==> Fetching ${VLLM_WHEEL_DIR}/${name}"; \
+        curl --fail --location --retry 3 --connect-timeout 30 \
+            -o "/wheels/${file}" "${VLLM_WHEEL_DIR}/${name}" || exit 1; \
         echo "${sha}  /wheels/${file}" | sha256sum -c - || exit 1; \
     done
 
