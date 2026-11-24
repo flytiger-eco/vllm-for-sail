@@ -1,6 +1,6 @@
 name: Release Docker Images Nightly (PPU)
 
-# Scheduled runs build v0.33.0; manual runs build their selected branch or tag.
+# Scheduled runs build v0.34.0; manual runs build their selected branch or tag.
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,7 @@ on:
     - cron: '0 16 * * *'
 
 concurrency:
-  group: ${{ github.workflow }}-v0.33.0
+  group: ${{ github.workflow }}-v0.34.0
   cancel-in-progress: false
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout build ref
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'refs/heads/v0.33.0' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'refs/heads/releases/0.34.0' }}
           submodules: recursive
           persist-credentials: false
 
@@ -47,8 +47,8 @@ jobs:
           short_sha="${commit:0:7}"
           {
             echo "image=ghcr.io/${owner_lc}/vllm-ppu-nightly"
-            echo "tag=v0.33.0-${date_tag}-cuda13.0.0-sdk2.2.1-${short_sha}"
-            echo "rolling=nightly"
+            echo "tag=v0.34.0-${date_tag}-cuda13.0.0-sdk2.2.1-${short_sha}"
+            echo "rolling=nightly-v0.34.0"
             echo "commit=${commit}"
           } >> "$GITHUB_OUTPUT"
 
