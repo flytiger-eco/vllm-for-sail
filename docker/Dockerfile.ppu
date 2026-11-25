@@ -237,6 +237,9 @@ pins.update({
     "numpy": "1.26.4",
     "numba": "0.66.0+v0.1.0.ppu2.2.0",
     "llvmlite": "0.48.0",
+    # vLLM SAIL's upstream reuse lane runs in the default runtime image.
+    "pytest": "9.1.0",
+    "tblib": "3.1.0",
 })
 Path("ppu-constraints.txt").write_text("".join(f"{n}=={v}\n" for n, v in sorted(pins.items())))
 Path("ppu-requirements.txt").write_text("\n".join(sorted(pins)) + "\n")
@@ -324,7 +327,7 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.ru
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python -c ppu-constraints.txt \
         --overrides runtime-overrides.txt \
-        pytest pytest-asyncio pytest-xdist pre-commit ruff py-spy \
+        pytest-asyncio pytest-xdist pre-commit ruff py-spy \
     && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         --no-deps numpy==1.26.4 \
     && uv pip install --python .venv/bin/python --index-url "${PPU_PIP_INDEX}" \
