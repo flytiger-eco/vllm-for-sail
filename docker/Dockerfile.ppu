@@ -237,7 +237,7 @@ pins.update({
     "numpy": "1.26.4",
     "numba": "0.66.0+v0.1.0.ppu2.2.0",
     "llvmlite": "0.48.0",
-    # vLLM SAIL's upstream reuse lane runs in the default runtime image.
+    # Test dependencies for the default runtime image.
     "pytest": "9.1.0",
     "tblib": "3.1.0",
 })
