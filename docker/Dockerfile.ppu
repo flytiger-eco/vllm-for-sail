@@ -8,6 +8,7 @@ ARG PPU_PIP_INDEX=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/s
 ARG PIP_DEFAULT_INDEX=https://pypi.org/simple
 ARG UBUNTU_MIRROR
 ARG MAX_JOBS=16
+ARG CPU_TEST_PYTHON_VERSION=3.12
 ARG FFMPEG_VERSION=7.1.3
 ARG FFMPEG_SHA256=e0b04c4b43d7e6d67cb6710334fb513adf13ac860532f30e1d0ac4c231f232fb
 ARG VLLM_PACKAGES="\
@@ -38,6 +39,14 @@ ARG PPU_PACKAGES="\
 
 FROM ghcr.io/astral-sh/uv:0.8.18 AS uv
 
+# Build separately for each Python version used by the CPU test matrix.
+FROM python:${CPU_TEST_PYTHON_VERSION}-bookworm AS cpu-test
+
+RUN python -m pip install --no-cache-dir \
+        'cmake>=3.26.1' pytest pytest-cov coverage ruff pre-commit \
+        'setuptools>=77.0.3,<81' 'setuptools-scm>=8,<9' wheel 'pydantic>=2' \
+        'tomli; python_version < "3.11"' 'transformers>=5.16.1,<5.20.0'
+
 FROM ${PPU_BASE_IMAGE} AS base
 
 ARG UBUNTU_MIRROR
@@ -49,6 +58,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive \
     PPU_SDK=/usr/local/PPU_SDK \
     PPU_HOME=/usr/local/PPU_SDK \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_PYTHON_DOWNLOADS=never \
     UV_LINK_MODE=copy
 # Preserve the base image's CUDA_HOME/CUDA_PATH for its actual SDK mode.
@@ -112,8 +122,10 @@ PY
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         -c base-constraints.txt \
-        pip 'setuptools>=78.1.1,<81' 'setuptools-scm>=8,<9' \
-        'setuptools-rust>=1.11' wheel packaging ninja pybind11 cython scikit-build-core
+        pip 'cmake>=3.26.1' 'setuptools>=78.1.1,<81' 'setuptools-scm>=8,<9' \
+        'setuptools-rust>=1.11' wheel 'packaging>=24.2' ninja \
+        'jinja2>=3.1.6' regex build pybind11 cython scikit-build-core \
+        'protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*'
 
 FROM base AS ffmpeg_builder
 
@@ -219,6 +231,11 @@ pins.update({
     "numba": "0.66.0+v0.1.0.ppu2.2.0",
     "llvmlite": "0.48.0",
     "pytest": "9.1.0",
+    "pytest-cov": "7.1.0",
+    "coverage": "7.17.5",
+    "ruff": "0.17.6",
+    "pre-commit": "4.7.0",
+    "nvtx": "0.2.17",
     "tblib": "3.1.0",
 })
 Path("ppu-constraints.txt").write_text("".join(f"{n}=={v}\n" for n, v in sorted(pins.items())))
@@ -253,7 +270,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --index-strategy unsafe-best-match --no-build-isolation \
         --overrides runtime-overrides.txt \
         -c ppu-constraints.txt -r ppu-requirements.txt \
-        -r vllm-runtime-requirements.txt ray vllm-router \
+        -r vllm-runtime-requirements.txt ray vllm-router 'pydantic>=2' \
     && uv pip install --python .venv/bin/python --no-deps \
         /tmp/wheels/vllm/vllm-*.whl \
         /tmp/wheels/vllm/vllm_sail-*.whl \
@@ -307,7 +324,7 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.ru
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv/bin/python -c ppu-constraints.txt \
         --overrides runtime-overrides.txt \
-        pytest-asyncio pytest-xdist pre-commit ruff py-spy \
+        pytest-asyncio pytest-xdist py-spy \
     && uv pip install --python .venv/bin/python --index-url "${PIP_DEFAULT_INDEX}" \
         --no-deps numpy==1.26.4 \
     && uv pip install --python .venv/bin/python --index-url "${PPU_PIP_INDEX}" \
