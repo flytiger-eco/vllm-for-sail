@@ -5,9 +5,7 @@
 # The v0.34.0 nightly line uses the empty vLLM + native vllm-sail dev pair from
 # cudafy-for-sail "vLLM SAIL nightly wheels" run 45347125767 (source 6182001,
 # upstream 62d4bc3). These commit-id wheels are published to the office
-# artifactory pypi_tmp and fetched from there at build time. deep_select is
-# intentionally left on the release index and is overlaid separately per the test
-# guide.
+# artifactory pypi_tmp and fetched from there at build time.
 ARG PPU_BASE_IMAGE=pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.1-2.13.0-ubuntu24.04-cuda13.0-py312-20261103
 ARG PPU_PIP_INDEX=https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
 ARG PIP_DEFAULT_INDEX=https://pypi.org/simple
@@ -21,6 +19,8 @@ ARG VLLM_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-
 ARG VLLM_WHEEL_SHA256=efcc9320b422945d4f12b10dbb8b811278be84886d3aeeaf60e9f086fc440052
 ARG VLLM_SAIL_WHEEL_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-24-1534/vllm_sail-0.32.0rc2.dev93+g6182001-cp312-cp312-linux_x86_64.whl
 ARG VLLM_SAIL_WHEEL_SHA256=b9707e52a95f058afcd65984584d2a960efdae4e83d28586cf115219529b2760
+ARG DEEP_SELECT_ARCHIVE_URL=https://pkg.flytiger-eco.com/artifactory/pypi_tmp/cuda/deep_select/1.0.0/1.0.0%2B27524c1.ppu2.2.1/deep_select-1.0.0-oe-cuda13.0.0-pytorch2.13.0-ubuntu2404-py312-nccl-wrapper-v2.2.2.tar.gz
+ARG DEEP_SELECT_ARCHIVE_SHA256=b79f7f4ebd0ad7fc9bc0fd799aa9725d9765e468d8b787c0443e24cc7298598f
 # Keep SDK-specific local versions; never substitute upstream CUDA packages.
 ARG PPU_PACKAGES="\
     acext==1.1.0+v0.2.0.ppu2.2.0 \
@@ -29,7 +29,6 @@ ARG PPU_PACKAGES="\
     cuda-python==13.0.0+v0.1.0.ppu2.2.0 \
     deep_ep==2.2.1+v0.1.0.ppu2.2.0 \
     deep_gemm==1.1.0+v1.1.0.ppu2.2.1 \
-    deep_select==1.0.0+v1.0.0.ppu2.2.1 \
     flash_attn==2.8.2+v1.0.0.ppu2.2.1 \
     flash_attn_3==3.0.0+v1.0.0.ppu2.2.1 \
     flash_mla==2.1.0+v1.1.0.ppu2.2.1 \
@@ -161,6 +160,8 @@ FROM base AS ppu_kernels_builder
 ARG PPU_PIP_INDEX
 ARG MAX_JOBS
 ARG PPU_PACKAGES
+ARG DEEP_SELECT_ARCHIVE_URL
+ARG DEEP_SELECT_ARCHIVE_SHA256
 
 # Disable pip cache: wrapper sdists rename downloaded wheels and can hit EXDEV
 # across cache mounts. Build each dependency separately to identify failures.
@@ -173,6 +174,12 @@ RUN source "${PPU_SDK}/envsetup.sh" ppu \
             --index-url "${PPU_PIP_INDEX}" --wheel-dir /wheels "${spec}" \
         || exit 1; \
     done
+
+RUN curl --fail --location --retry 3 --connect-timeout 30 \
+        -o /tmp/deep_select.tar.gz "${DEEP_SELECT_ARCHIVE_URL}" \
+    && echo "${DEEP_SELECT_ARCHIVE_SHA256}  /tmp/deep_select.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/deep_select.tar.gz -C /wheels \
+    && rm /tmp/deep_select.tar.gz
 
 # Normalize wrapper wheel filenames using their actual distribution metadata.
 RUN .venv/bin/python - <<'PY'
